@@ -1111,16 +1111,19 @@
                 {/* Vertical spine */}
                 <div style={{position:'absolute',left:'1.5rem',top:'4px',bottom:'4px',width:'2px',background:'linear-gradient(180deg,#1e3a5f,#DAAA00 60%,#22c55e)'}}/>
                 {[
-                  {year:'2002',label:'Orbitrap invented',sub:'Makarov, Thermo Fisher · ultra-high mass accuracy · defines the 3D era (RT × m/z × intensity)',color:'#475569'},
-                  {year:'2005',label:'LTQ-Orbitrap first commercial',sub:'Orbitrap enters proteomics labs worldwide · 2D LC-MS/MS becomes the gold standard',color:'#64748b'},
-                  {year:'2011',label:'Q Exactive launched',sub:'Thermo Fisher · HCD + Orbitrap · benchmarks routinely use 1 µg HeLa input',color:'#6b7280'},
-                  {year:'2015',label:'PASEF concept published',sub:'Meier, Beck & Mann · Mol. Cell. Proteomics · ion mobility-aware fragmentation triggers — the theoretical foundation',color:'#334155'},
-                  {year:'2017',label:'timsTOF prototype + PASEF demonstrated',sub:'Bruker & Mann lab · ASMS 2017 · trapped ion mobility + PASEF shown on prototype hardware',color:'#3b82f6',is4D:true},
-                  {year:'2018',label:'timsTOF commercial launch + PASEF paper',sub:'Bruker timsTOF released · Meier et al., JASMS · ddaPASEF: 5,000+ proteins from 200 ng HeLa in 60 min',color:'#60a5fa',is4D:true},
-                  {year:'2020',label:'timsTOF Pro released',sub:'Bruker · improved TIMS resolution · ~6,000 proteins from 200 ng HeLa · single-cell feasibility demonstrated',color:'#38bdf8',is4D:true},
-                  {year:'2021',label:'diaPASEF published',sub:'Florian Meier et al., Nature Methods · DIA on timsTOF · ~7,000–8,000 proteins from 200 ng HeLa in 60 min',color:'#22c55e',is4D:true},
-                  {year:'2023',label:'timsTOF Ultra + Astral launched',sub:'Bruker Ultra: higher mobility resolution, ~6,000 proteins from 100 ng HeLa · Thermo Astral: no IMS, ~200 Hz MS2',color:'#a855f7',is4D:true},
-                  {year:'2024',label:'timsTOF Ultra 2 · carrier-free single cell',sub:'Bruker · 1,000–2,000 proteins from single K562 cells (~150 pg) without carrier · still the only TIMS + PASEF platform',color:'#DAAA00',is4D:true},
+                  {year:'1989',label:'ESI & MALDI — proteins by mass spec',sub:'Fenn (ESI, Science 1989) + Karas & Hillenkamp (MALDI, 1988) · Nobel Prize 2002 · for the first time intact proteins could be ionized and weighed — proteomics becomes possible',color:'#334155'},
+                  {year:'2001',label:'Shotgun proteomics / MudPIT',sub:'Washburn, Wolters & Yates · Nature Biotechnology · 2D LC-MS/MS maps entire proteomes from complex mixtures · the 2D era (RT × m/z) begins in earnest',color:'#475569'},
+                  {year:'2002',label:'Orbitrap invented',sub:'Makarov, Thermo Fisher · ultra-high mass accuracy (< 5 ppm) without a magnetic field · defines the 3D era (RT × m/z × intensity)',color:'#475569'},
+                  {year:'2005',label:'LTQ-Orbitrap first commercial',sub:'Orbitrap enters proteomics labs worldwide · 2D LC-MS/MS becomes the gold standard · 1 µg HeLa = benchmark input',color:'#64748b'},
+                  {year:'2011',label:'Q Exactive launched',sub:'Thermo Fisher · quadrupole isolation + HCD + Orbitrap · high-throughput DDA defined for a decade · benchmarks routinely use 1 µg HeLa',color:'#6b7280'},
+                  {year:'2015',label:'PASEF concept published',sub:'Meier, Beck & Mann · Mol. Cell. Proteomics · ion mobility-aware fragmentation triggers — the theoretical foundation for 4D proteomics',color:'#334155'},
+                  {year:'2017',label:'timsTOF prototype + PASEF demonstrated',sub:'Bruker & Mann lab · ASMS 2017 · trapped ion mobility + PASEF shown on prototype hardware · 4D dimension (CCS) enters the picture',color:'#3b82f6',is4D:true},
+                  {year:'2018',label:'timsTOF commercial launch + PASEF paper',sub:'Bruker timsTOF released · Meier et al., JASMS · ddaPASEF: 5,000+ proteins from 200 ng HeLa in 60 min · 100% ion utilization via TIMS',color:'#60a5fa',is4D:true},
+                  {year:'2020',label:'timsTOF Pro released',sub:'Bruker · improved TIMS resolution + dual TIMS · ~6,000 proteins from 200 ng HeLa · single-cell feasibility first demonstrated with carrier approach',color:'#38bdf8',is4D:true},
+                  {year:'2021',label:'diaPASEF published + timsTOF SCP launched',sub:'Meier et al., Nature Methods · >8,000 proteins from 200 ng HeLa in 60 min · timsTOF SCP debuts at ASMS — first instrument purpose-built for single-cell proteomics',color:'#22c55e',is4D:true},
+                  {year:'2022',label:'timsTOF Pro 2 + TIMScore + diaPASEF expansion',sub:'Bruker · >8,000 proteins in 35-min gradients · TIMScore ML CCS prediction: +25% phosphopeptides, 19% isobaric pair separation · PaSER GPU real-time streaming · Pro 2 / SCP / fleX all DIA-capable',color:'#06b6d4',is4D:true},
+                  {year:'2023',label:'timsTOF Ultra + Thermo Astral launched',sub:'Bruker Ultra: 300 Hz PASEF, CaptiveSpray Ultra 2, Vista Scan dia-PASEF, MOMA isobaric separation · Thermo Astral: no IMS, ~200 Hz MS2 — competing design philosophies',color:'#a855f7',is4D:true},
+                  {year:'2024',label:'timsTOF Ultra 2 · carrier-free single cell',sub:'Bruker (ASMS June 2024) · Athena Ion Processor (AIP) · up to 4,000 proteins/single HEK-293T — no carrier, no MBR · +50% protein groups, +100% peptides at 25 pg vs. Ultra · OmniScape + GlycoScape · field-upgradeable from Ultra/SCP',color:'#DAAA00',is4D:true},
                 ].map((ev,i)=>(
                   <div key={i} style={{display:'flex',gap:'0.75rem',marginBottom:'0.55rem',alignItems:'flex-start'}}>
                     <div style={{width:'2.8rem',minWidth:'2.8rem',marginLeft:'0.5rem',zIndex:1,background:'var(--bg)',textAlign:'right',paddingRight:'0.4rem'}}>
