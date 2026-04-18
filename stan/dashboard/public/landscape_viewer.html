@@ -1,0 +1,1022 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>4D Landscape Viewer — ZIGGY</title>
+<script src="vendor/plotly.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0d1117;
+    --surface:  #161b22;
+    --panel:    #1c2128;
+    --border:   #30363d;
+    --accent:   #58a6ff;
+    --accent2:  #f78166;
+    --accent3:  #3fb950;
+    --text:     #e6edf3;
+    --muted:    #8b949e;
+    --tag-bg:   #21262d;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 13px;
+    overflow: hidden;
+  }
+
+  /* ── Layout ── */
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  #topbar {
+    display: flex; align-items: center; gap: 16px;
+    padding: 8px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  #topbar h1 {
+    font-size: 14px; font-weight: 600; color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+    white-space: nowrap;
+  }
+  #topbar h1 .badge {
+    background: linear-gradient(135deg, #1f6feb 0%, #388bfd 100%);
+    color: #fff; font-size: 10px; padding: 2px 6px;
+    border-radius: 10px; font-weight: 700; letter-spacing: .5px;
+  }
+  #topbar a { color: var(--muted); text-decoration: none; font-size: 12px; }
+  #topbar a:hover { color: var(--accent); }
+
+  .sep { width: 1px; height: 24px; background: var(--border); flex-shrink: 0; }
+
+  /* ── Controls bar ── */
+  #controls {
+    display: flex; align-items: flex-end; gap: 10px;
+    padding: 8px 12px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  .ctrl-group { display: flex; flex-direction: column; gap: 3px; }
+  .ctrl-group label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .ctrl-group select, .ctrl-group input[type=number] {
+    background: var(--tag-bg); border: 1px solid var(--border);
+    color: var(--text); border-radius: 4px; padding: 4px 8px;
+    font-size: 12px; min-width: 140px;
+  }
+  .ctrl-group select:focus, .ctrl-group input:focus {
+    outline: none; border-color: var(--accent);
+  }
+
+  .run-group { border-left: 3px solid var(--accent); padding-left: 8px; }
+  .run-group.b { border-color: var(--accent2); }
+  .run-group.c { border-color: var(--accent3); }
+
+  .ctrl-row { display: flex; gap: 6px; align-items: flex-end; }
+  .ctrl-row input[type=number] { width: 72px; min-width: 0; }
+
+  .btn {
+    padding: 5px 12px; border: 1px solid var(--border);
+    border-radius: 4px; background: var(--tag-bg);
+    color: var(--text); cursor: pointer; font-size: 12px;
+    white-space: nowrap; transition: all .15s;
+  }
+  .btn:hover { background: var(--border); }
+  .btn.primary { background: #1f6feb; border-color: #388bfd; color: #fff; }
+  .btn.primary:hover { background: #388bfd; }
+  .btn.active { background: #21262d; border-color: var(--accent); color: var(--accent); }
+
+  /* ── Mode toggle ── */
+  .mode-btns { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+  .mode-btns .btn { border: none; border-right: 1px solid var(--border); border-radius: 0; padding: 5px 10px; }
+  .mode-btns .btn:last-child { border-right: none; }
+  .mode-btns .btn.active { background: #1f6feb33; color: var(--accent); }
+
+  /* ── Main plots area ── */
+  #main { flex: 1; display: flex; overflow: hidden; }
+
+  #plots-container {
+    flex: 1; display: flex; gap: 2px;
+    padding: 6px; background: var(--bg);
+    overflow: hidden;
+  }
+
+  .plot-panel {
+    flex: 1; display: flex; flex-direction: column;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; overflow: hidden; min-width: 0;
+  }
+  .plot-panel.hidden { display: none; }
+
+  .plot-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 10px; border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .plot-header .run-label {
+    font-size: 11px; font-weight: 600;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .plot-header .run-label .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+  }
+  .plot-header .run-label .dot.a { background: var(--accent); }
+  .plot-header .run-label .dot.b { background: var(--accent2); }
+  .plot-header .run-label .dot.c { background: var(--accent3); }
+  .plot-header .stats { font-size: 10px; color: var(--muted); }
+
+  .plot-div { flex: 1; min-height: 0; }
+
+  /* ── Inspector sidebar ── */
+  #inspector {
+    width: 220px; flex-shrink: 0;
+    background: var(--panel); border-left: 1px solid var(--border);
+    padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+  }
+  #inspector h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+  .insp-row { display: flex; justify-content: space-between; font-size: 12px; }
+  .insp-row .key { color: var(--muted); }
+  .insp-row .val { color: var(--text); font-weight: 600; }
+  .insp-bar-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .insp-bar-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+  .insp-bar-row .run-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .insp-bar-track { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .insp-bar-fill { height: 100%; border-radius: 3px; }
+  .insp-bar-fill.a { background: var(--accent); }
+  .insp-bar-fill.b { background: var(--accent2); }
+  .insp-bar-fill.c { background: var(--accent3); }
+  .insp-bar-val { font-size: 10px; color: var(--muted); min-width: 32px; text-align: right; }
+
+  .insp-empty { color: var(--muted); font-size: 11px; text-align: center; padding: 20px 0; }
+
+  /* ── Loading overlay ── */
+  .loading-overlay {
+    position: absolute; inset: 0; display: flex;
+    align-items: center; justify-content: center;
+    background: rgba(13,17,23,.75); z-index: 10;
+    font-size: 12px; color: var(--muted); gap: 8px;
+    border-radius: 6px;
+  }
+  .spinner {
+    width: 16px; height: 16px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .6s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .plot-panel { position: relative; }
+
+  /* ── Status bar ── */
+  #statusbar {
+    padding: 3px 12px; background: var(--surface);
+    border-top: 1px solid var(--border);
+    font-size: 10px; color: var(--muted);
+    display: flex; gap: 16px; align-items: center; flex-shrink: 0;
+  }
+  #statusbar .sep { width: 1px; height: 12px; }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .status-dot.ok { background: var(--accent3); }
+  .status-dot.loading { background: #f0883e; animation: pulse 1s ease infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* ── Range slider ── */
+  input[type=range] {
+    -webkit-appearance: none; width: 120px; height: 4px;
+    background: var(--border); border-radius: 2px; cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 12px; height: 12px;
+    background: var(--accent); border-radius: 50%;
+  }
+
+  /* ── Diff legend ── */
+  #diff-legend {
+    display: none; align-items: center; gap: 6px;
+    padding: 4px 8px; background: var(--tag-bg);
+    border-radius: 4px; font-size: 11px; color: var(--muted);
+  }
+  .grad-bar {
+    width: 80px; height: 10px; border-radius: 3px;
+    background: linear-gradient(to right, #f78166, #161b22, #58a6ff);
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Top bar ── -->
+  <div id="topbar">
+    <h1>4D Landscape Viewer <span class="badge">BETA</span></h1>
+    <a href="/">← ZIGGY</a>
+    <div class="sep"></div>
+    <span style="color:var(--muted);font-size:11px;">Ion Mobility Landscape · m/z × 1/K₀ × Intensity</span>
+  </div>
+
+  <!-- ── Controls ── -->
+  <div id="controls">
+
+    <!-- Run A -->
+    <div class="ctrl-group run-group a">
+      <label>Run A</label>
+      <select id="selA"><option value="">— select run —</option></select>
+    </div>
+
+    <!-- Run B -->
+    <div class="ctrl-group run-group b">
+      <label>Run B</label>
+      <select id="selB"><option value="">— none —</option></select>
+    </div>
+
+    <!-- Run C -->
+    <div class="ctrl-group run-group c">
+      <label>Run C</label>
+      <select id="selC"><option value="">— none —</option></select>
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- RT window -->
+    <div class="ctrl-group">
+      <label>RT window (min)</label>
+      <div class="ctrl-row">
+        <input type="number" id="rtLo" value="0" step="1" min="0" placeholder="0">
+        <span style="color:var(--muted);align-self:center">–</span>
+        <input type="number" id="rtHi" value="999" step="1" placeholder="end">
+        <button class="btn" id="btnFullRt" style="font-size:11px;padding:4px 8px">Full</button>
+      </div>
+    </div>
+
+    <!-- m/z range -->
+    <div class="ctrl-group">
+      <label>m/z range</label>
+      <div class="ctrl-row">
+        <input type="number" id="mzLo" value="300" step="10" min="100" placeholder="300">
+        <span style="color:var(--muted);align-self:center">–</span>
+        <input type="number" id="mzHi" value="1500" step="10" placeholder="1500">
+        <button class="btn" id="btnFullMz" style="font-size:11px;padding:4px 8px">Full</button>
+      </div>
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- View mode -->
+    <div class="ctrl-group">
+      <label>View</label>
+      <div class="mode-btns">
+        <button class="btn active" id="modeScape" data-mode="landscape">Landscape</button>
+        <button class="btn" id="modeDiff"  data-mode="diff">A − B</button>
+        <button class="btn" id="modeOver"  data-mode="overlay">Overlay</button>
+      </div>
+    </div>
+
+    <!-- Resolution -->
+    <div class="ctrl-group">
+      <label>Resolution</label>
+      <div class="mode-btns">
+        <button class="btn" id="resFast" data-res="fast">Fast</button>
+        <button class="btn active" id="resMed"  data-res="med">Med</button>
+        <button class="btn" id="resHi"   data-res="hi">Hi</button>
+      </div>
+    </div>
+
+    <!-- Sync camera -->
+    <div class="ctrl-group">
+      <label>Sync</label>
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;margin-top:4px">
+        <input type="checkbox" id="chkSync" checked>
+        <span style="font-size:11px;color:var(--text)">Link cameras</span>
+      </label>
+    </div>
+
+    <!-- Smoothing -->
+    <div class="ctrl-group">
+      <label>Smooth</label>
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;margin-top:4px">
+        <input type="checkbox" id="chkSmooth" checked>
+        <span style="font-size:11px;color:var(--text)">Gaussian blur</span>
+      </label>
+    </div>
+
+    <div style="margin-left:auto;display:flex;align-items:flex-end;gap:8px">
+      <div id="diff-legend">
+        <span style="color:var(--accent2)">A higher</span>
+        <div class="grad-bar"></div>
+        <span style="color:var(--accent)">B higher</span>
+      </div>
+      <button class="btn primary" id="btnRender">Render</button>
+    </div>
+  </div>
+
+  <!-- ── Main ── -->
+  <div id="main">
+    <div id="plots-container">
+      <div class="plot-panel" id="panelA">
+        <div class="plot-header">
+          <span class="run-label"><span class="dot a"></span><span id="labelA">Run A</span></span>
+          <span class="stats" id="statsA"></span>
+        </div>
+        <div class="plot-div" id="plotA"></div>
+      </div>
+      <div class="plot-panel" id="panelB">
+        <div class="plot-header">
+          <span class="run-label"><span class="dot b"></span><span id="labelB">Run B</span></span>
+          <span class="stats" id="statsB"></span>
+        </div>
+        <div class="plot-div" id="plotB"></div>
+      </div>
+      <div class="plot-panel hidden" id="panelC">
+        <div class="plot-header">
+          <span class="run-label"><span class="dot c"></span><span id="labelC">Run C</span></span>
+          <span class="stats" id="statsC"></span>
+        </div>
+        <div class="plot-div" id="plotC"></div>
+      </div>
+      <!-- Diff panel (overlay mode) -->
+      <div class="plot-panel hidden" id="panelDiff">
+        <div class="plot-header">
+          <span class="run-label" style="color:var(--muted)">Differential · A − B</span>
+          <span class="stats" id="statsDiff"></span>
+        </div>
+        <div class="plot-div" id="plotDiff"></div>
+      </div>
+    </div>
+
+    <!-- Inspector -->
+    <div id="inspector">
+      <h3>Peak Inspector</h3>
+      <div id="inspContent">
+        <div class="insp-empty">Click any peak<br>to compare intensity</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Status bar ── -->
+  <div id="statusbar">
+    <span class="status-dot" id="statusDot"></span>
+    <span id="statusMsg">Ready — select runs and click Render</span>
+    <span class="sep"></span>
+    <span id="statusIons"></span>
+  </div>
+
+</div><!-- #app -->
+
+<script>
+'use strict';
+
+// ───────────────────────────────────────────────────────────────
+// State
+// ───────────────────────────────────────────────────────────────
+const S = {
+  ions: { A: null, B: null, C: null },   // raw ion arrays from API
+  grids: { A: null, B: null, C: null },  // built grids
+  mode: 'landscape',   // 'landscape' | 'diff' | 'overlay'
+  res: 'med',
+  syncCam: true,
+  smooth: true,
+  camera: null,        // shared Plotly camera state
+  syncing: false,      // prevent re-entrant camera sync
+};
+
+const RES_MAP = { fast: [80, 50], med: [130, 80], hi: [220, 130] };
+const K0_LO = 0.48, K0_HI = 1.82;
+const COLORS = { A: '#58a6ff', B: '#f78166', C: '#3fb950' };
+const COLOR_SCALES = {
+  A: [[0,'#0d1117'],[0.15,'#1c4e80'],[0.45,'#1f6feb'],[0.75,'#58a6ff'],[1,'#cae8ff']],
+  B: [[0,'#0d1117'],[0.15,'#5a1e0f'],[0.45,'#b03a2e'],[0.75,'#f78166'],[1,'#ffd3cc']],
+  C: [[0,'#0d1117'],[0.15,'#0f3322'],[0.45,'#1a7f37'],[0.75,'#3fb950'],[1,'#ceefce']],
+  diff: [[0,'#f78166'],[0.35,'#8b1a0e'],[0.5,'#161b22'],[0.65,'#0a2e6e'],[1,'#58a6ff']],
+};
+
+// ───────────────────────────────────────────────────────────────
+// Boot: load run list
+// ───────────────────────────────────────────────────────────────
+async function loadRunList() {
+  try {
+    const res = await fetch('/api/runs?limit=300');
+    const runs = await res.json();
+    const opts = runs.map(r =>
+      `<option value="${r.id}">${r.run_name || r.id} — ${r.instrument || ''}</option>`
+    ).join('');
+    ['selA','selB','selC'].forEach((id, i) => {
+      const sel = document.getElementById(id);
+      const none = i === 0 ? '— select run —' : '— none —';
+      sel.innerHTML = `<option value="">${none}</option>` + opts;
+    });
+    setStatus('ok', `${runs.length} runs loaded`);
+  } catch(e) {
+    setStatus('loading', 'Could not load run list: ' + e.message);
+  }
+}
+
+// ───────────────────────────────────────────────────────────────
+// Fetch ions for one run
+// ───────────────────────────────────────────────────────────────
+async function fetchIons(runId) {
+  const r = await fetch(`/api/runs/${runId}/mobility-3d?max_features=20000`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ───────────────────────────────────────────────────────────────
+// Grid builder
+// ───────────────────────────────────────────────────────────────
+function buildGrid(ions, rtLoMin, rtHiMin, mzLo, mzHi, W, H) {
+  // ions: {mz, rt, mobility, log_int, charge, n_total}
+  // rt in the API is in seconds; rtLoMin/rtHiMin are in minutes
+  const rtLo = rtLoMin * 60;
+  const rtHi = rtHiMin * 60;
+
+  const mzStep = (mzHi - mzLo) / W;
+  const k0Step = (K0_HI - K0_LO) / H;
+
+  // Use a flat Float64Array for speed
+  const flat = new Float64Array(W * H);
+  const nArr = ions.mz;
+  const mobArr = ions.mobility;
+  const logArr = ions.log_int;
+  const rtArr = ions.rt;
+
+  let kept = 0;
+  for (let i = 0; i < nArr.length; i++) {
+    const rt = rtArr[i];
+    if (rt < rtLo || rt > rtHi) continue;
+    const mz = nArr[i];
+    if (mz < mzLo || mz > mzHi) continue;
+    const k0 = mobArr[i];
+    if (k0 < K0_LO || k0 > K0_HI) continue;
+
+    const xi = Math.min(W - 1, Math.floor((mz - mzLo) / mzStep));
+    const yi = Math.min(H - 1, Math.floor((k0 - K0_LO) / k0Step));
+    flat[yi * W + xi] += logArr[i];
+    kept++;
+  }
+
+  // Convert to 2D row-major array (H rows, W cols)
+  const grid = [];
+  for (let y = 0; y < H; y++) {
+    const row = Array(W);
+    for (let x = 0; x < W; x++) row[x] = flat[y * W + x];
+    grid.push(row);
+  }
+  return { grid, W, H, kept };
+}
+
+// ───────────────────────────────────────────────────────────────
+// Gaussian blur (3×3 kernel, σ≈0.85)
+// ───────────────────────────────────────────────────────────────
+function gaussBlur(grid, H, W, passes = 1) {
+  const K = [1, 2, 1, 2, 4, 2, 1, 2, 1]; // unnorm 3×3
+  const KS = 16;
+  for (let p = 0; p < passes; p++) {
+    const out = Array.from({length: H}, (_, y) => Array(W).fill(0));
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        let sum = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const ny = Math.max(0, Math.min(H - 1, y + dy));
+            const nx = Math.max(0, Math.min(W - 1, x + dx));
+            sum += grid[ny][nx] * K[(dy + 1) * 3 + (dx + 1)];
+          }
+        }
+        out[y][x] = sum / KS;
+      }
+    }
+    grid = out;
+  }
+  return grid;
+}
+
+// ───────────────────────────────────────────────────────────────
+// Axis tick arrays
+// ───────────────────────────────────────────────────────────────
+function linspace(lo, hi, n) {
+  return Array.from({length: n}, (_, i) => lo + (hi - lo) * i / (n - 1));
+}
+
+// ───────────────────────────────────────────────────────────────
+// Build Plotly surface layout (shared)
+// ───────────────────────────────────────────────────────────────
+function makeSurfaceLayout(title, mzLo, mzHi, camera) {
+  return {
+    paper_bgcolor: '#161b22',
+    plot_bgcolor: '#161b22',
+    margin: { l: 0, r: 0, t: 28, b: 0 },
+    title: { text: title, font: { size: 11, color: '#8b949e' }, x: 0.5 },
+    scene: {
+      bgcolor: '#0d1117',
+      xaxis: {
+        title: { text: 'm/z', font: { size: 10, color: '#8b949e' } },
+        tickfont: { size: 9, color: '#8b949e' },
+        gridcolor: '#21262d', linecolor: '#30363d',
+        range: [mzLo, mzHi],
+      },
+      yaxis: {
+        title: { text: '1/K₀', font: { size: 10, color: '#8b949e' } },
+        tickfont: { size: 9, color: '#8b949e' },
+        gridcolor: '#21262d', linecolor: '#30363d',
+        range: [K0_LO, K0_HI],
+      },
+      zaxis: {
+        title: { text: 'Intensity', font: { size: 10, color: '#8b949e' } },
+        tickfont: { size: 9, color: '#8b949e' },
+        gridcolor: '#21262d', linecolor: '#30363d',
+        showticklabels: false,
+      },
+      camera: camera || { eye: { x: 1.6, y: -1.6, z: 0.9 } },
+      aspectmode: 'manual',
+      aspectratio: { x: 2.0, y: 1.2, z: 0.65 },
+    },
+    modebar: { bgcolor: 'transparent', color: '#8b949e', activecolor: '#58a6ff' },
+  };
+}
+
+// ───────────────────────────────────────────────────────────────
+// Render one landscape panel
+// ───────────────────────────────────────────────────────────────
+function renderLandscape(divId, grid, W, H, mzLo, mzHi, colorscale, runLabel, camera) {
+  const mzVals = linspace(mzLo, mzHi, W);
+  const k0Vals = linspace(K0_LO, K0_HI, H);
+
+  const trace = {
+    type: 'surface',
+    x: mzVals,
+    y: k0Vals,
+    z: grid,
+    colorscale,
+    showscale: false,
+    contours: {
+      z: {
+        show: true,
+        usecolormap: true,
+        highlightcolor: '#fff',
+        project: { z: true },
+      }
+    },
+    hovertemplate: 'm/z: %{x:.1f}<br>1/K₀: %{y:.3f}<br>Intensity: %{z:.1f}<extra></extra>',
+    lighting: { ambient: 0.6, diffuse: 0.4, specular: 0.05, roughness: 0.9 },
+    lightposition: { x: 1000, y: 1000, z: 1000 },
+    opacity: 0.96,
+  };
+
+  const layout = makeSurfaceLayout(runLabel, mzLo, mzHi, camera);
+
+  Plotly.react(divId, [trace], layout, {
+    displaylogo: false,
+    responsive: true,
+    modeBarButtonsToRemove: ['toImage'],
+  });
+}
+
+// ───────────────────────────────────────────────────────────────
+// Render overlay (both runs on same plot, semi-transparent)
+// ───────────────────────────────────────────────────────────────
+function renderOverlay(divId, gridA, gridB, gridC, W, H, mzLo, mzHi, camera) {
+  const mzVals = linspace(mzLo, mzHi, W);
+  const k0Vals = linspace(K0_LO, K0_HI, H);
+
+  const traces = [];
+  if (gridA) traces.push({
+    type: 'surface', x: mzVals, y: k0Vals, z: gridA,
+    colorscale: COLOR_SCALES.A, showscale: false, opacity: 0.7, name: 'Run A',
+    contours: { z: { show: false } },
+    hovertemplate: 'A | m/z: %{x:.1f}<br>1/K₀: %{y:.3f}<extra></extra>',
+    lighting: { ambient: 0.7, diffuse: 0.3 },
+  });
+  if (gridB) traces.push({
+    type: 'surface', x: mzVals, y: k0Vals, z: gridB,
+    colorscale: COLOR_SCALES.B, showscale: false, opacity: 0.7, name: 'Run B',
+    contours: { z: { show: false } },
+    hovertemplate: 'B | m/z: %{x:.1f}<br>1/K₀: %{y:.3f}<extra></extra>',
+    lighting: { ambient: 0.7, diffuse: 0.3 },
+  });
+  if (gridC) traces.push({
+    type: 'surface', x: mzVals, y: k0Vals, z: gridC,
+    colorscale: COLOR_SCALES.C, showscale: false, opacity: 0.7, name: 'Run C',
+    contours: { z: { show: false } },
+    hovertemplate: 'C | m/z: %{x:.1f}<br>1/K₀: %{y:.3f}<extra></extra>',
+    lighting: { ambient: 0.7, diffuse: 0.3 },
+  });
+
+  const layout = makeSurfaceLayout('Overlay · A + B + C', mzLo, mzHi, camera);
+  Plotly.react(divId, traces, layout, { displaylogo: false, responsive: true });
+}
+
+// ───────────────────────────────────────────────────────────────
+// Render differential A − B
+// ───────────────────────────────────────────────────────────────
+function renderDiff(divId, gridA, gridB, W, H, mzLo, mzHi, camera) {
+  if (!gridA || !gridB) return;
+
+  // Find global max for normalising before diff
+  let maxA = 0, maxB = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (gridA[y][x] > maxA) maxA = gridA[y][x];
+      if (gridB[y][x] > maxB) maxB = gridB[y][x];
+    }
+  }
+  const scaleA = maxA > 0 ? 1 / maxA : 1;
+  const scaleB = maxB > 0 ? 1 / maxB : 1;
+
+  const diff = Array.from({length: H}, (_, y) =>
+    Array.from({length: W}, (_, x) =>
+      gridA[y][x] * scaleA - gridB[y][x] * scaleB
+    )
+  );
+
+  const mzVals = linspace(mzLo, mzHi, W);
+  const k0Vals = linspace(K0_LO, K0_HI, H);
+
+  // Symmetric z range
+  let absMax = 0;
+  diff.forEach(row => row.forEach(v => { if (Math.abs(v) > absMax) absMax = Math.abs(v); }));
+
+  const trace = {
+    type: 'surface',
+    x: mzVals, y: k0Vals, z: diff,
+    colorscale: COLOR_SCALES.diff,
+    showscale: true,
+    cmin: -absMax, cmax: absMax,
+    colorbar: {
+      thickness: 10, len: 0.5, x: 1.02,
+      tickfont: { size: 8, color: '#8b949e' },
+      title: { text: 'A−B', font: { size: 9, color: '#8b949e' }, side: 'right' },
+    },
+    contours: {
+      z: { show: true, usecolormap: true, project: { z: true } }
+    },
+    hovertemplate: 'm/z: %{x:.1f}<br>1/K₀: %{y:.3f}<br>A−B: %{z:.3f}<extra></extra>',
+    lighting: { ambient: 0.6, diffuse: 0.4 },
+  };
+
+  // Compute similarity score (Pearson)
+  const fa = diff.flat(), fb = diff.flat().map(v => 0);
+  const aN = gridA.flat().map(v => v * scaleA);
+  const bN = gridB.flat().map(v => v * scaleB);
+  const n = aN.length;
+  const mA = aN.reduce((s,v) => s+v, 0) / n;
+  const mB = bN.reduce((s,v) => s+v, 0) / n;
+  let cov = 0, sA = 0, sB = 0;
+  for (let i = 0; i < n; i++) {
+    const da = aN[i] - mA, db = bN[i] - mB;
+    cov += da * db; sA += da * da; sB += db * db;
+  }
+  const pearson = (sA > 0 && sB > 0) ? cov / Math.sqrt(sA * sB) : 0;
+  document.getElementById('statsDiff').textContent =
+    `Similarity: ${(pearson * 100).toFixed(1)}%`;
+
+  const layout = makeSurfaceLayout('Differential · A − B (normalised)', mzLo, mzHi, camera);
+  Plotly.react(divId, [trace], layout, { displaylogo: false, responsive: true });
+}
+
+// ───────────────────────────────────────────────────────────────
+// Camera sync
+// ───────────────────────────────────────────────────────────────
+const PLOT_IDS = ['plotA','plotB','plotC','plotDiff'];
+
+function attachCameraSync(divId) {
+  const el = document.getElementById(divId);
+  if (!el || !el._fullLayout) return;
+  el.on('plotly_relayout', (ev) => {
+    if (!S.syncCam || S.syncing) return;
+    const cam = ev['scene.camera'];
+    if (!cam) return;
+    S.syncing = true;
+    S.camera = cam;
+    PLOT_IDS.filter(id => id !== divId).forEach(other => {
+      const oel = document.getElementById(other);
+      if (oel && oel._fullLayout) {
+        Plotly.relayout(other, { 'scene.camera': cam }).catch(() => {});
+      }
+    });
+    S.syncing = false;
+  });
+}
+
+// ───────────────────────────────────────────────────────────────
+// Inspector on click
+// ───────────────────────────────────────────────────────────────
+function attachClickInspector(divId, key) {
+  const el = document.getElementById(divId);
+  if (!el) return;
+  el.on('plotly_click', (data) => {
+    if (!data.points || !data.points.length) return;
+    const pt = data.points[0];
+    const mz = pt.x, k0 = pt.y;
+    showInspector(mz, k0);
+  });
+}
+
+function showInspector(mz, k0) {
+  // Find intensity in each grid at clicked mz, k0
+  const [W, H] = RES_MAP[S.res];
+  const mzLo = +document.getElementById('mzLo').value;
+  const mzHi = +document.getElementById('mzHi').value;
+  const mzStep = (mzHi - mzLo) / W;
+  const k0Step = (K0_HI - K0_LO) / H;
+  const xi = Math.max(0, Math.min(W - 1, Math.floor((mz - mzLo) / mzStep)));
+  const yi = Math.max(0, Math.min(H - 1, Math.floor((k0 - K0_LO) / k0Step)));
+
+  const vals = {};
+  let maxVal = 0;
+  ['A','B','C'].forEach(k => {
+    if (S.grids[k]) {
+      vals[k] = S.grids[k][yi][xi];
+      if (vals[k] > maxVal) maxVal = vals[k];
+    }
+  });
+
+  let html = `
+    <div class="insp-row"><span class="key">m/z</span><span class="val">${mz.toFixed(2)}</span></div>
+    <div class="insp-row"><span class="key">1/K₀</span><span class="val">${k0.toFixed(4)}</span></div>
+    <div style="margin-top:8px"><h3>Intensity (bin sum)</h3></div>
+    <div class="insp-bar-wrap" style="margin-top:6px">
+  `;
+
+  ['A','B','C'].forEach(k => {
+    if (vals[k] === undefined) return;
+    const pct = maxVal > 0 ? (vals[k] / maxVal) * 100 : 0;
+    html += `
+      <div class="insp-bar-row">
+        <div class="run-dot" style="background:${COLORS[k]}"></div>
+        <span style="min-width:14px;color:var(--muted)">${'ABC'['ABC'.indexOf(k)]}</span>
+        <div class="insp-bar-track">
+          <div class="insp-bar-fill ${k.toLowerCase()}" style="width:${pct.toFixed(1)}%"></div>
+        </div>
+        <span class="insp-bar-val">${vals[k].toFixed(1)}</span>
+      </div>
+    `;
+  });
+
+  // Ratio if A and B both present
+  if (vals.A !== undefined && vals.B !== undefined && vals.B > 0) {
+    const ratio = vals.A / vals.B;
+    html += `</div><div style="margin-top:8px">
+      <div class="insp-row"><span class="key">A/B ratio</span>
+        <span class="val" style="color:${ratio > 1.2 ? 'var(--accent)' : ratio < 0.8 ? 'var(--accent2)' : 'var(--text)'}">
+          ${ratio.toFixed(2)}×
+        </span></div>`;
+  } else {
+    html += `</div>`;
+  }
+
+  document.getElementById('inspContent').innerHTML = html;
+}
+
+// ───────────────────────────────────────────────────────────────
+// Show / hide panels by mode
+// ───────────────────────────────────────────────────────────────
+function applyPanelVisibility() {
+  const hasB = !!document.getElementById('selB').value;
+  const hasC = !!document.getElementById('selC').value;
+  const mode = S.mode;
+
+  const panelA = document.getElementById('panelA');
+  const panelB = document.getElementById('panelB');
+  const panelC = document.getElementById('panelC');
+  const panelDiff = document.getElementById('panelDiff');
+
+  if (mode === 'overlay') {
+    // Single overlaid panel (reuse panelA div)
+    panelA.classList.remove('hidden');
+    panelB.classList.add('hidden');
+    panelC.classList.add('hidden');
+    panelDiff.classList.add('hidden');
+    document.getElementById('diff-legend').style.display = 'none';
+  } else if (mode === 'diff') {
+    panelA.classList.remove('hidden');
+    panelB.classList.remove('hidden');
+    panelC.classList.add('hidden');
+    panelDiff.classList.remove('hidden');
+    document.getElementById('diff-legend').style.display = 'flex';
+  } else {
+    // Landscape
+    panelA.classList.remove('hidden');
+    panelB.classList.toggle('hidden', !hasB);
+    panelC.classList.toggle('hidden', !hasC);
+    panelDiff.classList.add('hidden');
+    document.getElementById('diff-legend').style.display = 'none';
+  }
+}
+
+// ───────────────────────────────────────────────────────────────
+// Loading overlay helpers
+// ───────────────────────────────────────────────────────────────
+function showLoading(panelId, msg = 'Loading…') {
+  const panel = document.getElementById(panelId);
+  let ov = panel.querySelector('.loading-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.className = 'loading-overlay';
+    panel.appendChild(ov);
+  }
+  ov.innerHTML = `<div class="spinner"></div>${msg}`;
+}
+function hideLoading(panelId) {
+  const panel = document.getElementById(panelId);
+  const ov = panel.querySelector('.loading-overlay');
+  if (ov) ov.remove();
+}
+
+// ───────────────────────────────────────────────────────────────
+// Status bar
+// ───────────────────────────────────────────────────────────────
+function setStatus(state, msg, ions = '') {
+  document.getElementById('statusDot').className = `status-dot ${state}`;
+  document.getElementById('statusMsg').textContent = msg;
+  document.getElementById('statusIons').textContent = ions;
+}
+
+// ───────────────────────────────────────────────────────────────
+// Main render
+// ───────────────────────────────────────────────────────────────
+async function doRender() {
+  const idA = document.getElementById('selA').value;
+  const idB = document.getElementById('selB').value;
+  const idC = document.getElementById('selC').value;
+
+  if (!idA) { setStatus('loading', 'Select at least Run A to render'); return; }
+
+  const rtLo  = +document.getElementById('rtLo').value  || 0;
+  const rtHi  = +document.getElementById('rtHi').value  || 9999;
+  const mzLo  = +document.getElementById('mzLo').value  || 300;
+  const mzHi  = +document.getElementById('mzHi').value  || 1500;
+  const [W, H] = RES_MAP[S.res];
+
+  applyPanelVisibility();
+
+  // ── Fetch missing ion data ──
+  const toFetch = [];
+  if (!S.ions.A && idA) toFetch.push(['A', idA]);
+  if (!S.ions.B && idB) toFetch.push(['B', idB]);
+  if (!S.ions.C && idC) toFetch.push(['C', idC]);
+  // If selection changed, clear old
+  if (S.ions.A && idA && S.ions.A._runId !== idA) { S.ions.A = null; S.grids.A = null; toFetch.push(['A', idA]); }
+  if (S.ions.B && idB && S.ions.B._runId !== idB) { S.ions.B = null; S.grids.B = null; toFetch.push(['B', idB]); }
+  if (S.ions.C && idC && S.ions.C._runId !== idC) { S.ions.C = null; S.grids.C = null; toFetch.push(['C', idC]); }
+  if (!idB) { S.ions.B = null; S.grids.B = null; }
+  if (!idC) { S.ions.C = null; S.grids.C = null; }
+
+  if (toFetch.length > 0) {
+    setStatus('loading', `Fetching ion data (${toFetch.map(x=>x[0]).join(', ')})…`);
+    const panels = { A:'panelA', B:'panelB', C:'panelC' };
+    toFetch.forEach(([k]) => showLoading(panels[k], 'Fetching ions…'));
+
+    await Promise.all(toFetch.map(async ([key, runId]) => {
+      try {
+        const data = await fetchIons(runId);
+        data._runId = runId;
+        S.ions[key] = data;
+      } catch(e) {
+        setStatus('loading', `Failed to load Run ${key}: ${e.message}`);
+        S.ions[key] = null;
+      }
+    }));
+    toFetch.forEach(([k]) => hideLoading(panels[k]));
+  }
+
+  // ── Build grids ──
+  setStatus('loading', 'Building intensity grids…');
+  let totalKept = 0;
+  ['A','B','C'].forEach(k => {
+    if (!S.ions[k]) { S.grids[k] = null; return; }
+    const r = buildGrid(S.ions[k], rtLo, rtHi, mzLo, mzHi, W, H);
+    let g = r.grid;
+    if (S.smooth) g = gaussBlur(g, H, W, 2);
+    S.grids[k] = g;
+    totalKept += r.kept;
+    // Update stats
+    const label = S.ions[k]._runId;
+    const selEl = document.getElementById('sel' + k);
+    const selName = selEl.options[selEl.selectedIndex]?.text?.split(' — ')[0] || label;
+    document.getElementById('label' + k).textContent = selName;
+    document.getElementById('stats' + k).textContent =
+      `${r.kept.toLocaleString()} ions in window`;
+  });
+
+  // ── Render ──
+  setStatus('loading', 'Rendering surfaces…');
+  const cam = S.camera;
+
+  if (S.mode === 'overlay') {
+    renderOverlay('plotA', S.grids.A, S.grids.B, S.grids.C, W, H, mzLo, mzHi, cam);
+  } else if (S.mode === 'diff') {
+    const selNameA = document.getElementById('selA').options[document.getElementById('selA').selectedIndex]?.text?.split(' — ')[0] || 'A';
+    const selNameB = document.getElementById('selB').options[document.getElementById('selB').selectedIndex]?.text?.split(' — ')[0] || 'B';
+    renderLandscape('plotA', S.grids.A, W, H, mzLo, mzHi, COLOR_SCALES.A, selNameA, cam);
+    if (S.grids.B) renderLandscape('plotB', S.grids.B, W, H, mzLo, mzHi, COLOR_SCALES.B, selNameB, cam);
+    if (S.grids.A && S.grids.B) renderDiff('plotDiff', S.grids.A, S.grids.B, W, H, mzLo, mzHi, cam);
+  } else {
+    ['A','B','C'].forEach(k => {
+      if (!S.grids[k]) return;
+      const pid = 'plot' + k;
+      const selEl = document.getElementById('sel' + k);
+      const name = selEl.options[selEl.selectedIndex]?.text?.split(' — ')[0] || k;
+      renderLandscape(pid, S.grids[k], W, H, mzLo, mzHi, COLOR_SCALES[k], name, cam);
+    });
+  }
+
+  // Attach event listeners after render
+  setTimeout(() => {
+    PLOT_IDS.forEach(id => attachCameraSync(id));
+    ['A','B','C'].forEach(k => attachClickInspector('plot' + k, k));
+  }, 500);
+
+  setStatus('ok', `Ready — ${S.mode} view · RT ${rtLo}–${rtHi} min · m/z ${mzLo}–${mzHi}`,
+    `${totalKept.toLocaleString()} ions visualised`);
+}
+
+// ───────────────────────────────────────────────────────────────
+// Get full RT range from loaded ions
+// ───────────────────────────────────────────────────────────────
+function getFullRtRange() {
+  let lo = Infinity, hi = -Infinity;
+  ['A','B','C'].forEach(k => {
+    const ions = S.ions[k];
+    if (!ions || !ions.rt) return;
+    const mn = Math.min(...ions.rt) / 60;
+    const mx = Math.max(...ions.rt) / 60;
+    if (mn < lo) lo = mn;
+    if (mx > hi) hi = mx;
+  });
+  return [isFinite(lo) ? lo : 0, isFinite(hi) ? hi : 999];
+}
+
+// ───────────────────────────────────────────────────────────────
+// Wire up controls
+// ───────────────────────────────────────────────────────────────
+document.getElementById('btnRender').addEventListener('click', doRender);
+
+document.getElementById('btnFullRt').addEventListener('click', () => {
+  const [lo, hi] = getFullRtRange();
+  document.getElementById('rtLo').value = Math.floor(lo);
+  document.getElementById('rtHi').value = Math.ceil(hi);
+});
+
+document.getElementById('btnFullMz').addEventListener('click', () => {
+  document.getElementById('mzLo').value = 300;
+  document.getElementById('mzHi').value = 1500;
+});
+
+// Mode buttons
+document.querySelectorAll('[data-mode]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-mode]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    S.mode = btn.dataset.mode;
+    applyPanelVisibility();
+  });
+});
+
+// Resolution buttons
+document.querySelectorAll('[data-res]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-res]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    S.res = btn.dataset.res;
+    // Invalidate grids so they rebuild
+    S.grids = { A: null, B: null, C: null };
+  });
+});
+
+document.getElementById('chkSync').addEventListener('change', e => {
+  S.syncCam = e.target.checked;
+});
+
+document.getElementById('chkSmooth').addEventListener('change', e => {
+  S.smooth = e.target.checked;
+  // Invalidate grids
+  S.grids = { A: null, B: null, C: null };
+});
+
+// When run selection changes, clear cached ions for that slot
+['A','B','C'].forEach(k => {
+  document.getElementById('sel' + k).addEventListener('change', () => {
+    S.ions[k] = null; S.grids[k] = null;
+    applyPanelVisibility();
+  });
+});
+
+// Enter key triggers render
+document.querySelectorAll('input[type=number]').forEach(el => {
+  el.addEventListener('keydown', e => { if (e.key === 'Enter') doRender(); });
+});
+
+// ───────────────────────────────────────────────────────────────
+// Init
+// ───────────────────────────────────────────────────────────────
+loadRunList();
+applyPanelVisibility();
+</script>
+</body>
+</html>

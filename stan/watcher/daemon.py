@@ -1,0 +1,461 @@
+"""Watchdog-based instrument watcher daemon.
+
+Monitors raw data directories for new acquisitions, detects when files are stable,
+identifies acquisition mode, and dispatches search jobs.
+"""
+
+from __future__ import annotations
+
+import logging
+import signal
+import threading
+from pathlib import Path
+
+from watchdog.events import (
+    DirCreatedEvent,
+    FileCreatedEvent,
+    FileSystemEventHandler,
+)
+from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
+
+from stan.config import CONFIG_POLL_INTERVAL, ConfigWatcher, resolve_config_path
+from stan.watcher.detector import AcquisitionMode, detect_mode, is_dia
+from stan.watcher.qc_filter import compile_qc_pattern, is_qc_file
+from stan.watcher.stability import StabilityTracker
+
+logger = logging.getLogger(__name__)
+
+
+def _is_network_path(path: str) -> bool:
+    """Detect UNC or network paths where native OS events may not work."""
+    return path.startswith("\\\\") or path.startswith("//")
+
+
+class _AcquisitionHandler(FileSystemEventHandler):
+    """Watchdog event handler that creates StabilityTrackers for new raw files."""
+
+    def __init__(
+        self,
+        instrument_config: dict,
+        trackers: dict[str, StabilityTracker],
+        lock: threading.Lock,
+    ) -> None:
+        super().__init__()
+        self._config = instrument_config
+        self._trackers = trackers
+        self._lock = lock
+        self._extensions = set(instrument_config.get("extensions", []))
+        self._vendor = instrument_config.get("vendor", "")
+        self._stable_secs = instrument_config.get("stable_secs", 60)
+        self._qc_only = instrument_config.get("qc_only", True)
+        self._qc_pattern = compile_qc_pattern(instrument_config.get("qc_pattern"))
+
+    def _is_inside_dot_d(self, path: Path) -> bool:
+        """Check if path is inside a Bruker .d directory (not the .d itself)."""
+        for parent in path.parents:
+            if parent.suffix == ".d":
+                return True
+        return False
+
+    def on_created(self, event) -> None:
+        path = Path(event.src_path)
+
+        # Ignore anything inside a .d directory — those are Bruker internals
+        # (analysis.tdf, analysis.tdf_bin, etc.), not new acquisitions
+        if self._is_inside_dot_d(path):
+            return
+
+        # Bruker .d: directory creation event
+        if isinstance(event, DirCreatedEvent) and path.suffix == ".d":
+            if ".d" in self._extensions:
+                self._register_tracker(path)
+
+        # Thermo .raw: file creation event
+        elif isinstance(event, FileCreatedEvent) and path.suffix in self._extensions:
+            if path.suffix != ".d":
+                self._register_tracker(path)
+
+    def _register_tracker(self, path: Path) -> None:
+        # Skip non-QC files when qc_only is enabled
+        if self._qc_only and not is_qc_file(path, self._qc_pattern):
+            logger.debug("Skipping non-QC file: %s", path.name)
+            return
+
+        key = str(path)
+        with self._lock:
+            if key not in self._trackers:
+                self._trackers[key] = StabilityTracker(
+                    path=path,
+                    vendor=self._vendor,
+                    stable_secs=self._stable_secs,
+                )
+                logger.info("Tracking new QC acquisition: %s", path.name)
+
+
+class InstrumentWatcher:
+    """Watches a single instrument's raw data directory."""
+
+    def __init__(self, instrument_config: dict) -> None:
+        self._config = instrument_config
+        self._name = instrument_config.get("name", "unknown")
+        self._watch_dir = instrument_config.get("watch_dir", "")
+        self._trackers: dict[str, StabilityTracker] = {}
+        self._lock = threading.Lock()
+        self._handler = _AcquisitionHandler(instrument_config, self._trackers, self._lock)
+
+        # Use polling observer for network paths
+        if _is_network_path(self._watch_dir):
+            self._observer = PollingObserver(timeout=10)
+        else:
+            self._observer = Observer()
+
+        self._stability_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def start(self) -> None:
+        """Start watching the directory and the stability check loop."""
+        watch_path = Path(self._watch_dir)
+        if not watch_path.exists():
+            logger.warning(
+                "Watch directory does not exist for %s: %s", self._name, self._watch_dir
+            )
+            return
+
+        self._observer.schedule(self._handler, str(watch_path), recursive=True)
+        self._observer.start()
+
+        self._stop_event.clear()
+        self._stability_thread = threading.Thread(
+            target=self._stability_loop,
+            name=f"stability-{self._name}",
+            daemon=True,
+        )
+        self._stability_thread.start()
+        logger.info("Started watching: %s → %s", self._name, self._watch_dir)
+
+    def stop(self) -> None:
+        """Stop the observer and stability loop."""
+        self._stop_event.set()
+        self._observer.stop()
+        self._observer.join(timeout=5)
+        if self._stability_thread and self._stability_thread.is_alive():
+            self._stability_thread.join(timeout=5)
+        logger.info("Stopped watching: %s", self._name)
+
+    def _stability_loop(self) -> None:
+        """Periodically check all trackers and trigger on stable acquisitions."""
+        while not self._stop_event.is_set():
+            stable_paths: list[str] = []
+
+            with self._lock:
+                for key, tracker in self._trackers.items():
+                    if tracker.check():
+                        stable_paths.append(key)
+
+            for key in stable_paths:
+                with self._lock:
+                    tracker = self._trackers.pop(key, None)
+                if tracker is not None:
+                    self._on_acquisition_complete(tracker.path)
+
+            self._stop_event.wait(timeout=10)
+
+    def _on_acquisition_complete(self, path: Path) -> None:
+        """Handle a completed acquisition: validate, detect mode, dispatch search.
+
+        Mode resolution order:
+        1. forced_mode in config (recommended for Thermo — use separate watch dirs)
+        2. Auto-detect from raw file metadata (reliable for Bruker .d)
+        """
+        logger.info("Acquisition complete: %s", path.name)
+
+        # Validate the raw file BEFORE attempting search — incomplete or
+        # corrupt files cause DIA-NN/Sage to crash with cryptic errors.
+        from stan.watcher.validate_raw import RawFileValidationError, validate_raw_file
+        try:
+            validate_raw_file(path, vendor=self._config.get("vendor"))
+        except RawFileValidationError as e:
+            logger.error("Invalid raw file, skipping: %s", e)
+            # Write a HOLD flag with the validation failure reason
+            try:
+                from stan.gating.queue import write_hold_flag
+                from stan.gating.evaluator import GateDecision, GateResult
+                decision = GateDecision(
+                    result=GateResult.FAIL,
+                    failed_gates=["raw_file_invalid"],
+                    diagnosis=str(e),
+                )
+                write_hold_flag(
+                    output_dir=Path(self._config.get("output_dir", "")) / path.stem,
+                    decision=decision,
+                    run_name=path.name,
+                )
+            except Exception:
+                logger.exception("Failed to write HOLD flag for invalid file")
+            return
+
+        forced = self._config.get("forced_mode", "").lower()
+        if forced:
+            mode = _resolve_forced_mode(forced, self._config.get("vendor", ""))
+            logger.info("Using forced mode: %s for %s", mode.value, path.name)
+        else:
+            mode = detect_mode(
+                path,
+                vendor=self._config.get("vendor", ""),
+                trfp_path=self._config.get("trfp_path"),
+                output_dir=self._config.get("output_dir"),
+            )
+
+        if mode == AcquisitionMode.UNKNOWN:
+            logger.warning(
+                "Could not detect acquisition mode for %s — skipping. "
+                "For Thermo instruments, set 'forced_mode: dia' or 'forced_mode: dda' "
+                "in instruments.yml instead of relying on auto-detection.",
+                path.name,
+            )
+            return
+
+        logger.info("Detected mode: %s for %s", mode.value, path.name)
+
+        # Import here to avoid circular imports at module level
+        from stan.search.dispatcher import dispatch_search
+
+        try:
+            result_path = dispatch_search(
+                raw_path=path,
+                mode=mode,
+                instrument_config=self._config,
+            )
+            if result_path is not None:
+                self._store_run(path, mode, result_path)
+        except Exception as e:
+            logger.exception("Search dispatch failed for %s", path.name)
+            from stan.telemetry import report_error
+            report_error(e, {
+                "vendor": self._config.get("vendor"),
+                "raw_file_name": path.stem,
+                "acquisition_mode": mode.value if mode != AcquisitionMode.UNKNOWN else None,
+            })
+
+    def _store_run(
+        self, raw_path: Path, mode: AcquisitionMode, result_path: Path
+    ) -> None:
+        """Extract metrics and store in the local database."""
+        from stan.db import insert_run
+        from stan.gating.evaluator import evaluate_gates
+        from stan.metrics.extractor import extract_dda_metrics, extract_dia_metrics
+
+        try:
+            if is_dia(mode):
+                metrics = extract_dia_metrics(str(result_path))
+                from stan.metrics.chromatography import compute_ips_dia
+                metrics["instrument_family"] = self._config.get("family") or self._config.get("vendor_family")
+                metrics["spd"] = self._config.get("spd")
+                metrics["ips_score"] = compute_ips_dia(metrics)
+            else:
+                metrics = extract_dda_metrics(str(result_path))
+                from stan.metrics.chromatography import compute_ips_dda
+                metrics["instrument_family"] = self._config.get("family") or self._config.get("vendor_family")
+                metrics["spd"] = self._config.get("spd")
+                metrics["ips_score"] = compute_ips_dda(metrics)
+
+            # Resolve acquisition mode string for threshold lookup
+            acq_mode = "dia" if is_dia(mode) else "dda"
+
+            decision = evaluate_gates(
+                metrics=metrics,
+                instrument_model=self._config.get("model", ""),
+                acquisition_mode=acq_mode,
+            )
+
+            # Acquisition date from raw file metadata (Bruker analysis.tdf
+            # GlobalMetadata.AcquisitionDateTime or Thermo .raw header via
+            # fisher_py). Falls back to file mtime only if both fail —
+            # mtime can be wrong after copies/archive moves.
+            from stan.watcher.acquisition_date import get_acquisition_date
+            raw_mtime = get_acquisition_date(raw_path)
+            if not raw_mtime:
+                from datetime import datetime, timezone
+                try:
+                    raw_mtime = datetime.fromtimestamp(
+                        raw_path.stat().st_mtime, tz=timezone.utc
+                    ).isoformat()
+                except Exception:
+                    raw_mtime = None
+
+            # Resolve instrument name: if config says "auto", read it from the
+            # .m subfolder inside the Bruker .d directory.
+            instrument_name = self._config.get("name", "unknown")
+            if instrument_name == "auto" and raw_path.suffix == ".d":
+                from stan.watcher.instrument_name import read_instrument_name_from_d
+                detected = read_instrument_name_from_d(raw_path)
+                if detected:
+                    instrument_name = detected
+                    logger.info("Detected instrument name from .d: %s", detected)
+
+            run_id = insert_run(
+                instrument=instrument_name,
+                run_name=raw_path.name,
+                raw_path=str(raw_path),
+                mode=mode.value,
+                metrics=metrics,
+                gate_result=decision.result.value,
+                failed_gates=decision.failed_gates,
+                diagnosis=decision.diagnosis,
+                amount_ng=self._config.get("hela_amount_ng", 50.0),
+                spd=self._config.get("spd"),
+                gradient_length_min=self._config.get("gradient_length_min"),
+                run_date=raw_mtime,
+                result_path=str(result_path) if result_path else None,
+            )
+
+            if decision.result.value == "fail":
+                from stan.gating.queue import write_hold_flag
+                write_hold_flag(
+                    output_dir=Path(self._config.get("output_dir", "")) / raw_path.stem,
+                    decision=decision,
+                    run_name=raw_path.name,
+                )
+
+            # ── Carafe: build experiment-specific library in background ──
+            if (
+                self._config.get("carafe_enabled")
+                and is_dia(mode)
+                and self._config.get("carafe_fasta")
+            ):
+                try:
+                    from stan.search.carafe import run_carafe_async
+                    output_dir = Path(self._config.get("output_dir", "")) / raw_path.stem
+                    run_carafe_async(
+                        raw_path=raw_path,
+                        fasta_path=self._config["carafe_fasta"],
+                        instrument_name=self._config.get("name", "unknown"),
+                        report_path=result_path if result_path else None,
+                        output_dir=output_dir,
+                        java_exe=self._config.get("carafe_java", "java"),
+                        run_id=run_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to launch Carafe background task")
+
+            # ── 4DFF: auto feature finding for Bruker .d files ────────────
+            if (
+                self._config.get("fourdff_enabled")
+                and raw_path.suffix.lower() == ".d"
+                and self._config.get("fourdff_path")
+            ):
+                try:
+                    from stan.search.fourdff import run_4dff_async
+                    fourdff_out = self._config.get("fourdff_output_dir")
+                    run_4dff_async(
+                        raw_path=raw_path,
+                        exe_path=self._config["fourdff_path"],
+                        run_id=run_id,
+                        output_dir=Path(fourdff_out) if fourdff_out else None,
+                    )
+                except Exception:
+                    logger.exception("Failed to launch 4DFF background task")
+
+        except Exception:
+            logger.exception("Failed to store run for %s", raw_path.name)
+
+
+class WatcherDaemon:
+    """Manages multiple InstrumentWatchers with config hot-reload."""
+
+    def __init__(self) -> None:
+        self._watchers: dict[str, InstrumentWatcher] = {}
+        self._config_watcher: ConfigWatcher | None = None
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        """Blocking main loop. Start all watchers and poll for config changes."""
+        # Register signal handlers for clean shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+        config_path = resolve_config_path("instruments.yml")
+        self._config_watcher = ConfigWatcher(config_path)
+
+        self._apply_config(self._config_watcher.data)
+
+        if not self._watchers:
+            logger.info("No enabled instruments configured. Waiting for config changes...")
+
+        while not self._stop_event.is_set():
+            # Check for config changes
+            if self._config_watcher.is_stale():
+                logger.info("instruments.yml changed — reloading")
+                self._config_watcher.reload()
+                self._apply_config(self._config_watcher.data)
+
+            self._stop_event.wait(timeout=CONFIG_POLL_INTERVAL)
+
+        self._stop_all()
+
+    def stop(self) -> None:
+        """Signal the daemon to stop."""
+        self._stop_event.set()
+
+    def _signal_handler(self, signum: int, frame) -> None:
+        logger.info("Received signal %d — shutting down", signum)
+        self.stop()
+
+    def _apply_config(self, config: dict) -> None:
+        """Diff current watchers against config and add/remove as needed."""
+        instruments = config.get("instruments", [])
+        enabled = {
+            inst["name"]: inst
+            for inst in instruments
+            if inst.get("enabled", False)
+        }
+
+        # Stop watchers for removed or disabled instruments
+        to_remove = [name for name in self._watchers if name not in enabled]
+        for name in to_remove:
+            self._watchers[name].stop()
+            del self._watchers[name]
+            logger.info("Removed watcher: %s", name)
+
+        # Start watchers for new instruments
+        for name, inst_config in enabled.items():
+            if name not in self._watchers:
+                watcher = InstrumentWatcher(inst_config)
+                watcher.start()
+                self._watchers[name] = watcher
+
+        active = len(self._watchers)
+        logger.info("Active watchers: %d", active)
+
+    def _stop_all(self) -> None:
+        """Stop all instrument watchers."""
+        for watcher in self._watchers.values():
+            watcher.stop()
+        self._watchers.clear()
+        logger.info("All watchers stopped")
+
+
+def _resolve_forced_mode(forced: str, vendor: str) -> AcquisitionMode:
+    """Convert a forced_mode string to an AcquisitionMode enum.
+
+    Args:
+        forced: "dia" or "dda" (case-insensitive).
+        vendor: "bruker" or "thermo" — determines which enum variant to use.
+    """
+    forced = forced.strip().lower()
+    if forced == "dia":
+        return (
+            AcquisitionMode.DIA_PASEF if vendor == "bruker"
+            else AcquisitionMode.DIA_ORBITRAP
+        )
+    if forced == "dda":
+        return (
+            AcquisitionMode.DDA_PASEF if vendor == "bruker"
+            else AcquisitionMode.DDA_ORBITRAP
+        )
+    return AcquisitionMode.UNKNOWN
