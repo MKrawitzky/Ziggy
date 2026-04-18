@@ -1100,7 +1100,7 @@
                     {i===2 ? '★ ' : '· '}{t}
                   </text>
                 ))}
-                <text x="730" y="158" textAnchor="middle" fontSize="8" fill="#DAAA00" opacity="0.7">★ = timsTOF unique</text>
+                <text x="730" y="158" textAnchor="middle" fontSize="8" fill="#DAAA00" opacity="0.7">★ = IMS platforms (TIMS / DTIMS / TWIMS)</text>
               </svg>
             </div>
 

@@ -106,7 +106,7 @@
                 {num:'2',axis:'m/z',unit:'Thomson (Th)',col:'#a78bfa',
                   what:'Mass-to-charge ratio. Identifies the peptide and its charge state.',orbi:'✓',tims:'✓'},
                 {num:'3',axis:'1/K₀',unit:'Vs/cm²',col:'#60a5fa',
-                  what:"Ion mobility. How fast it drifts through N₂. Encodes the ion's 3D shape — a structural fingerprint inaccessible to Orbitrap.",orbi:'✗',tims:'timsTOF only'},
+                  what:"Ion mobility. How fast it drifts through N₂. Encodes the ion's 3D shape — a structural fingerprint unavailable on Orbitrap. Measured by TIMS (Bruker), DTIMS (Agilent), and TWIMS (Waters).",orbi:'✗',tims:'IMS platforms'},
                 {num:'4',axis:'Intensity',unit:'log a.u.',col:'#DAAA00',
                   what:'Signal strength. How much of this ion was detected.',orbi:'✓',tims:'✓'},
               ].map(d=>(
@@ -1183,7 +1183,7 @@
                   <span style={{fontSize:'0.62rem',color:'var(--muted)'}}>shaded bands = expected CCS per z</span>
                 </div>
                 <div style={{fontSize:'0.68rem',color:'#3a5060',marginBottom:'0.4rem'}}>
-                  Ion shape in the mobility dimension — the 4th coordinate unique to timsTOF
+                  Ion shape in the mobility dimension — the 4th coordinate measured by IMS platforms (TIMS, DTIMS, TWIMS)
                 </div>
                 <div ref={eimRef} style={{height:'230px'}}/>
               </div>
