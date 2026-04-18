@@ -7,7 +7,7 @@
     const SAMPLE_COLORS = { QC:'#22d3ee', Sample:'#4ade80', Blank:'#94a3b8', Standard:'#DAAA00', Pool:'#a855f7' };
     const WORKFLOW_COLORS = {
       Standard:'#60a5fa', Immunopeptidomics:'#f97316', 'Single Cell':'#d946ef',
-      Training:'#DAAA00', Phospho:'#f43f5e', Glyco:'#22d3ee', Crosslink:'#a855f7', Glyco:'#4ade80',
+      Training:'#DAAA00', Phospho:'#f43f5e', Glyco:'#4ade80', Crosslink:'#a855f7',
     };
     const ENGINE_COLOR = { diann:'#60a5fa', sage:'#34d399', unknown:'#a0b4cc' };
     const MODE_COLOR   = { DIA:'#00d4e0', diaPASEF:'#a78bfa', DDA:'#fbbf24', ddaPASEF:'#fb923c' };

@@ -10,6 +10,37 @@
       const trendLabel  = pinCount > 0 ? `Trends [${pinCount}]` : 'Trends';
       const healthLabel = pinCount > 0 ? `Health [${pinCount}]` : 'Health';
 
+      // Pending spectrum jump — set by MIA tab's ★ click, consumed by SpectraTab
+      const [pendingSpectrum, setPendingSpectrum] = useState(null);
+
+      const handleSpectrumJump = useCallback((spec) => {
+        setPendingSpectrum(spec);
+        setTab('spectra');
+      }, []);
+
+      // Unsearched run count badge for Search Assistant
+      const { data: unsearchedRuns } = useFetch('/api/search/unsearched');
+      const unsearchedCount = Array.isArray(unsearchedRuns) ? unsearchedRuns.length : 0;
+      const searchLabel = unsearchedCount > 0
+        ? React.createElement('span', null,
+            'Search ',
+            React.createElement('span', {
+              style: {
+                display: 'inline-block',
+                background: '#DAAA00',
+                color: '#0e0018',
+                borderRadius: '0.9rem',
+                padding: '0 0.45rem',
+                fontSize: '0.68rem',
+                fontWeight: 700,
+                lineHeight: '1.4',
+                verticalAlign: 'middle',
+                marginLeft: '0.2rem',
+              }
+            }, unsearchedCount)
+          )
+        : 'Search';
+
       return (
         <div className="container">
           <header>
@@ -56,8 +87,10 @@
               <div className="tab-row">
                 {[
                   ['immuno',    'Immunopeptidomics'],
+                  ['discovery', 'HLA Discovery'],
                   ['denovo',    'De Novo'],
                   ['searches',  'Searches'],
+                  ['search',    searchLabel],
                   ['sneaky',    'Sneaky Peaky'],
                   ['mia',       'MIA'],
                   ['singlecell','Single Cell'],
@@ -91,13 +124,15 @@
             {tab === 'advantage' && <AdvantageTab />}
             {tab === 'ccs' && <CCSTab />}
             {tab === 'lc' && <LcTracesTab />}
-            {tab === 'spectra' && <SpectraTab />}
+            {tab === 'spectra' && <SpectraTab pendingSpectrum={pendingSpectrum} onPendingConsumed={() => setPendingSpectrum(null)} />}
             {tab === 'enzyme' && <EnzymeTab />}
-            {tab === 'immuno' && <ImmunopeptidomicsTab />}
+            {tab === 'immuno'     && <ImmunopeptidomicsTab />}
+            {tab === 'discovery' && <ImmunoDiscoveryTab />}
             {tab === 'denovo' && <DeNovoTab />}
             {tab === 'searches' && <SearchesTab />}
+            {tab === 'search'   && <SearchAssistantTab />}
             {tab === 'sneaky' && <SneakyPeakyTab />}
-            {tab === 'mia'        && <MiaTab />}
+            {tab === 'mia'        && <MiaTab onSpectrumJump={handleSpectrumJump} navigateTo={setTab} />}
             {tab === 'singlecell' && <SingleCellTab />}
             {tab === 'config' && <ConfigEditor />}
             {tab === 'community' && <CommunityTab />}

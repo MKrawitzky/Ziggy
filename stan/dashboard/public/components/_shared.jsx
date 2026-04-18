@@ -78,6 +78,51 @@
       }
     }
 
+    // ── Global Plotly defaults — show download button on hover for every chart ──
+    // Called once after Plotly is available. Sets 2× PNG as default download
+    // format so every chart's modebar camera icon saves a print-quality image.
+    (function _setPlotlyDefaults() {
+      if (typeof Plotly !== 'undefined' && Plotly.setPlotConfig) {
+        Plotly.setPlotConfig({
+          displayModeBar: 'hover',
+          displaylogo: false,
+          toImageButtonOptions: {
+            format: 'png',
+            scale:  2,
+            filename: 'ziggy-chart',
+          },
+          modeBarButtonsToRemove: ['select2d','lasso2d','autoScale2d'],
+        });
+      }
+    })();
+
+    // ── PlotCard — card wrapper with built-in export control ─────────────────
+    // Drop-in replacement for <div className="card"> around any Plotly chart.
+    // Props: title, plotRef, filename, children, style, headerStyle
+    function PlotCard({ title, plotRef, filename, children, style = {}, headerStyle = {}, canvasRef }) {
+      const exportRef = plotRef || canvasRef;
+      const isCanvas  = !!canvasRef;
+      return (
+        <div className="card" style={{marginBottom:'0.75rem', padding:'0.75rem', ...style}}>
+          <div style={{display:'flex', alignItems:'center', justifyContent:'space-between',
+                       marginBottom:'0.4rem', ...headerStyle}}>
+            {title && (
+              <h3 style={{fontSize:'0.85rem', margin:0}}>{title}</h3>
+            )}
+            {exportRef && (
+              <ExportBtn
+                plotRef={exportRef}
+                filename={filename || (title ? title.replace(/\s+/g,'_').toLowerCase() : 'ziggy-chart')}
+                isCanvas={isCanvas}
+                scale={2}
+              />
+            )}
+          </div>
+          {children}
+        </div>
+      );
+    }
+
     // ── ExportBtn — reusable image export for Plotly charts and canvas ──────────
     // format: 'png' | 'jpeg' | 'svg'
     // isCanvas: true for <canvas> elements (e.g. RT×1/K₀ heatmap)

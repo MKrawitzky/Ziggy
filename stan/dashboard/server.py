@@ -245,6 +245,7 @@ def _file_entry(p: Path) -> dict:
     stat = p.stat()
     return {
         "name":      p.name,
+        "path":      str(p),
         "size_mb":   round(stat.st_size / 1_048_576, 2),
         "uploaded":  datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
     }
@@ -1476,6 +1477,196 @@ async def api_immunopeptidomics(run_id: str) -> dict:
     except Exception as e:
         logger.exception("immunopeptidomics endpoint failed")
         return {}
+
+
+@app.get("/api/immuno/compare")
+async def api_immuno_compare(
+    run_a: str,
+    run_b: str,
+    mhc_class: int = 0,   # 0=all, 1=MHC-I, 2=MHC-II
+) -> dict:
+    """Compare immunopeptidomics from two runs.
+
+    Returns per-peptide fold change (log2), novelty classification (atlas-known
+    vs novel), and summary stats. Uses median-normalization across shared peptides.
+
+    Response:
+        {
+          "peptides": [{ seq, log2fc, intensity_a, intensity_b, status, protein, length, im_a, im_b }],
+          "stats": { n_a, n_b, n_shared, n_novel_a, n_novel_b, n_atlas_known }
+        }
+    """
+    import math
+    import re as _re2
+
+    run_a_rec = get_run(run_a)
+    run_b_rec = get_run(run_b)
+    if not run_a_rec or not run_b_rec:
+        raise HTTPException(status_code=404, detail="One or both run IDs not found")
+
+    path_a = _resolve_report_path(run_a_rec)
+    path_b = _resolve_report_path(run_b_rec)
+    if not path_a or not path_b:
+        raise HTTPException(status_code=422, detail="One or both runs have no search results")
+
+    try:
+        import polars as pl
+
+        def _load_immuno(path: Path, mhc_cls: int) -> pl.DataFrame:
+            schema = pl.read_parquet_schema(str(path))
+            avail = set(schema.keys())
+            want = [c for c in [
+                "Stripped.Sequence", "Modified.Sequence",
+                "Precursor.Quantity", "Q.Value",
+                "IM", "Protein.Group", "Protein.Names",
+            ] if c in avail]
+            df = pl.read_parquet(str(path), columns=want)
+            df = df.filter(pl.col("Q.Value") <= 0.01)
+            seq_col = "Stripped.Sequence" if "Stripped.Sequence" in df.columns else "Modified.Sequence"
+            df = df.with_columns(
+                pl.col(seq_col).str.replace_all(r"\(UniMod:\d+\)", "").alias("seq"),
+                pl.col(seq_col).str.replace_all(r"\(UniMod:\d+\)", "").str.len_chars().alias("pep_len"),
+            )
+            df = df.filter(pl.col("pep_len").is_between(8, 25))
+            if mhc_cls == 1:
+                df = df.filter(pl.col("pep_len").is_between(8, 14))
+            elif mhc_cls == 2:
+                df = df.filter(pl.col("pep_len").is_between(13, 25))
+
+            # Aggregate to unique sequences (take max intensity)
+            agg_cols = ["seq", "pep_len"]
+            if "Protein.Group" in df.columns:
+                agg_cols.append("Protein.Group")
+            if "Protein.Names" in df.columns:
+                agg_cols.append("Protein.Names")
+
+            grp = ["seq"]
+            agg = [pl.col("pep_len").first().alias("pep_len")]
+            if "Precursor.Quantity" in df.columns:
+                agg.append(pl.col("Precursor.Quantity").max().alias("intensity"))
+            else:
+                agg.append(pl.lit(0.0).alias("intensity"))
+            if "IM" in df.columns:
+                agg.append(pl.col("IM").median().alias("im"))
+            else:
+                agg.append(pl.lit(None).alias("im"))
+            if "Protein.Group" in df.columns:
+                agg.append(pl.col("Protein.Group").first().alias("protein_group"))
+            else:
+                agg.append(pl.lit("").alias("protein_group"))
+
+            return df.group_by(grp).agg(agg)
+
+        df_a = _load_immuno(path_a, mhc_class)
+        df_b = _load_immuno(path_b, mhc_class)
+
+        seqs_a = set(df_a["seq"].to_list())
+        seqs_b = set(df_b["seq"].to_list())
+
+        # Build intensity dicts
+        int_a = {r["seq"]: r["intensity"] for r in df_a.iter_rows(named=True)}
+        int_b = {r["seq"]: r["intensity"] for r in df_b.iter_rows(named=True)}
+        im_a  = {r["seq"]: r["im"] for r in df_a.iter_rows(named=True)}
+        im_b  = {r["seq"]: r["im"] for r in df_b.iter_rows(named=True)}
+        len_d = {r["seq"]: r["pep_len"] for r in df_a.iter_rows(named=True)}
+        len_d.update({r["seq"]: r["pep_len"] for r in df_b.iter_rows(named=True)})
+        prot_d = {r["seq"]: r["protein_group"] for r in df_a.iter_rows(named=True)}
+        prot_d.update({r["seq"]: r["protein_group"] for r in df_b.iter_rows(named=True)})
+
+        all_seqs = seqs_a | seqs_b
+        shared   = seqs_a & seqs_b
+
+        # Median normalization using shared peptides
+        if len(shared) > 5:
+            shared_list = list(shared)
+            ratios = [int_a[s] / int_b[s] for s in shared_list
+                      if int_a.get(s, 0) > 0 and int_b.get(s, 0) > 0]
+            if ratios:
+                ratios.sort()
+                median_ratio = ratios[len(ratios) // 2]
+            else:
+                median_ratio = 1.0
+        else:
+            median_ratio = 1.0
+
+        # Atlas lookup
+        atlas_known: set[str] = set()
+        try:
+            from stan.search.hla_atlas import AtlasManager
+            result = AtlasManager().coverage(list(all_seqs))
+            atlas_known = set(result.get("matched_seqs", []))
+        except Exception:
+            pass
+
+        # Build output
+        _LOG2_MIN = math.log2(0.01)   # cap for unique-to-A
+        _LOG2_MAX = -_LOG2_MIN        # cap for unique-to-B
+        MAX_PEPS = 2000
+
+        peptides = []
+        for seq in all_seqs:
+            ia = int_a.get(seq, 0.0) or 0.0
+            ib = int_b.get(seq, 0.0) or 0.0
+            ib_norm = ib * median_ratio
+
+            if seq in shared:
+                if ia > 0 and ib_norm > 0:
+                    log2fc = math.log2(ia / ib_norm)
+                else:
+                    log2fc = 0.0
+                status = "known" if seq in atlas_known else "novel_shared"
+            elif seq in seqs_a:
+                log2fc = _LOG2_MAX       # high = only in A
+                status = "known" if seq in atlas_known else "novel_A"
+                ib_norm = ia * 0.01      # pseudo-count for visualization
+            else:
+                log2fc = _LOG2_MIN       # low = only in B
+                status = "known" if seq in atlas_known else "novel_B"
+                ia = ib_norm * 0.01
+
+            peptides.append({
+                "seq":         seq,
+                "length":      len_d.get(seq, len(seq)),
+                "log2fc":      round(log2fc, 3),
+                "intensity_a": round(ia, 0),
+                "intensity_b": round(ib_norm, 0),
+                "status":      status,
+                "protein":     (prot_d.get(seq, "") or "")[:40],
+                "im_a":        round(im_a.get(seq) or 0, 4) if im_a.get(seq) else None,
+                "im_b":        round(im_b.get(seq) or 0, 4) if im_b.get(seq) else None,
+                "in_atlas":    seq in atlas_known,
+            })
+
+        # Sort by abs(log2fc), keep top MAX_PEPS
+        peptides.sort(key=lambda p: abs(p["log2fc"]), reverse=True)
+        peptides_out = peptides[:MAX_PEPS]
+
+        n_novel_a = sum(1 for p in peptides if p["status"] == "novel_A")
+        n_novel_b = sum(1 for p in peptides if p["status"] == "novel_B")
+        n_novel_shared = sum(1 for p in peptides if p["status"] == "novel_shared")
+        n_known  = sum(1 for p in peptides if p["in_atlas"])
+
+        return {
+            "peptides": peptides_out,
+            "stats": {
+                "n_a":             len(seqs_a),
+                "n_b":             len(seqs_b),
+                "n_shared":        len(shared),
+                "n_total":         len(all_seqs),
+                "n_novel_a":       n_novel_a,
+                "n_novel_b":       n_novel_b,
+                "n_novel_shared":  n_novel_shared,
+                "n_atlas_known":   n_known,
+                "median_norm_ratio": round(median_ratio, 4),
+                "atlas_available": len(atlas_known) > 0,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("immuno/compare failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/runs/{run_id}/immuno-landscape")
@@ -2975,6 +3166,299 @@ async def api_hla_coverage(run_id: str, mhc_class: int = 0) -> dict:
     except Exception as e:
         logger.exception("HLA coverage failed for run %s", run_id)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Search Assistant ─────────────────────────────────────────────────────────
+import sqlite3 as _sqlite3_sa
+import subprocess as _subprocess
+import uuid as _uuid
+import asyncio as _asyncio
+
+# In-memory job registry  { job_id: { status, runs, log_lines, started_at, ... } }
+_search_jobs: dict = {}
+
+
+SEARCH_PRESETS = {
+    "hela_digest": {
+        "label": "HeLa / K562 Digest (QC)",
+        "description": "Standard tryptic digest QC. Optimized for 50 ng HeLa or K562 benchmarks.",
+        "icon": "🧫",
+        "color": "#34d399",
+        "diann_args": [
+            "--qvalue", "0.01",
+            "--min-pep-len", "7", "--max-pep-len", "30",
+            "--missed-cleavages", "1",
+            "--cut", "K*,R*",
+            "--threads", "8",
+        ],
+    },
+    "single_cell": {
+        "label": "Single Cell",
+        "description": "Ultra-low input. Match Between Runs enabled. Optimized for <1 ng.",
+        "icon": "🔬",
+        "color": "#22d3ee",
+        "diann_args": [
+            "--qvalue", "0.01",
+            "--min-pep-len", "7", "--max-pep-len", "30",
+            "--missed-cleavages", "1",
+            "--cut", "K*,R*",
+            "--threads", "8",
+            "--reanalyse",
+        ],
+    },
+    "mhc_class_i": {
+        "label": "MHC Class I",
+        "description": "HLA-I immunopeptidomics. Non-tryptic, 8–11 aa, 0 missed cleavages.",
+        "icon": "🛡",
+        "color": "#f472b6",
+        "diann_args": [
+            "--qvalue", "0.01",
+            "--min-pep-len", "8", "--max-pep-len", "11",
+            "--missed-cleavages", "0",
+            "--cut", "*",
+            "--no-cut-before-mod",
+            "--threads", "8",
+        ],
+    },
+    "mhc_class_ii": {
+        "label": "MHC Class II",
+        "description": "HLA-II immunopeptidomics. Non-tryptic, 13–25 aa, 0 missed cleavages.",
+        "icon": "🛡",
+        "color": "#a78bfa",
+        "diann_args": [
+            "--qvalue", "0.01",
+            "--min-pep-len", "13", "--max-pep-len", "25",
+            "--missed-cleavages", "0",
+            "--cut", "*",
+            "--threads", "8",
+        ],
+    },
+    "tmt": {
+        "label": "TMT",
+        "description": "TMT6/TMT10/TMT16 isobaric labeling. Fixed TMT mod on K and peptide N-term.",
+        "icon": "🏷",
+        "color": "#DAAA00",
+        "diann_args": [
+            "--qvalue", "0.01",
+            "--min-pep-len", "7", "--max-pep-len", "30",
+            "--missed-cleavages", "2",
+            "--cut", "K*,R*",
+            "--fixed-mod", "TMT6,229.1629,KX",
+            "--mod", "TMT6,229.1629,*",
+            "--threads", "8",
+        ],
+    },
+    "phospho": {
+        "label": "Phosphoproteomics",
+        "description": "Variable phosphorylation on STY. 2 missed cleavages for enriched samples.",
+        "icon": "⚡",
+        "color": "#fb923c",
+        "diann_args": [
+            "--qvalue", "0.01",
+            "--min-pep-len", "7", "--max-pep-len", "30",
+            "--missed-cleavages", "2",
+            "--cut", "K*,R*",
+            "--var-mod", "UniMod:21,1,STY",
+            "--threads", "8",
+        ],
+    },
+}
+
+
+@app.get("/api/search/unsearched")
+async def api_search_unsearched() -> list[dict]:
+    """Return all runs that have no DIA-NN result (n_proteins IS NULL)."""
+    db_path = get_db_path()
+    with _sqlite3_sa.connect(str(db_path)) as con:
+        con.row_factory = _sqlite3_sa.Row
+        rows = con.execute(
+            "SELECT id, run_name, instrument, raw_path, run_date, acquisition_mode, lc_system "
+            "FROM runs WHERE result_path IS NULL OR n_proteins IS NULL "
+            "ORDER BY run_date DESC, run_name"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/search/presets")
+async def api_search_presets() -> dict:
+    """Return available search presets."""
+    return SEARCH_PRESETS
+
+
+@app.get("/api/search/jobs")
+async def api_search_jobs() -> list[dict]:
+    """Return all active and recent search jobs."""
+    return [
+        {
+            "job_id": jid,
+            "status": j["status"],
+            "preset": j["preset"],
+            "n_runs": len(j["runs"]),
+            "n_done": j["n_done"],
+            "n_failed": j["n_failed"],
+            "started_at": j["started_at"],
+            "label": j.get("label", ""),
+        }
+        for jid, j in _search_jobs.items()
+    ]
+
+
+@app.get("/api/search/jobs/{job_id}")
+async def api_search_job_detail(job_id: str) -> dict:
+    """Return job status + recent log lines."""
+    if job_id not in _search_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    j = _search_jobs[job_id]
+    return {
+        "job_id": job_id,
+        "status": j["status"],
+        "preset": j["preset"],
+        "runs": j["runs"],
+        "n_done": j["n_done"],
+        "n_failed": j["n_failed"],
+        "started_at": j["started_at"],
+        "log": j["log"][-200:],  # last 200 lines
+    }
+
+
+class SearchSubmitRequest(BaseModel):
+    run_ids: list[str]
+    preset: str
+    fasta_path: str
+    library_path: str = ""
+    extra_args: str = ""
+    label: str = ""
+
+
+@app.post("/api/search/submit")
+async def api_search_submit(body: SearchSubmitRequest) -> dict:
+    """Launch a DIA-NN search job for the given runs."""
+    import shutil
+
+    diann = shutil.which("diann") or shutil.which("diann.exe")
+    if not diann:
+        # Try common Windows location
+        diann_win = Path("C:/DIA-NN/2.3.2/diann.exe")
+        if diann_win.exists():
+            diann = str(diann_win)
+    if not diann:
+        raise HTTPException(status_code=400, detail="DIA-NN not found on PATH. Install DIA-NN 2.x and ensure it is on your PATH.")
+
+    if body.preset not in SEARCH_PRESETS:
+        raise HTTPException(status_code=400, detail=f"Unknown preset: {body.preset}")
+
+    fasta_path = Path(body.fasta_path)
+    if not fasta_path.exists():
+        raise HTTPException(status_code=400, detail=f"FASTA not found: {body.fasta_path}")
+
+    if body.library_path and not Path(body.library_path).exists():
+        raise HTTPException(status_code=400, detail=f"Library not found: {body.library_path}")
+
+    # Resolve run records
+    db_path = get_db_path()
+    with _sqlite3_sa.connect(str(db_path)) as con:
+        con.row_factory = _sqlite3_sa.Row
+        runs = []
+        for rid in body.run_ids:
+            row = con.execute("SELECT id, run_name, raw_path FROM runs WHERE id = ?", (rid,)).fetchone()
+            if row:
+                runs.append(dict(row))
+
+    if not runs:
+        raise HTTPException(status_code=400, detail="No valid run IDs found")
+
+    job_id = str(_uuid.uuid4())[:8]
+    _search_jobs[job_id] = {
+        "status": "running",
+        "preset": body.preset,
+        "runs": [r["run_name"] for r in runs],
+        "n_done": 0,
+        "n_failed": 0,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "label": body.label or SEARCH_PRESETS[body.preset]["label"],
+        "log": [],
+    }
+
+    # Run in background thread so API returns immediately
+    def _run_batch():
+        job = _search_jobs[job_id]
+        preset_args = SEARCH_PRESETS[body.preset]["diann_args"]
+        extra = body.extra_args.split() if body.extra_args.strip() else []
+
+        # Default results dir alongside each run's raw file
+        results_base = Path("E:/timsTOF/stan_results")
+        results_base.mkdir(parents=True, exist_ok=True)
+
+        for run in runs:
+            raw = Path(run["raw_path"])
+            stem = run["run_name"].replace(".d", "")
+            out_dir = results_base / stem
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_parquet = out_dir / "report.parquet"
+
+            job["log"].append(f"\n▶ {run['run_name']}")
+
+            if not raw.exists():
+                job["log"].append(f"  ✗ Raw file not found: {raw}")
+                job["n_failed"] += 1
+                continue
+
+            cmd = [diann, "--f", str(raw), "--out", str(out_parquet)] + preset_args
+            if body.fasta_path:
+                cmd += ["--fasta", body.fasta_path]
+            if body.library_path:
+                cmd += ["--lib", body.library_path]
+            cmd += extra
+
+            job["log"].append(f"  cmd: {' '.join(cmd)}")
+
+            try:
+                proc = _subprocess.Popen(
+                    cmd,
+                    stdout=_subprocess.PIPE,
+                    stderr=_subprocess.STDOUT,
+                    text=True,
+                )
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line:
+                        job["log"].append(f"  {line}")
+                proc.wait()
+
+                if proc.returncode == 0 and out_parquet.exists():
+                    # Count proteins and update DB
+                    try:
+                        import pandas as pd
+                        df = pd.read_parquet(str(out_parquet))
+                        if "Protein.Group" in df.columns and "Q.Value" in df.columns:
+                            n = int(df[df["Q.Value"] < 0.01]["Protein.Group"].nunique())
+                        elif "Protein.Group" in df.columns:
+                            n = int(df["Protein.Group"].nunique())
+                        else:
+                            n = None
+
+                        with _sqlite3_sa.connect(str(db_path)) as con:
+                            con.execute(
+                                "UPDATE runs SET n_proteins = ?, result_path = ? WHERE id = ?",
+                                (n, str(out_parquet), run["id"]),
+                            )
+                        job["log"].append(f"  ✓ {n} protein groups")
+                        job["n_done"] += 1
+                    except Exception as e:
+                        job["log"].append(f"  ⚠ Could not parse result: {e}")
+                        job["n_done"] += 1
+                else:
+                    job["log"].append(f"  ✗ DIA-NN failed (exit {proc.returncode})")
+                    job["n_failed"] += 1
+            except Exception as e:
+                job["log"].append(f"  ✗ Error: {e}")
+                job["n_failed"] += 1
+
+        job["status"] = "done"
+        job["log"].append(f"\n✓ Batch complete: {job['n_done']} succeeded, {job['n_failed']} failed")
+
+    threading.Thread(target=_run_batch, daemon=True).start()
+    return {"job_id": job_id, "status": "running", "n_runs": len(runs)}
 
 
 @app.get("/")

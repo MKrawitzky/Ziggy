@@ -688,6 +688,262 @@
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Panel 7 — 3D CELL GLOBE
+    // Plotly scatter3d + surface · proteins placed in biological compartments
+    // Dilution buttons illuminate compartments progressively as depth increases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function _scMakeSphere(cx, cy, cz, R, steps) {
+      const xs=[], ys=[], zs=[];
+      for (let i=0; i<=steps; i++) {
+        const phi = Math.PI * i / steps;
+        xs.push([]); ys.push([]); zs.push([]);
+        for (let j=0; j<=steps; j++) {
+          const theta = 2*Math.PI * j / steps;
+          xs[i].push(cx + R*Math.sin(phi)*Math.cos(theta));
+          ys[i].push(cy + R*Math.sin(phi)*Math.sin(theta));
+          zs[i].push(cz + R*Math.cos(phi));
+        }
+      }
+      return {x:xs, y:ys, z:zs};
+    }
+
+    function _scDetectFrac(inputPg, threshPg, fullPg) {
+      if (!inputPg || inputPg <= 0) return 0;
+      const t = (Math.log10(Math.max(inputPg, 0.01)) - Math.log10(threshPg)) /
+                (Math.log10(fullPg) - Math.log10(threshPg));
+      return Math.max(0, Math.min(1, t));
+    }
+
+    const _SC_COMPS = [
+      { id:'cyto',  name:'Cytoplasm',        color:'#a855f7', rMin:0.40, rMax:0.84, n:130, detect:{t:2,   f:200},
+        proteins:['ACTB','TUBA1B','HSP90AA1','UBB','PKM','GAPDH','ENO1','LDHA','PGK1','YWHAZ','CFL1','VIM','MYH9','HSPB1'] },
+      { id:'er',    name:'ER / Ribosome',    color:'#d946ef', rMin:0.38, rMax:0.58, n:70,  detect:{t:4,   f:400},
+        proteins:['HSPA5','CANX','P4HB','RPS3','RPL7','RPSA','EEF2','EEF1A1','CALR','RPN1','SEC61B','HSP47','DNAJB11'] },
+      { id:'mito',  name:'Mitochondria',     color:'#f97316', rMin:0,    rMax:0,    n:60,  detect:{t:3,   f:300}, isMito:true,
+        proteins:['VDAC1','VDAC2','TOM20','SDHA','UQCRC1','ATP5A1','CYCS','SOD2','MFN1','PINK1','OPA1','TOMM40'] },
+      { id:'nuc',   name:'Nucleus',          color:'#DAAA00', rMin:0.0,  rMax:0.28, n:100, detect:{t:10,  f:1000},
+        proteins:['BCR','ABL1','GATA1','MYC','TP53','PCNA','H3.1','H2A','NF-κB','MYB','RUNX1','NPM1','FUS','HNRNPA1'] },
+      { id:'nenv',  name:'Nuclear Envelope', color:'#818cf8', rMin:0.28, rMax:0.38, n:30,  detect:{t:30,  f:3000},
+        proteins:['LMNA','LMNB1','NUP98','NUP88','NUP153','EMD','SUN1','SUN2','TPR','NUP214'] },
+      { id:'memb',  name:'Plasma Membrane',  color:'#22d3ee', rMin:0.88, rMax:1.0,  n:80,  detect:{t:50,  f:8000},
+        proteins:['CD44','CD45','CD47','CD71','CD34','HLA-A','HLA-B','β2M','CD33','CD13','CD29','ITGAV','CD117','CD43'] },
+    ];
+
+    const _SC_MITO_CENTERS = [
+      [ 0.55,  0.20,  0.35], [-0.40,  0.55,  0.20], [ 0.25, -0.55,  0.40],
+      [-0.35, -0.30,  0.55], [ 0.50,  0.45, -0.30], [-0.50,  0.15, -0.45],
+    ];
+
+    function SCCellGlobe({ runs }) {
+      const ref       = useRef(null);
+      const animRef   = useRef(null);
+      const angleRef  = useRef(0);
+      const [rotating, setRotating] = useState(true);
+      const [selPg,    setSelPg]    = useState(null);
+
+      const levels = useMemo(()=>
+        [...runs].filter(r=>r.n_proteins&&r.inputPg).sort((a,b)=>a.inputPg-b.inputPg),
+      [runs]);
+
+      useEffect(()=>{
+        if (levels.length && !selPg) setSelPg(levels[levels.length-1].inputPg);
+      }, [levels.length]);
+
+      const traces = useMemo(()=>{
+        const out = [];
+
+        // Cell membrane surface (semi-transparent sphere)
+        const cell = _scMakeSphere(0,0,0,1.0,20);
+        out.push({
+          type:'surface', ...cell, name:'Cell Membrane', showlegend:false,
+          colorscale:[[0,'rgba(34,211,238,0.02)'],[1,'rgba(34,211,238,0.07)']],
+          showscale:false, opacity:0.16, hoverinfo:'skip',
+          lighting:{ambient:1.0,diffuse:0.0,specular:0.0,fresnel:0.0},
+          contours:{x:{show:false},y:{show:false},z:{show:false}},
+        });
+
+        // Nucleus surface
+        const nuc = _scMakeSphere(0,0,0,0.30,14);
+        out.push({
+          type:'surface', ...nuc, name:'Nucleus shell', showlegend:false,
+          colorscale:[[0,'rgba(218,170,0,0.04)'],[1,'rgba(218,170,0,0.18)']],
+          showscale:false, opacity:0.38, hoverinfo:'skip',
+          lighting:{ambient:1.0,diffuse:0.0,specular:0.0,fresnel:0.0},
+          contours:{x:{show:false},y:{show:false},z:{show:false}},
+        });
+
+        // Compartment protein clouds
+        _SC_COMPS.forEach(comp=>{
+          const frac  = _scDetectFrac(selPg, comp.detect.t, comp.detect.f);
+          const nDet  = Math.round(comp.n * frac);
+          const nGhost = comp.n - nDet;
+
+          // Stable positions per compartment (seeded)
+          const seed = comp.id.split('').reduce((a,c)=>a+c.charCodeAt(0), 0);
+          const rand = _scRand(seed);
+          const allX=[], allY=[], allZ=[], allText=[];
+
+          for (let i=0; i<comp.n; i++) {
+            let x, y, z;
+            if (comp.isMito) {
+              const mc = _SC_MITO_CENTERS[i % _SC_MITO_CENTERS.length];
+              x = mc[0] + rand.rN()*0.065;
+              y = mc[1] + rand.rN()*0.038;
+              z = mc[2] + rand.rN()*0.038;
+            } else {
+              const r     = comp.rMin + rand.r()*(comp.rMax-comp.rMin);
+              const phi   = Math.acos(2*rand.r()-1);
+              const theta = rand.r()*2*Math.PI;
+              x = r*Math.sin(phi)*Math.cos(theta);
+              y = r*Math.sin(phi)*Math.sin(theta);
+              z = r*Math.cos(phi);
+            }
+            allX.push(x); allY.push(y); allZ.push(z);
+            allText.push(comp.proteins[i % comp.proteins.length]);
+          }
+
+          // Detected (colored, full brightness)
+          if (nDet > 0) {
+            out.push({
+              type:'scatter3d', mode:'markers', name:comp.name,
+              x:allX.slice(0,nDet), y:allY.slice(0,nDet), z:allZ.slice(0,nDet),
+              text:allText.slice(0,nDet),
+              marker:{
+                size:  comp.id==='memb' ? 4 : comp.id==='nuc' ? 3 : 2.5,
+                color: comp.color, opacity:0.88, line:{width:0},
+              },
+              hovertemplate:`<b>%{text}</b><br>${comp.name}<extra></extra>`,
+            });
+          }
+
+          // Ghost (undetected — dark purple placeholders)
+          if (nGhost > 0) {
+            out.push({
+              type:'scatter3d', mode:'markers', name:comp.name+' (not yet detected)',
+              showlegend:false,
+              x:allX.slice(nDet), y:allY.slice(nDet), z:allZ.slice(nDet),
+              marker:{ size:1.0, color:'#2a0848', opacity:0.25, line:{width:0} },
+              hoverinfo:'skip',
+            });
+          }
+        });
+
+        return out;
+      }, [selPg]);
+
+      // Render chart
+      useEffect(()=>{
+        if (!ref.current || !window.Plotly) return;
+        const selRun = levels.find(r=>r.inputPg===selPg);
+        window.Plotly.react(ref.current, traces, {
+          paper_bgcolor: _SC.bg,
+          scene:{
+            bgcolor: _SC.bg,
+            xaxis:{visible:false, range:[-1.3,1.3]},
+            yaxis:{visible:false, range:[-1.3,1.3]},
+            zaxis:{visible:false, range:[-1.3,1.3]},
+            aspectmode:'cube',
+            camera:{eye:{x:2.2,y:0.6,z:0.9}, up:{x:0,y:0,z:1}},
+          },
+          margin:{l:0,r:0,t:44,b:0},
+          title:{
+            text:`K562 Proteome Globe · ${selPg?_scFmtAmt(selPg)+' input · '+(selRun?.n_proteins||'?').toLocaleString()+' proteins':'loading…'}`,
+            font:{color:_SC.text,size:13}, x:0.5,
+          },
+          legend:{
+            font:{color:_SC.text,size:9}, bgcolor:'rgba(14,0,24,0.88)',
+            bordercolor:_SC.border, borderwidth:1,
+            x:0.01, y:0.99, xanchor:'left', yanchor:'top',
+          },
+          showlegend:true,
+        }, {responsive:true, displayModeBar:false});
+      }, [traces, selPg]);
+
+      // Camera rotation (independent of chart data)
+      useEffect(()=>{
+        if (!rotating || !ref.current) return;
+        const step = ()=>{
+          angleRef.current += 0.004;
+          const a = angleRef.current;
+          window.Plotly.relayout(ref.current, {
+            'scene.camera':{ eye:{x:2.2*Math.cos(a), y:2.2*Math.sin(a), z:0.9}, up:{x:0,y:0,z:1} },
+          }).catch(()=>{});
+          animRef.current = requestAnimationFrame(step);
+        };
+        animRef.current = requestAnimationFrame(step);
+        return ()=>cancelAnimationFrame(animRef.current);
+      }, [rotating]);
+
+      // Unmount cleanup
+      useEffect(()=>{
+        return ()=>{
+          cancelAnimationFrame(animRef.current);
+          if (ref.current && window.Plotly) window.Plotly.purge(ref.current);
+        };
+      }, []);
+
+      return React.createElement('div', {style:{display:'flex',flexDirection:'column',gap:10}},
+
+        // Controls row
+        React.createElement('div', {style:{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}},
+          React.createElement('button', {
+            onClick:()=>setRotating(r=>!r),
+            style:{padding:'4px 14px',borderRadius:6,fontSize:11,cursor:'pointer',
+              background:rotating?_SC.violet:_SC.surface,
+              color:rotating?'#fff':_SC.muted,
+              border:`1px solid ${rotating?_SC.violet:_SC.border}`},
+          }, rotating ? '⏸ Pause' : '▶ Rotate'),
+          React.createElement('span',{style:{color:_SC.muted,fontSize:11,marginLeft:4}},'Input depth:'),
+          ...levels.map(r=>
+            React.createElement('button',{key:r.id, onClick:()=>setSelPg(r.inputPg),
+              style:{padding:'3px 10px',borderRadius:4,fontSize:11,cursor:'pointer',
+                background:selPg===r.inputPg?_SC.cyan:_SC.surface,
+                color:selPg===r.inputPg?'#000':_SC.muted,
+                border:`1px solid ${selPg===r.inputPg?_SC.cyan:_SC.border}`},
+            }, _scFmtAmt(r.inputPg))
+          ),
+        ),
+
+        // 3D globe
+        React.createElement('div', {
+          ref, style:{height:520,borderRadius:8,border:`1px solid ${_SC.border}`,overflow:'hidden'},
+        }),
+
+        // Compartment detection grid
+        React.createElement('div', {style:{
+          display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(155px,1fr))',gap:6,marginTop:2,
+        }},
+          _SC_COMPS.map(comp=>{
+            const pct = Math.round(_scDetectFrac(selPg, comp.detect.t, comp.detect.f)*100);
+            return React.createElement('div', {key:comp.id, style:{
+              padding:'7px 10px',borderRadius:6,
+              background:comp.color+'12',
+              border:`1px solid ${pct>0?comp.color+'44':'#2a1040'}`,
+            }},
+              React.createElement('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:2}},
+                React.createElement('span',{style:{color:pct>0?comp.color:'#4a2060',fontSize:10,fontWeight:700}},comp.name),
+                React.createElement('span',{style:{color:pct>0?comp.color:'#4a2060',fontSize:12,fontWeight:800}},`${pct}%`),
+              ),
+              React.createElement('div',{style:{height:3,borderRadius:2,background:'#2a0848',overflow:'hidden',marginBottom:3}},
+                React.createElement('div',{style:{
+                  height:'100%',width:`${pct}%`,
+                  background:`linear-gradient(90deg,${comp.color}88,${comp.color})`,
+                  transition:'width 0.5s ease',
+                }}),
+              ),
+              React.createElement('div',{style:{fontSize:9,color:'#6a3880'}},
+                pct===0 ? `Detects at ~${_scFmtAmt(comp.detect.t)}+` :
+                pct===100 ? 'Fully sampled' :
+                `${Math.round(comp.n*pct/100)} / ${comp.n} proteins`,
+              ),
+            );
+          })
+        ),
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Main Tab
     // ═══════════════════════════════════════════════════════════════════════════
     function SingleCellTab() {
@@ -724,6 +980,7 @@
         {id:'model',   label:'Depth Projection', icon:'📐'},
         {id:'surface', label:'Surfaceome',       icon:'🔮'},
         {id:'radar',   label:'Quality Radar',    icon:'🕸'},
+        {id:'globe',   label:'3D Cell Globe',    icon:'🌐'},
       ];
 
       return React.createElement('div',{style:{padding:16,display:'flex',flexDirection:'column',gap:14}},
@@ -792,12 +1049,13 @@
           borderRadius:12,padding:20,
           boxShadow:'0 0 30px rgba(61,16,96,0.4)',
         }},
-          panel==='arcs'    && React.createElement(SCSensitivityArc,     {runs:k562Runs}),
-          panel==='storm'   && React.createElement(SCIonStorm,           {runs:k562Runs}),
-          panel==='helix'   && React.createElement(SCChargeHelix,        {runs:k562Runs}),
-          panel==='model'   && React.createElement(SCCoverageProjection,  {runs:k562Runs}),
-          panel==='surface' && React.createElement(SCSurfaceomeAtlas,    {runs:k562Runs}),
-          panel==='radar'   && React.createElement(SCDepthRadar,         {runs:k562Runs}),
+          panel==='arcs'    && React.createElement(SCSensitivityArc,    {runs:k562Runs}),
+          panel==='storm'   && React.createElement(SCIonStorm,          {runs:k562Runs}),
+          panel==='helix'   && React.createElement(SCChargeHelix,       {runs:k562Runs}),
+          panel==='model'   && React.createElement(SCCoverageProjection, {runs:k562Runs}),
+          panel==='surface' && React.createElement(SCSurfaceomeAtlas,   {runs:k562Runs}),
+          panel==='radar'   && React.createElement(SCDepthRadar,        {runs:k562Runs}),
+          panel==='globe'   && React.createElement(SCCellGlobe,         {runs:k562Runs}),
         ),
       );
     }

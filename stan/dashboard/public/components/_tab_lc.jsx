@@ -86,11 +86,11 @@
         Plotly.react(ref.current, plotData, layout, { responsive: true, displayModeBar: false });
       }, [traces]);
 
-      useEffect(() => { if (visibleGroups.pressure)  plotGroup(pressureRef, 'pressure',  'Pressure (bar)'); }, [traces, visibleGroups.pressure, plotGroup]);
-      useEffect(() => { if (visibleGroups.gradient)  plotGroup(gradientRef, 'gradient',  'Gradient B (%)');  }, [traces, visibleGroups.gradient, plotGroup]);
-      useEffect(() => { if (visibleGroups.flow)      plotGroup(flowRef,     'flow',      'Flow (µL/min)');   }, [traces, visibleGroups.flow,     plotGroup]);
-      useEffect(() => { if (visibleGroups.temp)      plotGroup(tempRef,     'temp',      'Temp (°C)');       }, [traces, visibleGroups.temp,     plotGroup]);
-      useEffect(() => { if (visibleGroups.counts)    plotGroup(countsRef,   'counts',    'Intensity (counts)'); }, [traces, visibleGroups.counts, plotGroup]);
+      useEffect(() => { if (visibleGroups.pressure)  plotGroup(pressureRef, 'pressure',  'Pressure (bar)');    return () => { if (pressureRef.current  && window.Plotly) window.Plotly.purge(pressureRef.current);  }; }, [traces, visibleGroups.pressure, plotGroup]);
+      useEffect(() => { if (visibleGroups.gradient)  plotGroup(gradientRef, 'gradient',  'Gradient B (%)');    return () => { if (gradientRef.current  && window.Plotly) window.Plotly.purge(gradientRef.current);  }; }, [traces, visibleGroups.gradient, plotGroup]);
+      useEffect(() => { if (visibleGroups.flow)      plotGroup(flowRef,     'flow',      'Flow (µL/min)');     return () => { if (flowRef.current      && window.Plotly) window.Plotly.purge(flowRef.current);      }; }, [traces, visibleGroups.flow,     plotGroup]);
+      useEffect(() => { if (visibleGroups.temp)      plotGroup(tempRef,     'temp',      'Temp (°C)');         return () => { if (tempRef.current      && window.Plotly) window.Plotly.purge(tempRef.current);      }; }, [traces, visibleGroups.temp,     plotGroup]);
+      useEffect(() => { if (visibleGroups.counts)    plotGroup(countsRef,   'counts',    'Intensity (counts)'); return () => { if (countsRef.current    && window.Plotly) window.Plotly.purge(countsRef.current);    }; }, [traces, visibleGroups.counts,   plotGroup]);
 
       const toggleGroup = key => setVisibleGroups(v => ({ ...v, [key]: !v[key] }));
 

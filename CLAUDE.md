@@ -79,8 +79,10 @@ Uses venv at `C:\Users\Admin\STAN\venv`.
 | 4D       | spectra      | _tab_spectra_enzyme.jsx     |
 | 4D       | enzyme       | _tab_spectra_enzyme.jsx     |
 | Research | immuno       | _tab_immuno.jsx             |
+| Research | discovery    | _tab_immuno_discovery.jsx   |
 | Research | denovo       | _tab_denovo.jsx             |
 | Research | searches     | _tab_searches.jsx           |
+| Research | search       | _tab_search_assistant.jsx   |
 | Research | sneaky       | _tab_sneaky.jsx             |
 | Research | mia          | _tab_mia.jsx                |
 | Research | singlecell   | _tab_singlecell.jsx         |

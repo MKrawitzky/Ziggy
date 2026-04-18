@@ -20,8 +20,12 @@
       const cloudRtRef      = useRef(null);   // RT vs 1/K₀ (Kulej style)
       const coverageRef     = useRef(null);   // coverage: inside vs outside windows
       const pasefPolygonRef = useRef(null);   // PASEF polygon view
-      const corridorMapRef  = useRef(null);   // NEW: 1/K₀ vs m/z charge-state corridor map
-      const ridgelineRef    = useRef(null);   // NEW: per-charge 1/K₀ KDE ridgeline
+      const corridorMapRef  = useRef(null);   // 1/K₀ vs m/z charge-state corridor map
+      const ridgelineRef    = useRef(null);   // per-charge 1/K₀ KDE ridgeline
+      const isolationHistRef = useRef(null);  // Δ(1/K₀) histogram for co-isolating pairs
+      const [isolationScore, setIsolationScore] = useState(null); // {pct, totalPairs, resolvedPairs, hist}
+      const [isoMzWindow, setIsoMzWindow]     = useState(1.0);   // Th
+      const [isoRtWindow, setIsoRtWindow]     = useState(30);    // seconds
 
       // Ion detail panel (click-to-inspect)
       const [ionTarget, setIonTarget]       = useState(null);  // {mz, rt, ook0, charge}
@@ -78,7 +82,7 @@
       useEffect(() => {
         return () => {
           [plot3dRef, mzLandscapeRef, waterfallRef, cloudMzRef, cloudRtRef, coverageRef, pasefPolygonRef,
-           xicRef, mobilogramRef, frameHeatmapRef, frameSpectrumRef, corridorMapRef, ridgelineRef].forEach(r => {
+           xicRef, mobilogramRef, frameHeatmapRef, frameSpectrumRef, corridorMapRef, ridgelineRef, isolationHistRef].forEach(r => {
             if (r.current && window.Plotly) window.Plotly.purge(r.current);
           });
           if (rotateAnimRef.current) cancelAnimationFrame(rotateAnimRef.current);
@@ -1395,6 +1399,84 @@
         window.Plotly.react(ridgelineRef.current, traces, layout, {responsive:true,displayModeBar:false});
       }, [data3d]);
 
+      // ── Isolation Score: % of co-isolating pairs resolved in mobility ──
+      useEffect(() => {
+        if (!data3d || !data3d.mz || data3d.mz.length < 10) { setIsolationScore(null); return; }
+        // Only meaningful when we have true mobility FWHM (4DFF .d source, no label = K0 units)
+        const mobilityFwhm = statsData?.fwhm_hist?.median_fwhm;
+        if (!mobilityFwhm || statsData?.fwhm_hist?.label) { setIsolationScore(null); return; }
+
+        // Sort indices by m/z for sliding-window pair search
+        const n = data3d.mz.length;
+        const order = Array.from({length: n}, (_, i) => i).sort((a, b) => data3d.mz[a] - data3d.mz[b]);
+        const sortedMz = order.map(i => data3d.mz[i]);
+        const mzW = isoMzWindow, rtW = isoRtWindow;
+
+        let totalPairs = 0, resolvedPairs = 0;
+        const deltaMobs = []; // |Δ(1/K₀)| for every co-isolating pair (capped for histogram)
+
+        for (let a = 0; a < n; a++) {
+          const ia = order[a];
+          const mzA = data3d.mz[ia], rtA = data3d.rt[ia], mobA = data3d.mobility[ia];
+          for (let b = a + 1; b < n; b++) {
+            if (sortedMz[b] - mzA > mzW) break;          // beyond m/z window
+            const ib = order[b];
+            if (Math.abs(data3d.rt[ib] - rtA) > rtW) continue; // not co-eluting
+            totalPairs++;
+            const dMob = Math.abs(data3d.mobility[ib] - mobA);
+            if (dMob >= mobilityFwhm) resolvedPairs++;
+            if (deltaMobs.length < 20000) deltaMobs.push(dMob);
+          }
+        }
+
+        // Build histogram of |Δ(1/K₀)|
+        const maxD = mobilityFwhm * 6;
+        const BINS = 40;
+        const step = maxD / BINS;
+        const histCounts = new Array(BINS).fill(0);
+        const histEdges = Array.from({length: BINS + 1}, (_, i) => +(i * step).toFixed(5));
+        deltaMobs.forEach(d => {
+          const bi = Math.min(Math.floor(d / step), BINS - 1);
+          histCounts[bi]++;
+        });
+
+        setIsolationScore({
+          pct: totalPairs > 0 ? +(resolvedPairs / totalPairs * 100).toFixed(1) : 0,
+          totalPairs, resolvedPairs,
+          mobilityFwhm,
+          histCounts, histEdges,
+        });
+      }, [data3d, statsData, isoMzWindow, isoRtWindow]);
+
+      // Render isolation histogram
+      useEffect(() => {
+        const el = isolationHistRef.current;
+        if (!el || !window.Plotly) return;
+        if (!isolationScore) { window.Plotly.purge(el); return; }
+        const { histEdges, histCounts, mobilityFwhm } = isolationScore;
+        const xs = histEdges.slice(0, -1).map((e, i) => (e + histEdges[i + 1]) / 2);
+        window.Plotly.react(el, [{
+          type: 'bar',
+          x: xs, y: histCounts,
+          marker: { color: xs.map(x => x >= mobilityFwhm ? '#22c55e' : '#ef4444'), opacity: 0.85 },
+          hovertemplate: 'Δ1/K₀ %{x:.4f}<br>%{y} pairs<extra></extra>',
+        }], {
+          paper_bgcolor: 'transparent', plot_bgcolor: 'rgba(2,40,81,0.25)',
+          xaxis: { title: { text: '|Δ(1/K₀)| Vs/cm²', font: { color: '#a0b4cc', size: 10 } },
+            tickfont: { color: '#a0b4cc', size: 9 }, gridcolor: '#1e3a5f' },
+          yaxis: { title: { text: 'pairs', font: { color: '#a0b4cc', size: 9 } },
+            tickfont: { color: '#a0b4cc', size: 9 }, gridcolor: '#1e3a5f' },
+          shapes: [{ type: 'line', xref: 'x', yref: 'paper',
+            x0: mobilityFwhm, x1: mobilityFwhm, y0: 0, y1: 1,
+            line: { color: '#DAAA00', width: 2, dash: 'dash' } }],
+          annotations: [{ x: mobilityFwhm, y: 0.97, xref: 'x', yref: 'paper',
+            text: `FWHM ${mobilityFwhm.toFixed(4)}`, showarrow: false,
+            font: { color: '#DAAA00', size: 9 }, xanchor: 'left' }],
+          margin: { l: 50, r: 12, t: 10, b: 46 },
+          showlegend: false,
+        }, { responsive: true, displayModeBar: false });
+      }, [isolationScore]);
+
       const nInstruments = useMemo(() => new Set(dRuns.map(r => r.instrument)).size, [dRuns]);
 
       // ── Derived display values — plain assignments, no hooks below this line ──
@@ -2108,6 +2190,59 @@
                         </div>
                       </div>
                       <div ref={ridgelineRef} style={{height:'240px'}} />
+                    </div>
+                  )}
+
+                  {/* ── PASEF Isolation Score ─── */}
+                  {isolationScore && (
+                    <div className="card" style={{marginBottom:'0.75rem'}}>
+                      <div style={{marginBottom:'0.5rem'}}>
+                        <h3 style={{margin:0}}>PASEF Isolation Score</h3>
+                        <div style={{fontSize:'0.72rem',color:'var(--muted)',marginTop:'0.15rem'}}>
+                          Of all co-eluting precursor pairs within the m/z isolation window, what fraction does TIMS separate by ≥1 FWHM in 1/K₀?
+                          · <span style={{color:'#22c55e'}}>green = resolved</span> · <span style={{color:'#ef4444'}}>red = chimeric risk</span>
+                        </div>
+                      </div>
+                      <div style={{display:'grid',gridTemplateColumns:'auto 1fr',gap:'1.25rem',alignItems:'start'}}>
+                        {/* KPI + controls */}
+                        <div style={{minWidth:'160px'}}>
+                          <div style={{textAlign:'center',padding:'0.75rem',background:'rgba(0,0,0,0.2)',borderRadius:'0.5rem',
+                            border:`2px solid ${isolationScore.pct >= 80 ? '#22c55e' : isolationScore.pct >= 60 ? '#eab308' : '#ef4444'}44`}}>
+                            <div style={{fontSize:'2.2rem',fontWeight:800,fontVariantNumeric:'tabular-nums',lineHeight:1,
+                              color: isolationScore.pct >= 80 ? '#22c55e' : isolationScore.pct >= 60 ? '#eab308' : '#ef4444'}}>
+                              {isolationScore.pct}%
+                            </div>
+                            <div style={{fontSize:'0.7rem',color:'var(--muted)',marginTop:'0.3rem'}}>mobility-resolved pairs</div>
+                            <div style={{fontSize:'0.65rem',color:'#4a6070',marginTop:'0.2rem'}}>
+                              {isolationScore.resolvedPairs.toLocaleString()} / {isolationScore.totalPairs.toLocaleString()} pairs
+                            </div>
+                          </div>
+                          <div style={{marginTop:'0.75rem',display:'flex',flexDirection:'column',gap:'0.4rem'}}>
+                            <label style={{fontSize:'0.72rem',color:'var(--muted)'}}>
+                              m/z window ±{isoMzWindow} Th
+                              <input type="range" min="0.5" max="25" step="0.5" value={isoMzWindow}
+                                onChange={e => setIsoMzWindow(+e.target.value)}
+                                style={{width:'100%',marginTop:'0.15rem',accentColor:'#22d3ee'}} />
+                            </label>
+                            <label style={{fontSize:'0.72rem',color:'var(--muted)'}}>
+                              RT window ±{isoRtWindow}s
+                              <input type="range" min="5" max="120" step="5" value={isoRtWindow}
+                                onChange={e => setIsoRtWindow(+e.target.value)}
+                                style={{width:'100%',marginTop:'0.15rem',accentColor:'#22d3ee'}} />
+                            </label>
+                            <div style={{fontSize:'0.67rem',color:'#4a6070',lineHeight:'1.4',marginTop:'0.2rem'}}>
+                              TIMS FWHM threshold: {isolationScore.mobilityFwhm.toFixed(4)} Vs/cm²
+                            </div>
+                          </div>
+                        </div>
+                        {/* Histogram */}
+                        <div>
+                          <div style={{fontSize:'0.72rem',color:'var(--muted)',marginBottom:'0.2rem'}}>
+                            |Δ(1/K₀)| distribution for co-isolating pairs · <span style={{color:'#DAAA00'}}>dashed = 1 FWHM threshold</span>
+                          </div>
+                          <div ref={isolationHistRef} style={{height:'200px'}} />
+                        </div>
+                      </div>
                     </div>
                   )}
 

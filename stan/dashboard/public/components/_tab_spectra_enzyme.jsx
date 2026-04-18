@@ -115,7 +115,7 @@
     }
 
     // One run slot: run picker + peptide search
-    function RunSlot({ slotIdx, allRuns, value, onChange, showAllRuns = false }) {
+    function RunSlot({ slotIdx, allRuns, value, onChange, showAllRuns = false, style = {} }) {
       const [peptSearch, setPeptSearch] = useState('');
       const [peptides, setPeptides] = useState([]);
       const [pLoading, setPLoading] = useState(false);
@@ -144,7 +144,7 @@
       const col = slotColors[slotIdx];
 
       return (
-        <div style={{flex:'1 1 0',minWidth:0,border:`1px solid ${col}33`,borderRadius:'0.5rem',padding:'0.6rem',background:'rgba(1,26,58,0.4)'}}>
+        <div style={{flex:'1 1 0',minWidth:0,border:`1px solid ${col}33`,borderRadius:'0.5rem',padding:'0.6rem',background:'rgba(1,26,58,0.4)',...style}}>
           <div style={{fontSize:'0.72rem',fontWeight:700,color:col,marginBottom:'0.4rem'}}>
             Run {slotIdx + 1}
           </div>
@@ -395,16 +395,33 @@
       return <div ref={ref} style={{width:'100%'}} />;
     }
 
-    function SpectraTab() {
+    function SpectraTab({ pendingSpectrum, onPendingConsumed }) {
       const { data: allRuns, loading: runsLoading } = useFetch('/api/runs?limit=1000');
       const [slots, setSlots] = useState([
         {runId:null, peptide:null},
         {runId:null, peptide:null},
         {runId:null, peptide:null},
       ]);
+      const [jumpFlash, setJumpFlash] = useState(false);
       const [frameSpectra, setFrameSpectra] = useState([null, null, null]);
       const [expData,      setExpData]      = useState([null, null, null]);
       const [loading,      setLoading]      = useState([false, false, false]);
+
+      // Auto-load a peptide from a cross-tab jump (e.g. ★ click in MIA tab)
+      useEffect(() => {
+        if (!pendingSpectrum) return;
+        const { runId, sequence, stripped, charge, mz, rt, best_fr_mz } = pendingSpectrum;
+        const peptide = { sequence, stripped: stripped || sequence, charge, mz, rt, best_fr_mz };
+        setSlots(prev => {
+          const next = [...prev];
+          next[0] = { runId, peptide };
+          return next;
+        });
+        // Flash to draw attention to slot 0
+        setJumpFlash(true);
+        setTimeout(() => setJumpFlash(false), 1800);
+        if (onPendingConsumed) onPendingConsumed();
+      }, [pendingSpectrum]);
 
       // When a peptide is selected: fetch experimental data, then frame spectrum
       useEffect(() => {
@@ -461,11 +478,27 @@
             </div>
           </div>
 
+          {/* Jump flash banner */}
+          {jumpFlash && (
+            <div style={{
+              padding:'0.5rem 1rem', marginBottom:'0.6rem',
+              background:'linear-gradient(90deg,#4ade8020,#4ade8008)',
+              border:'1px solid #4ade8060', borderRadius:'0.5rem',
+              fontSize:'0.82rem', color:'#4ade80', fontWeight:600,
+              display:'flex', alignItems:'center', gap:'0.5rem',
+            }}>
+              <span style={{fontSize:'1rem'}}>★</span>
+              Best.Fr.Mz peptide loaded into Run 1 — spectrum loading…
+            </div>
+          )}
+
           {/* Run slot selectors */}
           <div style={{display:'flex',gap:'0.75rem',marginBottom:'1rem',alignItems:'stretch'}}>
             {slots.map((slot, i) => (
               <RunSlot key={i} slotIdx={i} allRuns={allRuns} value={slot} showAllRuns
-                onChange={v => setSlots(prev => { const n=[...prev]; n[i]=v; return n; })} />
+                onChange={v => setSlots(prev => { const n=[...prev]; n[i]=v; return n; })}
+                style={i === 0 && jumpFlash ? {boxShadow:'0 0 0 2px #4ade8080', transition:'box-shadow 0.3s'} : {}}
+              />
             ))}
           </div>
 
@@ -984,6 +1017,7 @@
       { key: 'ms1_signal',                label: 'MS1 Signal',      unit: '',      higher: true  },
       { key: 'dynamic_range_log10',       label: 'Dynamic Range',   unit: 'log₁₀', higher: true  },
       { key: 'median_points_across_peak', label: 'Points/Peak',     unit: '',      higher: true  },
+      { key: 'mobility_cv',               label: 'Mobility CV',     unit: '%',     higher: false, timsTofOnly: true },
     ];
 
     const METRIC_EXPLAINERS = [
@@ -999,5 +1033,7 @@
         body: 'The ratio (log₁₀) between the highest and lowest quantified precursor intensities. A wider dynamic range means the instrument is detecting both abundant and trace peptides effectively. Typical values: 3–5 log₁₀ orders. Compression of dynamic range can indicate AGC overfilling, ion space charge, or detector saturation.' },
       { key: 'median_points_across_peak', title: 'Data Points Across Peak', color: '#f472b6',
         body: 'Median number of MS2 acquisitions (data points) within the elution window of a peptide peak. More points enable better peak shape reconstruction and quantification. At least 6–10 points per peak is generally recommended for DIA. Fewer points suggest the cycle time is too long relative to peak width — consider adjusting scan parameters or gradient.' },
+      { key: 'mobility_cv', title: 'Ion Mobility CV % (timsTOF)', color: '#22d3ee',
+        body: 'Coefficient of variation (σ/μ × 100) of the 1/K₀ distribution across all identified precursors in a timsTOF run. Because each peptide has a characteristic CCS value, the spread around those values reflects TIMS resolving power and calibration stability. Lower CV = tighter, better-resolved ion clouds. A rising CV over time can signal TIMS degradation or calibration drift before it appears in protein counts.' },
     ];
 

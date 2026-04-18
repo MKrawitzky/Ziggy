@@ -233,6 +233,21 @@
               color="#eab308"
             />
           </div>
+          {sorted.some(r => r.mobility_cv != null) && (
+            <div className="card">
+              <h3>Ion Mobility CV % over time <span style={{fontSize:'0.75rem',color:'#22d3ee',fontWeight:400,marginLeft:'0.4rem'}}>timsTOF · TIMS</span></h3>
+              <Sparkline
+                values={sorted.map(r => r.mobility_cv ?? null)}
+                maintEvents={events}
+                runs={sorted}
+                label="Mobility CV % (lower = tighter TIMS separation)"
+                color="#22d3ee"
+              />
+              <div style={{fontSize:'0.72rem',color:'var(--muted)',marginTop:'0.3rem'}}>
+                CV = σ/μ of 1/K₀ across all precursors. Rising CV can signal TIMS calibration drift or degraded ion optics before protein counts drop.
+              </div>
+            </div>
+          )}
           <div style={{fontSize:'0.75rem', color:'var(--muted)', padding:'0.5rem'}}>
             Dashed vertical lines = maintenance events. Hover for details.
           </div>

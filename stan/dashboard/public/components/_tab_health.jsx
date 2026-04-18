@@ -6,7 +6,11 @@
       const [openMetric, setOpenMetric] = useState(null);
 
       const radarRef = useRef(null);
-      const ljRefs = useRef([null, null, null, null, null, null]);
+      const ljRefs = useRef([null, null, null, null, null, null, null]);
+      const mobFwhmRef  = useRef(null);
+      const mobChargeRef = useRef(null);
+      const [mobStats, setMobStats] = useState(null);
+      const [mobRun, setMobRun] = useState(null);
 
       const instruments = useMemo(() => {
         if (!Array.isArray(allRuns)) return ['All'];
@@ -87,6 +91,7 @@
           margin: { l: 70, r: 70, t: 30, b: 30 }, showlegend: false,
           annotations: [{ text: 'Percentile within local history', x: 0.5, y: -0.12, xref: 'paper', yref: 'paper', showarrow: false, font: { color: '#a0b4cc', size: 10 } }],
         }, { responsive: true, displayModeBar: false });
+        return () => { if (radarRef.current && window.Plotly) window.Plotly.purge(radarRef.current); };
       }, [filteredRuns]);
 
       // Levey-Jennings charts
@@ -132,7 +137,72 @@
             showlegend: false,
           }, { responsive:true, displayModeBar:false });
         });
+        return () => { ljRefs.current.forEach(el => { if (el && window.Plotly) window.Plotly.purge(el); }); };
       }, [filteredRuns]);
+
+      // Ion mobility fingerprint — fetch stats for most recent .d run in filteredRuns
+      useEffect(() => {
+        const dRun = [...filteredRuns].reverse().find(r => r.raw_path && r.raw_path.endsWith('.d'));
+        if (!dRun) { setMobStats(null); setMobRun(null); return; }
+        if (mobRun && mobRun.id === dRun.id) return;
+        setMobRun(dRun);
+        const ac = new AbortController();
+        fetch(API + `/api/runs/${dRun.id}/mobility-stats`, { signal: ac.signal })
+          .then(r => r.ok ? r.json() : {})
+          .then(d => setMobStats(d && Object.keys(d).length ? d : null))
+          .catch(e => { if (e.name !== 'AbortError') setMobStats(null); });
+        return () => ac.abort();
+      }, [filteredRuns]);
+
+      // Render mobility FWHM histogram
+      useEffect(() => {
+        const el = mobFwhmRef.current;
+        if (!el || !window.Plotly) return;
+        const hist = mobStats?.fwhm_hist;
+        if (!hist || !hist.edges || !hist.counts) { window.Plotly.purge(el); return; }
+        const edges = hist.edges;
+        const x = edges.slice(0, -1).map((e, i) => (e + edges[i + 1]) / 2);
+        window.Plotly.react(el, [{
+          type: 'bar', x, y: hist.counts,
+          marker: { color: x.map(v => v < hist.median_fwhm * 1.5 ? '#22d3ee' : '#ef4444'), opacity: 0.85 },
+          hovertemplate: `%{x:.3f} ${hist.label || 'FWHM'}<br>%{y} ions<extra></extra>`,
+        }], {
+          paper_bgcolor: 'transparent', plot_bgcolor: 'rgba(2,40,81,0.25)',
+          xaxis: { title: { text: hist.label || 'FWHM', font: { color: '#a0b4cc', size: 10 } }, tickfont: { color: '#a0b4cc', size: 9 }, gridcolor: '#1e3a5f' },
+          yaxis: { title: { text: 'count', font: { color: '#a0b4cc', size: 9 } }, tickfont: { color: '#a0b4cc', size: 9 }, gridcolor: '#1e3a5f' },
+          margin: { l: 48, r: 12, t: 10, b: 44 },
+          shapes: [{ type: 'line', xref: 'x', yref: 'paper', x0: hist.median_fwhm, x1: hist.median_fwhm, y0: 0, y1: 1, line: { color: '#DAAA00', width: 1.5, dash: 'dash' } }],
+          annotations: [{ x: hist.median_fwhm, y: 0.97, xref: 'x', yref: 'paper', text: `med ${hist.median_fwhm?.toFixed ? hist.median_fwhm.toFixed(2) : hist.median_fwhm}`, showarrow: false, font: { color: '#DAAA00', size: 9 }, xanchor: 'left' }],
+          showlegend: false,
+        }, { responsive: true, displayModeBar: false });
+      }, [mobStats]);
+
+      // Render charge distribution horizontal bar
+      useEffect(() => {
+        const el = mobChargeRef.current;
+        if (!el || !window.Plotly) return;
+        const cd = mobStats?.charge_dist;
+        if (!cd || !cd.charges || !cd.fractions) { window.Plotly.purge(el); return; }
+        const CHARGE_COLORS = { 1: '#2dd4bf', 2: '#60a5fa', 3: '#22c55e', 4: '#f97316', 5: '#a855f7', 6: '#ef4444' };
+        const traces = cd.charges.map((z, i) => ({
+          type: 'bar', orientation: 'h',
+          name: `+${z}`,
+          x: [cd.fractions[i]],
+          y: [''],
+          marker: { color: CHARGE_COLORS[z] || '#94a3b8' },
+          hovertemplate: `+${z}: ${cd.fractions[i]}% (${cd.counts[i].toLocaleString()})<extra></extra>`,
+        }));
+        window.Plotly.react(el, traces, {
+          barmode: 'stack',
+          paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+          xaxis: { range: [0, 100], ticksuffix: '%', tickfont: { color: '#a0b4cc', size: 9 }, gridcolor: '#1e3a5f', fixedrange: true },
+          yaxis: { showticklabels: false, fixedrange: true },
+          margin: { l: 8, r: 12, t: 4, b: 28 },
+          legend: { orientation: 'h', y: -0.5, font: { color: '#a0b4cc', size: 9 } },
+          showlegend: true,
+          height: 70,
+        }, { responsive: true, displayModeBar: false });
+      }, [mobStats]);
 
       // LC health per-system
       const lcStats = useMemo(() => {
@@ -283,7 +353,6 @@
             </p>
             <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'0.75rem'}}>
               {HEALTH_METRICS.map((m, i) => {
-                const ljRef = { current: null };
                 return (
                   <div key={m.key}>
                     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'0.2rem'}}>
@@ -303,6 +372,87 @@
               })}
             </div>
           </div>
+
+          {/* Ion Mobility Fingerprint — timsTOF only */}
+          {(mobStats || filteredRuns.some(r => r.raw_path && r.raw_path.endsWith('.d'))) && (
+            <div className="card" style={{marginBottom:'1rem'}}>
+              <div style={{display:'flex',alignItems:'center',gap:'0.75rem',marginBottom:'0.5rem',flexWrap:'wrap'}}>
+                <h3 style={{margin:0}}>Ion Mobility Fingerprint</h3>
+                {mobRun && <span style={{fontSize:'0.78rem',color:'var(--muted)',fontStyle:'italic'}}>{mobRun.run_name}</span>}
+                <span style={{marginLeft:'auto',fontSize:'0.75rem',padding:'0.15rem 0.5rem',background:'rgba(34,211,238,0.12)',color:'#22d3ee',borderRadius:'0.3rem',border:'1px solid rgba(34,211,238,0.25)'}}>timsTOF · TIMS</span>
+              </div>
+              <p style={{color:'var(--muted)',fontSize:'0.78rem',marginBottom:'0.75rem'}}>
+                Per-run ion mobility health from the most recent .d file. Charge distribution and peak width in the mobility dimension are orthogonal to LC — they reveal TIMS calibration drift and resolution changes before protein counts drop.
+              </p>
+              {!mobStats ? (
+                <div className="empty" style={{padding:'1.5rem'}}>No mobility stats available — ensure a .d run has been processed.</div>
+              ) : (
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'1rem'}}>
+                  {/* Left: KPI badges + charge bar */}
+                  <div>
+                    <div style={{display:'flex',gap:'0.6rem',flexWrap:'wrap',marginBottom:'0.6rem'}}>
+                      {mobRun?.mobility_cv != null && (
+                        <div style={{textAlign:'center',padding:'0.5rem 0.8rem',background:'rgba(34,211,238,0.08)',border:'1px solid rgba(34,211,238,0.25)',borderRadius:'0.4rem'}}>
+                          <div style={{fontSize:'1.3rem',fontWeight:700,color:'#22d3ee',fontVariantNumeric:'tabular-nums'}}>{mobRun.mobility_cv.toFixed(1)}%</div>
+                          <div style={{fontSize:'0.7rem',color:'var(--muted)'}}>Mobility CV</div>
+                        </div>
+                      )}
+                      {mobStats.fwhm_hist?.median_fwhm != null && (
+                        <div style={{textAlign:'center',padding:'0.5rem 0.8rem',background:'rgba(34,211,238,0.06)',border:'1px solid rgba(34,211,238,0.2)',borderRadius:'0.4rem'}}>
+                          <div style={{fontSize:'1.3rem',fontWeight:700,color:'#22d3ee',fontVariantNumeric:'tabular-nums'}}>{Number(mobStats.fwhm_hist.median_fwhm).toFixed(2)}</div>
+                          <div style={{fontSize:'0.7rem',color:'var(--muted)'}}>Median FWHM{mobStats.fwhm_hist.label ? ` (${mobStats.fwhm_hist.label.replace('RT ','')}` : ''}{mobStats.fwhm_hist.label ? ')' : ''}</div>
+                        </div>
+                      )}
+                      {mobStats.charge_dist?.total != null && (
+                        <div style={{textAlign:'center',padding:'0.5rem 0.8rem',background:'rgba(34,211,238,0.06)',border:'1px solid rgba(34,211,238,0.2)',borderRadius:'0.4rem'}}>
+                          <div style={{fontSize:'1.3rem',fontWeight:700,color:'#22d3ee',fontVariantNumeric:'tabular-nums'}}>{mobStats.charge_dist.total.toLocaleString()}</div>
+                          <div style={{fontSize:'0.7rem',color:'var(--muted)'}}>Total Precursors</div>
+                        </div>
+                      )}
+                    </div>
+                    <div style={{fontSize:'0.75rem',color:'var(--muted)',marginBottom:'0.3rem',fontWeight:600}}>Charge State Distribution</div>
+                    <div ref={mobChargeRef} style={{height:'70px'}} />
+                    {mobStats.charge_dist?.charges && (
+                      <div style={{display:'flex',gap:'0.5rem',flexWrap:'wrap',marginTop:'0.4rem'}}>
+                        {mobStats.charge_dist.charges.map((z, i) => {
+                          const CHARGE_COLORS = {1:'#2dd4bf',2:'#60a5fa',3:'#22c55e',4:'#f97316',5:'#a855f7',6:'#ef4444'};
+                          const f = mobStats.charge_dist.fractions[i];
+                          // Expected ranges for tryptic bottom-up digests
+                          const EXPECTED = {1:[1,8], 2:[50,75], 3:[15,40], 4:[2,12]};
+                          const range = EXPECTED[z];
+                          const inRange = !range || (f >= range[0] && f <= range[1]);
+                          const borderColor = inRange ? '#22c55e' : '#eab308';
+                          const tip = range
+                            ? (inRange
+                                ? `+${z}: within expected tryptic range (${range[0]}–${range[1]}%)`
+                                : `+${z}: outside expected range (${range[0]}–${range[1]}%) — may indicate missed cleavages, charge-state bias, or contamination`)
+                            : `+${z}: ${f}%`;
+                          return (
+                            <span key={z} title={tip} style={{fontSize:'0.72rem',padding:'0.1rem 0.4rem',borderRadius:'0.25rem',cursor:'help',
+                              background:`${CHARGE_COLORS[z] || '#94a3b8'}18`,
+                              color: CHARGE_COLORS[z] || '#94a3b8',
+                              border:`1px solid ${borderColor}88`}}>
+                              +{z}: {f}% {inRange ? '✓' : '⚠'}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  {/* Right: FWHM histogram */}
+                  <div>
+                    <div style={{fontSize:'0.75rem',color:'var(--muted)',marginBottom:'0.3rem',fontWeight:600}}>
+                      Peak Width Distribution · <span style={{color:'#DAAA00',fontWeight:400}}>dashed = median</span>
+                    </div>
+                    <div ref={mobFwhmRef} style={{height:'180px'}} />
+                    <div style={{fontSize:'0.72rem',color:'var(--muted)',marginTop:'0.3rem',lineHeight:'1.5'}}>
+                      Narrower peaks = better TIMS resolving power. Drift rightward over successive runs = TIMS degradation or calibration shift.
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Understanding the Metrics — expandable accordion */}
           <div className="card">

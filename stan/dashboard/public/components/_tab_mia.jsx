@@ -1,5 +1,5 @@
     /* ── MIA — Mobility Ion Analysis ────────────────────────────────── */
-    function MiaTab() {
+    function MiaTab({ onSpectrumJump, navigateTo }) {
       const { data: allRuns } = useFetch('/api/runs?limit=1000');
       const runs = Array.isArray(allRuns) ? allRuns : [];
 
@@ -332,9 +332,40 @@
                                               color:rd?.mobility!=null?col:'var(--border)',fontWeight:600,
                                               background: isMin?'rgba(96,165,250,0.06)': isMax?'rgba(168,85,247,0.06)':'transparent'}}>
                                     {rd?.mobility != null ? rd.mobility.toFixed(4) : '—'}
-                                    {rd?.best_fr_mz && <span style={{color:'var(--muted)',fontSize:'0.65rem',marginLeft:'0.2rem'}}>
-                                      ★{rd.best_fr_mz.toFixed(3)}
-                                    </span>}
+                                    {rd?.best_fr_mz && (
+                                      <span
+                                        title={`★ Best.Fr.Mz ${rd.best_fr_mz.toFixed(4)} Th — click to view spectrum`}
+                                        onClick={e => {
+                                          e.stopPropagation();
+                                          if (onSpectrumJump) {
+                                            onSpectrumJump({
+                                              runId:    id,
+                                              sequence: row.sequence,
+                                              stripped: row.stripped,
+                                              charge:   row.charge,
+                                              mz:       row.mz,
+                                              rt:       rd.rt,
+                                              best_fr_mz: rd.best_fr_mz,
+                                            });
+                                          }
+                                          if (navigateTo) navigateTo('spectra');
+                                        }}
+                                        style={{
+                                          color: '#4ade80',
+                                          fontSize: '0.7rem',
+                                          marginLeft: '0.3rem',
+                                          cursor: onSpectrumJump ? 'pointer' : 'default',
+                                          fontWeight: 700,
+                                          padding: '0 0.2rem',
+                                          borderRadius: '0.2rem',
+                                          border: onSpectrumJump ? '1px solid #4ade8055' : 'none',
+                                          background: onSpectrumJump ? '#4ade8015' : 'transparent',
+                                          transition: 'background 0.15s',
+                                        }}
+                                      >
+                                        ★{rd.best_fr_mz.toFixed(3)}
+                                      </span>
+                                    )}
                                   </td>
                                   <td style={{padding:'0.25rem 0.5rem',color:'var(--muted)',fontSize:'0.72rem'}}>
                                     {rd?.rt != null ? rd.rt.toFixed(2) : '—'}
