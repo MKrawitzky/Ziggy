@@ -1,3 +1,310 @@
+    function AboutIMSAdvantage() {
+      const cvRef = React.useRef(null);
+      const rafRef = React.useRef(null);
+
+      React.useEffect(() => {
+        const cv = cvRef.current;
+        if (!cv) return;
+        const ctx = cv.getContext('2d');
+        const W = cv.width, H = cv.height;
+
+        function rr(x, y, w, h, r) {
+          ctx.beginPath();
+          ctx.moveTo(x+r, y);
+          ctx.arcTo(x+w, y, x+w, y+h, r);
+          ctx.arcTo(x+w, y+h, x, y+h, r);
+          ctx.arcTo(x, y+h, x, y, r);
+          ctx.arcTo(x, y, x+w, y, r);
+          ctx.closePath();
+        }
+
+        function glow(cx, cy, rx, ry, col, alpha) {
+          const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(rx, ry));
+          g.addColorStop(0,   col + 'EE');
+          g.addColorStop(0.3, col + '88');
+          g.addColorStop(1,   col + '00');
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.scale(1, ry / rx);
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(cx, cy * (rx / ry), rx, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // 80 particles split between two "peptides"
+        const N = 80;
+        const pts = Array.from({length: N}, (_, i) => ({
+          ion: i % 2,
+          r:     5 + Math.random() * 42,
+          theta: Math.random() * Math.PI * 2,
+          dTheta: (0.4 + Math.random() * 0.6) * (Math.random() < 0.5 ? 1 : -1) * 0.012,
+          ecc:   0.3 + Math.random() * 0.5,
+          phase: Math.random() * Math.PI * 2,
+        }));
+
+        const GOLD = '#DAAA00', VIO = '#d946ef', CYAN = '#22d3ee', RED = '#ef4444', GRN = '#22c55e';
+
+        let t = 0;
+
+        function frame() {
+          ctx.clearRect(0, 0, W, H);
+          t += 0.018;
+
+          // bg
+          ctx.fillStyle = '#06000f';
+          ctx.fillRect(0, 0, W, H);
+
+          // ─── LEFT PANEL — no IMS ───────────────────────────────────────────
+          const LX = 18, LY = 58, LW = W/2 - 26, LH = H - 82;
+          const lCX = LX + LW/2, lCY = LY + LH/2 - 10;
+
+          // border
+          ctx.strokeStyle = RED + '55';
+          ctx.lineWidth = 1.5;
+          rr(LX-4, LY-44, LW+8, LH+58, 8);
+          ctx.fillStyle = 'rgba(239,68,68,0.04)';
+          ctx.fill();
+          ctx.stroke();
+
+          // header
+          ctx.fillStyle = RED;
+          ctx.font = 'bold 12px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('WITHOUT Ion Mobility', lCX, LY - 25);
+          ctx.fillStyle = '#475569';
+          ctx.font = '9.5px system-ui, sans-serif';
+          ctx.fillText('Orbitrap / Astral  ·  3D: RT × m/z × intensity', lCX, LY - 10);
+
+          // axis labels
+          ctx.fillStyle = '#2d3748';
+          ctx.font = '9px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('Retention Time (RT)  →', lCX, LY + LH + 10);
+          ctx.save(); ctx.translate(LX + 6, lCY); ctx.rotate(-Math.PI/2);
+          ctx.fillText('m/z  →', 0, 0); ctx.restore();
+
+          // two peptides at EXACTLY the same point — they merge into one confused blob
+          const pulse = 1 + Math.sin(t * 2.1) * 0.14;
+          const jitter = Math.sin(t * 4.3) * 4;
+          glow(lCX + jitter*0.3, lCY,          36*pulse, 22*pulse, GOLD, 0.75);
+          glow(lCX - jitter*0.3, lCY + jitter, 36*pulse, 22*pulse, VIO,  0.75);
+
+          // particles swarming same center
+          pts.forEach(p => {
+            p.theta += p.dTheta;
+            const px = lCX + Math.cos(p.theta) * p.r;
+            const py = lCY + Math.sin(p.theta) * p.r * p.ecc;
+            ctx.beginPath();
+            ctx.arc(px, py, 1.8, 0, Math.PI*2);
+            ctx.fillStyle = (p.ion === 0 ? GOLD : VIO) + 'AA';
+            ctx.fill();
+          });
+
+          // chimeric warning
+          ctx.fillStyle = RED + 'BB';
+          ctx.font = 'bold 10px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('⚠  CHIMERIC SPECTRUM', lCX, lCY - 52);
+          ctx.fillStyle = '#4b1818';
+          ctx.font = '9px system-ui, sans-serif';
+          ctx.fillText('Peptide A and B inseparable', lCX, lCY - 38);
+
+          // result badge
+          rr(lCX - 110, LY + LH - 22, 220, 20, 4);
+          ctx.fillStyle = 'rgba(239,68,68,0.12)'; ctx.fill();
+          ctx.strokeStyle = RED + '66'; ctx.lineWidth = 1; ctx.stroke();
+          ctx.fillStyle = RED;
+          ctx.font = 'bold 9.5px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('✗  1 ambiguous ID  ·  PTM missed  ·  protein mis-assigned', lCX, LY + LH - 8);
+
+          // ─── RIGHT PANEL — timsTOF 4D ──────────────────────────────────────
+          const RX = W/2 + 8, RY = 58, RW = W/2 - 26, RH = H - 82;
+          const rCX = RX + RW/2;
+
+          ctx.strokeStyle = CYAN + '55';
+          ctx.lineWidth = 1.5;
+          rr(RX-4, RY-44, RW+8, RH+58, 8);
+          ctx.fillStyle = 'rgba(34,211,238,0.03)';
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = CYAN;
+          ctx.font = 'bold 12px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('WITH TIMS — timsTOF 4D', rCX, RY - 25);
+          ctx.fillStyle = '#475569';
+          ctx.font = '9.5px system-ui, sans-serif';
+          ctx.fillText('m/z × 1/K₀  ·  adding the ion mobility dimension', rCX, RY - 10);
+
+          // axis labels
+          ctx.fillStyle = '#2d3748';
+          ctx.font = '9px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('m/z  →', rCX, RY + RH + 10);
+          ctx.save(); ctx.translate(RX + 6, RY + RH/2); ctx.rotate(-Math.PI/2);
+          ctx.fillText('1/K₀ (ion mobility)  →', 0, 0); ctx.restore();
+
+          // two peptides now SEPARATED by 1/K₀
+          const k0A = 0.987, k0B = 0.954;
+          const k0Min = 0.92, k0Max = 1.02;
+          const toY = k => RY + RH * (1 - (k - k0Min) / (k0Max - k0Min));
+          const yA = toY(k0A), yB = toY(k0B);
+
+          // dashed separation line
+          ctx.save();
+          ctx.setLineDash([3, 5]);
+          ctx.strokeStyle = CYAN + '33';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(RX + 14, (yA+yB)/2);
+          ctx.lineTo(RX + RW - 6, (yA+yB)/2);
+          ctx.stroke();
+          ctx.restore();
+          ctx.fillStyle = CYAN + '44';
+          ctx.font = '8px system-ui, sans-serif';
+          ctx.textAlign = 'right';
+          ctx.fillText('TIMS separation', RX + RW - 8, (yA+yB)/2 - 3);
+
+          // separated blobs
+          const sA = 1 + Math.sin(t*1.4) * 0.04;
+          const sB = 1 + Math.sin(t*1.7+1) * 0.04;
+          glow(rCX, yA, 28*sA, 10*sA, GOLD, 0.9);
+          glow(rCX, yB, 28*sB, 10*sB, VIO,  0.9);
+
+          // peak labels
+          ctx.fillStyle = GOLD;
+          ctx.font = 'bold 9px system-ui, sans-serif';
+          ctx.textAlign = 'left';
+          ctx.fillText('Peptide A  ·  1/K₀ = 0.987  ·  CCS = 348 Å²', rCX + 32, yA + 4);
+          ctx.fillStyle = VIO;
+          ctx.fillText('Peptide B  ·  1/K₀ = 0.954  ·  CCS = 335 Å²', rCX + 32, yB + 4);
+
+          // particles orbiting separate targets
+          pts.forEach(p => {
+            const tY = p.ion === 0 ? yA : yB;
+            const px = rCX + Math.cos(p.theta * 0.9) * p.r;
+            const py = tY  + Math.sin(p.theta * 0.9) * p.r * 0.25;
+            ctx.beginPath();
+            ctx.arc(px, py, 1.8, 0, Math.PI*2);
+            ctx.fillStyle = (p.ion === 0 ? GOLD : VIO) + 'CC';
+            ctx.fill();
+          });
+
+          // result badge
+          rr(rCX - 110, RY + RH - 22, 220, 20, 4);
+          ctx.fillStyle = 'rgba(34,197,94,0.12)'; ctx.fill();
+          ctx.strokeStyle = GRN + '66'; ctx.lineWidth = 1; ctx.stroke();
+          ctx.fillStyle = GRN;
+          ctx.font = 'bold 9.5px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('✓  2 clean IDs  ·  PTM confirmed  ·  protein correctly assigned', rCX, RY + RH - 8);
+
+          // ─── VS label ─────────────────────────────────────────────────────
+          const vsGlow = 0.7 + Math.sin(t * 1.6) * 0.3;
+          ctx.globalAlpha = vsGlow;
+          ctx.fillStyle = '#a855f7';
+          ctx.font = 'bold 17px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('VS', W/2, H/2 + 4);
+          ctx.globalAlpha = 1;
+
+          rafRef.current = requestAnimationFrame(frame);
+        }
+
+        rafRef.current = requestAnimationFrame(frame);
+        return () => cancelAnimationFrame(rafRef.current);
+      }, []);
+
+      const ROWS = [
+        {feature:'Ion Mobility Dimension',    tims:'TIMS (1/K₀ native)',       astral:'None',                  exploris:'FAIMS only *'},
+        {feature:'Structural info (CCS)',      tims:'Yes — Å² per peptide',     astral:'No',                    exploris:'No *'},
+        {feature:'Isobaric / chimeric sep.',   tims:'Yes — IMS splits overlaps',astral:'Speed-based only',      exploris:'Partial (FAIMS CV)'},
+        {feature:'PASEF multiplexing',         tims:'Yes — ~10× DDA boost',     astral:'No (speed instead)',    exploris:'No'},
+        {feature:'Single-cell (carrier-free)', tims:'Yes — 1,000–2,000 prot.',  astral:'Emerging / limited',    exploris:'No'},
+        {feature:'Proteome depth 1hr HeLa',    tims:'~8,000–10,000 proteins',   astral:'~10,000–12,000 proteins','exploris':'~6,000–8,000 proteins'},
+        {feature:'Scan speed (DIA MS2)',       tims:'~100 Hz via diaPASEF',     astral:'~200 Hz (industry-leading)','exploris':'~40 Hz'},
+        {feature:'Portable CCS fingerprint',   tims:'Yes (cross-lab, cross-inst.)','astral':'No','exploris':'No'},
+        {feature:'Immunopeptidomics z=+1',     tims:'Yes — IMS resolves z=+1',  astral:'Difficult (chimera)',   exploris:'Difficult'},
+        {feature:'Raw sensitivity (large amt)',tims:'Excellent',                 astral:'Best-in-class',         exploris:'Very good'},
+      ];
+      const TH = {color:'var(--muted)',fontSize:'0.75rem',padding:'0.3rem 0.5rem',fontWeight:600,borderBottom:'1px solid var(--border)',textAlign:'left'};
+      const TD = {fontSize:'0.76rem',padding:'0.28rem 0.5rem',borderBottom:'1px solid rgba(255,255,255,0.04)',verticalAlign:'top'};
+
+      const winTims    = new Set([0,1,2,3,4,7,8]);
+      const winAstral  = new Set([5,6,9]);
+      const neutralRow = new Set([]);
+
+      return (
+        <div className="card" style={{marginBottom:'1rem',background:'linear-gradient(160deg,rgba(6,0,15,0.97) 0%,rgba(1,15,35,0.9) 100%)',border:'1px solid rgba(168,85,247,0.2)'}}>
+          <h3 style={{marginBottom:'0.3rem',background:'linear-gradient(90deg,#22d3ee,#a855f7)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent'}}>
+            Why 4D Ion Mobility Changes Everything
+          </h3>
+          <p style={{color:'var(--muted)',fontSize:'0.82rem',lineHeight:1.65,marginBottom:'0.85rem'}}>
+            The scenario below is real: <strong style={{color:'#DAAA00'}}>Peptide A</strong> and{' '}
+            <strong style={{color:'#d946ef'}}>Peptide B</strong> share <em>identical m/z and co-elute at the same retention time</em>.
+            On an Orbitrap or Astral they produce a single chimeric spectrum — one mis-assigned ID, one missed PTM.
+            timsTOF separates them in the 1/K₀ dimension in <strong style={{color:'#22d3ee'}}>milliseconds</strong>.
+          </p>
+          <canvas ref={cvRef} width={900} height={400}
+            style={{width:'100%',borderRadius:'0.5rem',display:'block',marginBottom:'1rem'}} />
+
+          {/* Key callout stats */}
+          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'0.6rem',marginBottom:'1rem'}}>
+            {[
+              {val:'~33%',label:'of DIA precursors are chimeric without IMS',color:'#ef4444',note:'IMS cuts chimeric co-isolation significantly'},
+              {val:'10×',label:'more peptides sampled per unit time via PASEF',color:'#22d3ee',note:'vs traditional DDA at equivalent scan speed'},
+              {val:'150 pg',label:'single K562 cell — resolved without carrier',color:'#DAAA00',note:'timsTOF Ultra enables true carrier-free single-cell'},
+            ].map(s=>(
+              <div key={s.val} style={{background:'rgba(0,0,0,0.4)',border:`1px solid ${s.color}33`,borderRadius:'0.5rem',padding:'0.7rem 0.85rem'}}>
+                <div style={{fontSize:'1.6rem',fontWeight:900,color:s.color,lineHeight:1}}>{s.val}</div>
+                <div style={{fontSize:'0.75rem',color:'#94a3b8',marginTop:'0.3rem',lineHeight:1.5}}>{s.label}</div>
+                <div style={{fontSize:'0.68rem',color:'#4a5568',marginTop:'0.2rem',fontStyle:'italic'}}>{s.note}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Comparison table */}
+          <div style={{overflowX:'auto'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:'0.78rem'}}>
+              <thead>
+                <tr>
+                  <th style={{...TH,width:'28%'}}>Feature</th>
+                  <th style={{...TH,color:'#22d3ee'}}>timsTOF Ultra 2  (Bruker)</th>
+                  <th style={{...TH,color:'#f97316'}}>Orbitrap Astral  (Thermo)</th>
+                  <th style={{...TH,color:'#94a3b8'}}>Exploris 480 + FAIMS  (Thermo)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ROWS.map((row, i) => (
+                  <tr key={i} style={{background: i%2===0?'rgba(255,255,255,0.01)':'transparent'}}>
+                    <td style={{...TD,color:'#94a3b8',fontWeight:600}}>{row.feature}</td>
+                    <td style={{...TD,color: winTims.has(i)?'#22d3ee':'#64748b'}}>
+                      {winTims.has(i) && <span style={{color:'#22c55e',marginRight:'0.3rem'}}>✓</span>}
+                      {row.tims}
+                    </td>
+                    <td style={{...TD,color: winAstral.has(i)?'#f97316':'#4a5568'}}>
+                      {winAstral.has(i) && <span style={{color:'#f97316',marginRight:'0.3rem'}}>★</span>}
+                      {row.astral}
+                    </td>
+                    <td style={{...TD,color:'#374151'}}>{row.exploris}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{marginTop:'0.6rem',fontSize:'0.72rem',color:'#374151',lineHeight:1.7}}>
+            <strong style={{color:'#f97316'}}>★ Astral wins on raw speed and depth at high input.</strong>{' '}
+            This table is intentionally honest: the Astral is the fastest proteomics instrument available and matches or beats timsTOF on total protein IDs with 200ng+ samples.
+            The timsTOF advantage is structural — 1/K₀, CCS, chimera reduction, single-cell depth, and the PASEF multiplexing architecture that no other platform replicates.{' '}
+            <strong style={{color:'#94a3b8'}}>* FAIMS</strong> on the Exploris uses a compensation voltage (CV) to filter ions by mobility, but does NOT report 1/K₀ or CCS — it provides selectivity, not structural measurement.
+          </div>
+        </div>
+      );
+    }
+
     function AboutTab() {
       const { data: ver } = useFetch('/api/version');
       const [factIdx, setFactIdx] = React.useState(0);
@@ -149,10 +456,11 @@
                          'Longitudinal trend charts','Column lifetime & maintenance log'],
                 },
                 {
-                  icon:'🔵', title:'Ion Mobility (timsTOF)',
+                  icon:'🔵', title:'Ion Mobility (TIMS / 1/K₀)',
                   items:['4D feature map: m/z × 1/K₀ × RT × intensity','PEAKS-style waterfall (m/z × 1/K₀ × intensity)',
                          'RT × 1/K₀ heatmap with axis ticks','Charge-state filter & m/z / RT sliders',
-                         'Immunopeptidomics & peptidomics z=+1 support'],
+                         'Immunopeptidomics & peptidomics z=+1 support',
+                         '1/K₀ is universal (TIMS/DTIMS/TWIMS); PASEF multiplexing is timsTOF-specific'],
                 },
                 {
                   icon:'🔬', title:'Spectrum Viewer',
@@ -409,7 +717,7 @@
                   desc:'Signal strength. Proportional to peptide abundance. Every LC-MS instrument has this.',
                   orbi:true, tims:true},
                 {dim:'4',name:'Ion Mobility (1/K₀)',unit:'Vs/cm²',icon:'🌀',color:'#60a5fa',
-                  desc:'How fast an ion drifts through a gas under an electric field — determined by its 3D shape and charge. timsTOF unique.',
+                  desc:'How fast an ion drifts through a gas under an electric field — determined by its 3D shape and charge. Measured by TIMS (Bruker), DTIMS (Agilent), and TWIMS (Waters). PASEF multiplexing is timsTOF-specific.',
                   orbi:false, tims:true},
               ].map(d=>(
                 <div key={d.dim} style={{background:d.tims&&!d.orbi?'rgba(96,165,250,0.08)':'rgba(255,255,255,0.02)',
@@ -420,7 +728,7 @@
                     <span style={{fontSize:'0.62rem',fontWeight:700,padding:'0.1rem 0.35rem',borderRadius:'0.25rem',
                       background:d.tims&&!d.orbi?'rgba(96,165,250,0.2)':'rgba(255,255,255,0.05)',
                       color:d.tims&&!d.orbi?'#60a5fa':'#475569'}}>
-                      {d.tims&&!d.orbi?'timsTOF ONLY':'All platforms'}
+                      {d.tims&&!d.orbi?'IMS platforms':'All platforms'}
                     </span>
                   </div>
                   <div style={{fontSize:'0.85rem',fontWeight:700,color:d.tims&&!d.orbi?'#60a5fa':'#94a3b8',marginBottom:'0.2rem'}}>
@@ -434,12 +742,34 @@
             <div style={{fontSize:'0.78rem',color:'#4a6070',lineHeight:1.7,borderTop:'1px solid rgba(255,255,255,0.06)',paddingTop:'0.6rem'}}>
               <strong style={{color:'#60a5fa'}}>Why does the 4th dimension matter?</strong> Ion mobility separates
               co-eluting, isobaric peptides that are identical in RT and m/z but differ in 3D shape.
-              It also allows PASEF multiplexing — the instrument fragments multiple co-isolated precursors
-              in a single TIMS scan cycle, boosting sensitivity and speed by ~10× compared to traditional DDA.
-              The 1/K₀ value can be converted to a calibration-independent CCS (Å²) that is
-              reproducible across labs — a molecular fingerprint.
+              It also enables PASEF multiplexing on timsTOF — the instrument fragments multiple co-isolated
+              precursors in a single TIMS scan cycle, boosting sensitivity and speed by ~10× vs traditional DDA.
+              The 1/K₀ value converts to a calibration-independent CCS (Å²) reproducible across labs — a molecular fingerprint.
+            </div>
+            <div style={{marginTop:'0.6rem',fontSize:'0.74rem',lineHeight:1.75,background:'rgba(96,165,250,0.05)',border:'1px solid rgba(96,165,250,0.12)',borderRadius:'0.4rem',padding:'0.55rem 0.8rem'}}>
+              <strong style={{color:'#60a5fa'}}>Is 1/K₀ unique to TIMS?</strong> No.{' '}
+              1/K₀ (inverse reduced mobility, V·s/cm²) is a <em>universal</em> physical quantity measured by all ion mobility technologies.
+              What differs is the hardware implementation:
+              <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'0.4rem',marginTop:'0.45rem'}}>
+                {[
+                  {vendor:'Bruker timsTOF',tech:'TIMS',note:'Ions trapped by opposing electric field; eluted by ramping voltage. Reports 1/K₀ natively. PASEF multiplexing is unique to TIMS.', color:'#60a5fa'},
+                  {vendor:'Agilent 6560',tech:'DTIMS (Drift Tube)',note:'Ions drift under a uniform field through a tube of inert gas. Gold standard for absolute CCS — 1/K₀ measured directly, no calibration needed.', color:'#22d3ee'},
+                  {vendor:'Waters SYNAPT / VION',tech:'TWIMS (Travelling Wave)',note:'Ions propelled by a travelling voltage wave. Requires calibration standards to convert to 1/K₀ or CCS, but fully compatible with the same unit.', color:'#a855f7'},
+                ].map(r=>(
+                  <div key={r.vendor} style={{background:'rgba(0,0,0,0.25)',borderRadius:'0.3rem',padding:'0.4rem 0.55rem',border:`1px solid ${r.color}22`}}>
+                    <div style={{color:r.color,fontWeight:700,fontSize:'0.72rem',marginBottom:'0.15rem'}}>{r.vendor}</div>
+                    <div style={{color:'#475569',fontSize:'0.68rem',marginBottom:'0.2rem',fontStyle:'italic'}}>{r.tech}</div>
+                    <div style={{color:'#4a5568',fontSize:'0.67rem',lineHeight:1.5}}>{r.note}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{marginTop:'0.45rem',color:'#374151'}}>
+                <strong style={{color:'#60a5fa'}}>What IS timsTOF-specific:</strong> The TIMS trapping mechanism, PASEF/diaPASEF multiplexing, and the real-time 4D feature extraction at ~10 TIMS scans/sec. The <em>unit</em> (1/K₀) is shared across all three vendors — meaning CCS values are portable.
+              </div>
             </div>
           </div>
+
+          <AboutIMSAdvantage />
 
           <div className="card">
             <h3>Resources</h3>

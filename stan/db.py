@@ -173,6 +173,12 @@ def _migrate(con: sqlite3.Connection) -> None:
         ("missed_cleavage_rate_2plus", "ALTER TABLE runs ADD COLUMN missed_cleavage_rate_2plus REAL"),
         # Charge state 4+ percentage (added 2026-04-16)
         ("pct_charge_4plus", "ALTER TABLE runs ADD COLUMN pct_charge_4plus REAL"),
+        # User-assigned run classification (added 2026-04-17)
+        ("sample_type", "ALTER TABLE runs ADD COLUMN sample_type TEXT DEFAULT ''"),
+        # Workflow hint — affects search parameters (added 2026-04-17)
+        ("workflow", "ALTER TABLE runs ADD COLUMN workflow TEXT DEFAULT ''"),
+        # Notes / free-text annotation (added 2026-04-17)
+        ("run_notes", "ALTER TABLE runs ADD COLUMN run_notes TEXT DEFAULT ''"),
     ]
 
     for col, ddl in migrations:

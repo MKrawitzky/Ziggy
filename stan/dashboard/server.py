@@ -2342,6 +2342,169 @@ async def api_process_all_new() -> dict:
     }
 
 
+# ── Run annotation (sample type, workflow, notes) ─────────────────────
+
+_VALID_SAMPLE_TYPES = {"", "QC", "Sample", "Blank", "Standard", "Pool"}
+_VALID_WORKFLOWS    = {"", "Standard", "Immunopeptidomics", "Single Cell", "Training", "Phospho", "Glyco", "Crosslink"}
+
+@app.patch("/api/runs/{run_id}/annotate")
+async def api_annotate_run(run_id: str, body: dict) -> dict:
+    """Set sample_type, workflow, and/or run_notes for a run."""
+    updates: dict[str, str] = {}
+    if "sample_type" in body:
+        val = str(body["sample_type"]).strip()
+        if val not in _VALID_SAMPLE_TYPES:
+            from fastapi import HTTPException
+            raise HTTPException(400, f"Invalid sample_type '{val}'")
+        updates["sample_type"] = val
+    if "workflow" in body:
+        val = str(body["workflow"]).strip()
+        if val not in _VALID_WORKFLOWS:
+            from fastapi import HTTPException
+            raise HTTPException(400, f"Invalid workflow '{val}'")
+        updates["workflow"] = val
+    if "run_notes" in body:
+        updates["run_notes"] = str(body["run_notes"])[:500]
+
+    if not updates:
+        return {"ok": True}
+
+    cols = ", ".join(f"{k} = ?" for k in updates)
+    vals = list(updates.values()) + [run_id]
+    with get_db() as con:
+        con.execute(f"UPDATE runs SET {cols} WHERE id = ?", vals)
+    return {"ok": True, "updated": list(updates.keys())}
+
+
+# ── Auto-search scheduler ─────────────────────────────────────────────
+# Polls every minute. Queues runs that have been waiting longer than
+# auto_search_delay_minutes (default 60) with no search results.
+# Honours a quiet window: skip if current hour is NOT in the active range.
+
+_auto_search_cfg: dict = {
+    "enabled": False,
+    "delay_minutes": 60,          # how long a file must sit before auto-search
+    "quiet_start": None,          # hour 0-23 to stop auto-search (None = always on)
+    "quiet_end":   None,          # hour 0-23 to resume
+    "last_run": None,
+    "last_queued": 0,
+}
+
+def _auto_search_loop() -> None:
+    """Background daemon that auto-queues unsearched runs on a schedule."""
+    import time as _time
+    while True:
+        _time.sleep(60)
+        try:
+            cfg = _auto_search_cfg
+            if not cfg["enabled"]:
+                continue
+            now = __import__("datetime").datetime.now()
+            hour = now.hour
+            qs, qe = cfg.get("quiet_start"), cfg.get("quiet_end")
+            if qs is not None and qe is not None:
+                in_quiet = (qs < qe and qs <= hour < qe) or (qs > qe and (hour >= qs or hour < qe))
+                if in_quiet:
+                    continue
+            # Find runs that arrived more than delay_minutes ago with no search results
+            delay_min = cfg.get("delay_minutes", 60)
+            cutoff_iso = (now - __import__("datetime").timedelta(minutes=delay_min)).isoformat()
+            all_runs = get_runs(limit=5000)
+            watcher = _get_instruments_watcher()
+            instruments_cfg = watcher.data.get("instruments", []) if watcher else []
+            queued = 0
+            for run in all_runs:
+                has_primary = run.get("n_precursors") is not None or run.get("n_psms") is not None
+                if has_primary:
+                    continue
+                run_date = run.get("run_date") or ""
+                if run_date > cutoff_iso:
+                    continue  # too recent, let it wait
+                run_id = str(run["id"])
+                raw_path_str = run.get("raw_path", "")
+                if not raw_path_str or not Path(raw_path_str).exists():
+                    continue
+                with _process_lock:
+                    existing = _process_jobs.get(run_id, {})
+                    if existing.get("status") in ("queued", "running"):
+                        continue
+                inst_name = run.get("instrument", "")
+                inst_cfg = next((i for i in instruments_cfg if i.get("name") == inst_name), {})
+                with _process_lock:
+                    _process_jobs[run_id] = {"status": "queued", "message": "Auto-queued…"}
+                t = threading.Thread(target=_run_process_job, args=(run_id, run, inst_cfg), daemon=True)
+                t.start()
+                queued += 1
+            cfg["last_run"] = now.isoformat()
+            cfg["last_queued"] = queued
+            if queued:
+                logger.info("Auto-search: queued %d runs", queued)
+        except Exception:
+            logger.exception("Auto-search loop error")
+
+_auto_search_thread = threading.Thread(target=_auto_search_loop, daemon=True)
+_auto_search_thread.start()
+
+
+@app.get("/api/auto-search/config")
+async def api_auto_search_get() -> dict:
+    return dict(_auto_search_cfg)
+
+
+@app.post("/api/auto-search/config")
+async def api_auto_search_set(body: dict) -> dict:
+    """Update auto-search scheduler settings."""
+    if "enabled" in body:
+        _auto_search_cfg["enabled"] = bool(body["enabled"])
+    if "delay_minutes" in body:
+        v = int(body["delay_minutes"])
+        _auto_search_cfg["delay_minutes"] = max(5, min(1440, v))
+    if "quiet_start" in body:
+        v = body["quiet_start"]
+        _auto_search_cfg["quiet_start"] = None if v is None else max(0, min(23, int(v)))
+    if "quiet_end" in body:
+        v = body["quiet_end"]
+        _auto_search_cfg["quiet_end"] = None if v is None else max(0, min(23, int(v)))
+    return dict(_auto_search_cfg)
+
+
+@app.get("/api/unsearched-runs")
+async def api_unsearched_runs() -> dict:
+    """Count and list runs that have no search results."""
+    all_runs = get_runs(limit=5000)
+    unsearched = []
+    now_iso = __import__("datetime").datetime.now().isoformat()
+    for run in all_runs:
+        has_primary = run.get("n_precursors") is not None or run.get("n_psms") is not None
+        if has_primary:
+            continue
+        run_date = run.get("run_date") or ""
+        raw_ok = bool(run.get("raw_path") and Path(run.get("raw_path","")).exists())
+        age_min = None
+        if run_date:
+            try:
+                from datetime import datetime, timezone
+                rd = datetime.fromisoformat(run_date.replace("Z","+00:00"))
+                now_dt = datetime.now(tz=timezone.utc)
+                age_min = int((now_dt - rd.astimezone(timezone.utc)).total_seconds() / 60)
+            except Exception:
+                pass
+        status = _process_jobs.get(str(run["id"]), {}).get("status", "idle")
+        unsearched.append({
+            "id": run["id"],
+            "run_name": run.get("run_name",""),
+            "run_date": run_date,
+            "raw_path": run.get("raw_path",""),
+            "raw_exists": raw_ok,
+            "age_minutes": age_min,
+            "mode": run.get("mode",""),
+            "instrument": run.get("instrument",""),
+            "status": status,
+        })
+    unsearched.sort(key=lambda r: r.get("run_date",""), reverse=True)
+    return {"count": len(unsearched), "runs": unsearched}
+
+
 # ── Static frontend ──────────────────────────────────────────────────
 
 _FRONTEND_DIR = Path(__file__).parent / "public"
