@@ -476,7 +476,7 @@
                 {label:'Median Δ 1/K₀', val: (medShift >= 0 ? '+' : '') + medShift.toFixed(4) + ' Vs/cm²',
                   col: shiftAlert ? '#ef4444' : shiftWarn ? '#f97316' : '#22c55e'},
                 {label:'Std deviation', val: '±' + calData.stats.std_shift.toFixed(4), col:'#22d3ee'},
-                {label:'5th–95th pct', val: calData.stats.p05_shift.toFixed(3) + ' to +' + calData.stats.p95_shift.toFixed(3), col:'#94a3b8'},
+                {label:'5th–95th pct', val: (calData.stats.p05_shift >= 0 ? '+' : '') + calData.stats.p05_shift.toFixed(3) + ' to ' + (calData.stats.p95_shift >= 0 ? '+' : '') + calData.stats.p95_shift.toFixed(3), col:'#94a3b8'},
                 {label:'Precursors', val: calData.n_precursors?.toLocaleString(), col:'#94a3b8'},
                 {label:'Est. ΔP', val: estPressureMbar != null ? `~${estPressureMbar} mbar` : '—',
                   col: estPressureMbar > 30 ? '#ef4444' : estPressureMbar > 15 ? '#f97316' : '#22c55e'},
