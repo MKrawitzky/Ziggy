@@ -835,6 +835,22 @@
         }
       };
 
+      // Recompute metrics for runs with blank fields
+      const [recomputeStatus, setRecomputeStatus] = useState({}); // run_id → 'loading'|'done'|'error'
+      const doRecompute = async (runId, e) => {
+        e.stopPropagation();
+        const sid = String(runId);
+        setRecomputeStatus(prev => ({...prev, [sid]: 'loading'}));
+        try {
+          const r = await fetch(API + `/api/runs/${sid}/recompute-metrics`, {method: 'POST'});
+          const d = r.ok ? await r.json() : {ok: false};
+          setRecomputeStatus(prev => ({...prev, [sid]: d.ok ? 'done' : 'error'}));
+          if (d.ok) reloadRuns();
+        } catch {
+          setRecomputeStatus(prev => ({...prev, [sid]: 'error'}));
+        }
+      };
+
       const primaryIds = (r) => isDda(r.mode) ? r.n_psms : r.n_precursors;
 
       // Pin helpers
@@ -1255,7 +1271,7 @@
                         <td>{fmtFwhmSec(r.fwhm_rt_min)}</td>
                         <td>{fmtSigned(r.median_mass_acc_ms1_ppm, 2)}</td>
                         <td>{new Date(r.run_date).toLocaleString([], {year:'2-digit', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})}</td>
-                        <td onClick={e => e.stopPropagation()} style={{whiteSpace:'nowrap'}}>
+                        <td onClick={e => e.stopPropagation()} style={{whiteSpace:'nowrap',display:'flex',gap:'0.3rem',alignItems:'center'}}>
                           {job.status === 'done' ? (
                             <span style={{color:'var(--pass)',fontSize:'0.75rem',fontWeight:700}}>✓ Done</span>
                           ) : job.status === 'failed' ? (
@@ -1269,6 +1285,22 @@
                               style={{padding:'0.15rem 0.5rem',fontSize:'0.72rem',background: noMetrics ? 'var(--accent)' : 'var(--surface)',color: noMetrics ? 'var(--bg)' : 'var(--muted)',border:'1px solid var(--border)',borderRadius:'0.3rem',cursor:'pointer',fontWeight: noMetrics ? 700 : 400}}
                             >{noMetrics ? '▶ Process' : '↻ Re-run'}</button>
                           ) : null}
+                          {/* Recompute blank metrics from existing report */}
+                          {r.result_path && (r.ms1_signal == null || r.fwhm_rt_min == null || r.median_mass_acc_ms1_ppm == null) && (() => {
+                            const rs = recomputeStatus[String(r.id)];
+                            return rs === 'done' ? (
+                              <span style={{color:'var(--pass)',fontSize:'0.68rem',fontWeight:700}}>↺✓</span>
+                            ) : rs === 'error' ? (
+                              <span style={{color:'var(--fail)',fontSize:'0.68rem',fontWeight:700}} title="Recompute failed">↺✗</span>
+                            ) : (
+                              <button
+                                onClick={e => doRecompute(r.id, e)}
+                                disabled={rs === 'loading'}
+                                title="Recompute QC metrics from existing report.parquet"
+                                style={{padding:'0.1rem 0.35rem',fontSize:'0.68rem',background:'rgba(34,211,238,0.12)',color:'#22d3ee',border:'1px solid rgba(34,211,238,0.3)',borderRadius:'0.25rem',cursor:'pointer',fontWeight:600}}
+                              >{rs === 'loading' ? '…' : '↺ Fill'}</button>
+                            );
+                          })()}
                         </td>
                       </tr>
                     );

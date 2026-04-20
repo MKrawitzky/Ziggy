@@ -453,7 +453,16 @@
                 {
                   icon:'📊', title:'QC Dashboard',
                   items:['Precursor, peptide & protein counts @ 1% FDR','Pass / Warn / Fail gating with HOLD flag',
-                         'Longitudinal trend charts','Column lifetime & maintenance log'],
+                         'Longitudinal trend charts','Column lifetime & maintenance log',
+                         '↺ Fill: back-populate blank metrics from existing report.parquet'],
+                },
+                {
+                  icon:'∿', title:'Mobility Calibration QC',
+                  items:['Per-run Δ1/K₀ scatter: observed vs predicted (DIA-NN Predicted.IM)',
+                         'Histogram with ±0.025 WARN / ±0.050 ALERT thresholds',
+                         'Trend across last 30 timsTOF runs — spot drift before it costs IDs',
+                         'Converts Δ1/K₀ → estimated ΔP (mbar) — physics-backed QC',
+                         'Based on Müller et al. J. Proteome Res. 2025'],
                 },
                 {
                   icon:'🔵', title:'Ion Mobility (TIMS / 1/K₀)',
@@ -465,7 +474,8 @@
                 {
                   icon:'🔬', title:'Spectrum Viewer',
                   items:['Theoretical b/y ion series from DIA-NN Modified.Sequence','UniMod annotation (Oxidation, Phospho, CAM, …)',
-                         'Head-to-head mirror comparison across ≤ 3 runs','Peptide search within any DIA-NN report'],
+                         'Head-to-head mirror comparison across ≤ 3 runs','Peptide search within any DIA-NN report',
+                         '★ Jump-to-spectrum from MIA tab with one click'],
                 },
                 {
                   icon:'🧬', title:'Enzyme & PTM Tab',
@@ -473,9 +483,25 @@
                          'Peptide & unique precursor counts','Pulls live from DIA-NN report.parquet'],
                 },
                 {
-                  icon:'🤖', title:'Automated Search',
+                  icon:'🧫', title:'Histones',
+                  items:['Interactive histone PTM Crosstalk Matrix (14 marks, H1–H4)',
+                         '4D TIMS Storm: real-time ion cloud animation for histone ions',
+                         'Sequence Aligner: H1/H2A/H2B/H3/H4 with modification sites',
+                         'SC Network: single-cell PTM co-occurrence (17 marks, 4 populations)',
+                         '★ SC Drug Response: Orsburn 2026 mocetinostat HDAC-inhibitor data',
+                         'H4 K9+K13+K17 tri-acetylation as top hit (3.82×, p<0.0001)'],
+                },
+                {
+                  icon:'🔭', title:'HLA Discovery',
+                  items:['Immunopeptidomics HLA allele discovery workflow',
+                         'Novel peptidoform detection from DIA-NN report',
+                         'Integrates Cutler/Ctortecka 2025 single-cell HLA data'],
+                },
+                {
+                  icon:'🤖', title:'Search Assistant',
                   items:['DIA-NN for DIA (timsTOF diaPASEF + Orbitrap)','Sage for DDA (timsTOF ddaPASEF + Orbitrap)',
-                         'Auto mode-detection from raw metadata','SLURM submission on Hive HPC'],
+                         'Auto mode-detection from raw metadata','SLURM submission on Hive HPC',
+                         'Badge counts unsearched runs in tab header'],
                 },
                 {
                   icon:'🌐', title:'Community Benchmark',
@@ -510,18 +536,26 @@
             <h3>What's New · ZIGGY · April 2026</h3>
             <div style={{display:'flex', flexDirection:'column', gap:'0.5rem', marginTop:'0.4rem'}}>
               {[
+                {tag:'NEW', color:'var(--pass)', text:'∿ Mobility Calibration QC tab: per-run Δ1/K₀ scatter, histogram, 30-run trend — catches barometric pressure drift before it tanks your IDs. Based on Müller et al. J. Proteome Res. 2025 (15 mbar → 0.025 Vs/cm² shift).'},
+                {tag:'NEW', color:'var(--pass)', text:'🧫 Histones tab: Crosstalk Matrix (14 marks), 4D TIMS Storm, Sequence Aligner, SC Network (17 marks, 4 populations incl. NaBu-treated from Cutler/Ctortecka 2025), Workflow guide'},
+                {tag:'NEW', color:'var(--pass)', text:'★ SC Drug Response panel (Histones): Orsburn 2026 — H4 K9+K13+K17 tri-acetylation as top mocetinostat hit (3.82×, p<0.0001) in single-cell HDAC inhibitor data. Includes non-histone surprise: S100-A9 (1.88×).'},
+                {tag:'NEW', color:'var(--pass)', text:'🔭 HLA Discovery tab: immunopeptidomics allele discovery workflow with Cutler/Ctortecka 2025 single-cell HLA integration'},
+                {tag:'NEW', color:'var(--pass)', text:'🔍 Search Assistant tab: DIA-NN / Sage search launcher with live unsearched-run badge counter in the tab header'},
+                {tag:'UPD', color:'var(--accent)', text:'↺ Fill button in Run History: back-populates null QC fields (MS1/MS2 signal, FWHM, mass accuracy, mobility FWHM, charge fractions) from existing report.parquet — no re-acquisition needed'},
+                {tag:'UPD', color:'var(--accent)', text:'★ Spectrum jump from MIA tab: click ★ on any MIA hit to jump directly into the Spectra viewer pre-loaded with that peptide'},
+                {tag:'FIX', color:'#60a5fa', text:'API: fixed sqlite3 connection pattern in recompute-metrics and annotate endpoints; fixed acquisition_mode → mode column in search/unsearched query'},
                 {tag:'NEW', color:'var(--pass)', text:'🔮 Single Cell Proteomics tab: real K562 dilution series (8pg–125ng), Michaelis-Menten coverage model, live 4D ion cloud, charge-state evolution, surfaceome atlas in ion mobility space'},
                 {tag:'NEW', color:'var(--pass)', text:'⚡ Sneaky Peaky reborn: 4D scatter3d ion cloud, Joy Division K₀ ridgeline, CCS conformational density map, MA plot, shift map, dynamic range — full David Bowie flair'},
-                {tag:'NEW', color:'var(--pass)', text:'🏗 Self-contained build: node_modules now in E:/ziggy — edit components/, run node stan/dashboard/build.js, done. No more cross-folder sync.'},
                 {tag:'ZIGGY', color:'#a855f7', text:'🗻 Landscape Viewer: compare 2–3 runs as Melanie-style rotatable 3D surfaces (m/z × 1/K₀ × intensity); linked cameras, differential A−B surface with Pearson similarity, peak inspector'},
                 {tag:'ZIGGY', color:'#a855f7', text:'⬡ 4D Advantage tab: 5 live-data visualizations, Mobility Corridor (per-charge R²), Chimera Probability Map, Breathing Proteome animation, Orthogonality Index, 4D Run Fingerprint'},
-                {tag:'ZIGGY', color:'#a855f7', text:'+1 & unassigned ions everywhere: charge toggles in CCS tab now include z=0 (?) and z=+1; immunopeptidomics dropdown extended to z=0–6'},
                 {tag:'UPD', color:'var(--accent)', text:'Super Bowie theme: --bg #0e0018, gold accent #DAAA00, Aladdin Sane lightning bolt favicon'},
-                {tag:'UPD', color:'var(--accent)', text:'Ion Mobility 3D filter: charge toggles, m/z, RT & 1/K₀ range; scroll-zoom + box-select on ion cloud charts'},
               ].map(({tag, color, text}) => (
                 <div key={text} style={{display:'flex', gap:'0.6rem', alignItems:'flex-start', fontSize:'0.85rem'}}>
                   <span style={{flexShrink:0, padding:'0.15rem 0.45rem', borderRadius:'0.3rem',
-                                background: tag === 'ZIGGY' ? 'rgba(168,85,247,0.15)' : tag === 'NEW' ? 'rgba(34,197,94,0.12)' : 'rgba(96,165,250,0.12)',
+                                background: tag === 'ZIGGY' ? 'rgba(168,85,247,0.15)'
+                                          : tag === 'NEW'   ? 'rgba(34,197,94,0.12)'
+                                          : tag === 'FIX'   ? 'rgba(96,165,250,0.12)'
+                                          : 'rgba(218,170,0,0.12)',
                                 color, fontWeight:700, fontSize:'0.75rem', marginTop:'0.05rem'}}>{tag}</span>
                   <span style={{color:'var(--muted)'}}>{text}</span>
                 </div>

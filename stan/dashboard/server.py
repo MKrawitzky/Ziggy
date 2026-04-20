@@ -2538,6 +2538,190 @@ async def api_process_all_new() -> dict:
 _VALID_SAMPLE_TYPES = {"", "QC", "Sample", "Blank", "Standard", "Pool"}
 _VALID_WORKFLOWS    = {"", "Standard", "Immunopeptidomics", "Single Cell", "Training", "Phospho", "Glyco", "Crosslink"}
 
+@app.get("/api/runs/{run_id}/mobility-calibration")
+async def api_mobility_calibration(run_id: str, max_points: int = 4000) -> dict:
+    """Measured vs Predicted 1/K₀ from DIA-NN report.parquet.
+
+    Uses DIA-NN's built-in Predicted.IM column (the library-predicted ion
+    mobility) vs the measured IM.  The shift Δ = IM − Predicted.IM is the
+    basis for the calibration QC described in:
+
+        Impact of Local Air Pressure on Ion Mobilities...
+        J. Proteome Res. 2025, doi:10.1021/acs.jproteome.4c00932
+
+    15 mbar air-pressure change → ~0.025 Vs/cm² systematic shift.
+    """
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    report_path = _resolve_report_path(run)
+    if not report_path:
+        return {"error": "no_report", "message": "No DIA-NN report.parquet found for this run."}
+
+    try:
+        import polars as pl
+        import random
+
+        schema = pl.read_parquet_schema(report_path)
+        needed = ["IM", "Predicted.IM", "Precursor.Mz", "Precursor.Charge",
+                  "Stripped.Sequence", "Q.Value", "Precursor.Quantity"]
+        available = [c for c in needed if c in schema]
+
+        if "IM" not in available or "Predicted.IM" not in available:
+            return {"error": "no_predicted_im",
+                    "message": "Predicted.IM not in report. DIA-NN ≥ 1.9 required."}
+
+        df = pl.read_parquet(report_path, columns=available)
+
+        # Filter to confident precursors only
+        if "Q.Value" in df.columns:
+            df = df.filter(pl.col("Q.Value") <= 0.01)
+
+        # Drop rows without valid IM / Predicted.IM
+        df = df.filter(
+            pl.col("IM").is_not_null() & pl.col("Predicted.IM").is_not_null() &
+            (pl.col("IM") > 0.3) & (pl.col("Predicted.IM") > 0.3)
+        )
+
+        if df.height == 0:
+            return {"error": "no_data", "message": "No confident precursors with IM data."}
+
+        # Compute shift per precursor
+        df = df.with_columns(
+            (pl.col("IM") - pl.col("Predicted.IM")).alias("delta_im")
+        )
+
+        # Summary stats
+        deltas = df["delta_im"].to_list()
+        deltas_sorted = sorted(deltas)
+        n = len(deltas_sorted)
+        median_shift = deltas_sorted[n // 2]
+        mean_shift = sum(deltas) / n
+        p05 = deltas_sorted[max(0, int(n * 0.05))]
+        p95 = deltas_sorted[min(n - 1, int(n * 0.95))]
+        std = (sum((d - mean_shift) ** 2 for d in deltas) / n) ** 0.5
+
+        # Histogram of shifts (−0.10 to +0.10 in 40 bins)
+        BIN_LO, BIN_HI, N_BINS = -0.10, 0.10, 50
+        bin_w = (BIN_HI - BIN_LO) / N_BINS
+        hist_counts = [0] * N_BINS
+        for d in deltas:
+            bi = int((d - BIN_LO) / bin_w)
+            if 0 <= bi < N_BINS:
+                hist_counts[bi] += 1
+        hist_edges = [round(BIN_LO + i * bin_w, 4) for i in range(N_BINS + 1)]
+
+        # Scatter — downsample proportionally by charge
+        rows_list = df.to_dicts()
+        if len(rows_list) > max_points:
+            rows_list = random.sample(rows_list, max_points)
+
+        scatter_mz      = [round(float(r.get("Precursor.Mz", 0) or 0), 3) for r in rows_list]
+        scatter_im      = [round(float(r.get("IM", 0) or 0), 4)            for r in rows_list]
+        scatter_pred_im = [round(float(r.get("Predicted.IM", 0) or 0), 4)  for r in rows_list]
+        scatter_charge  = [int(r.get("Precursor.Charge", 2) or 2)          for r in rows_list]
+        scatter_delta   = [round(float(r.get("delta_im", 0) or 0), 4)      for r in rows_list]
+
+        return {
+            "n_precursors": n,
+            "stats": {
+                "median_shift": round(median_shift, 5),
+                "mean_shift":   round(mean_shift,   5),
+                "std_shift":    round(std,           5),
+                "p05_shift":    round(p05,           5),
+                "p95_shift":    round(p95,           5),
+            },
+            "histogram": {"edges": hist_edges, "counts": hist_counts},
+            "scatter": {
+                "mz":       scatter_mz,
+                "im":       scatter_im,
+                "pred_im":  scatter_pred_im,
+                "charge":   scatter_charge,
+                "delta":    scatter_delta,
+            },
+            "thresholds": {
+                "warn":  0.025,   # ~15 mbar air pressure change (paper threshold)
+                "alert": 0.050,   # ~30 mbar — severe, impacts diaPASEF window coverage
+            },
+        }
+
+    except Exception as exc:
+        import traceback
+        return {"error": "extraction_failed", "message": str(exc),
+                "traceback": traceback.format_exc()[-800:]}
+
+
+@app.post("/api/runs/{run_id}/recompute-metrics")
+async def api_recompute_metrics(run_id: str) -> dict:
+    """Re-extract QC metrics from the stored result_path and patch the DB.
+
+    Useful for runs ingested before all metric columns existed, or where
+    the initial extraction failed.  Reads DIA-NN report.parquet (or Sage
+    parquet) from result_path and updates n_peptides, n_proteins, ms1_signal,
+    fwhm_rt_min, median_mass_acc_ms1_ppm, median_mass_acc_ms2_ppm,
+    median_mobility_fwhm in the runs table.
+    """
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    report_path = _resolve_report_path(run)
+    if not report_path:
+        return {"ok": False, "error": "No report.parquet found for this run."}
+
+    try:
+        from stan.metrics.extractor import extract_dia_metrics, extract_dda_metrics
+
+        # Detect DDA vs DIA by mode or file name
+        mode = (run.get("mode") or "").lower()
+        is_dda = "dda" in mode or "sage" in str(report_path).lower()
+
+        if is_dda:
+            metrics = extract_dda_metrics(report_path)
+        else:
+            metrics = extract_dia_metrics(report_path)
+
+        if not metrics:
+            return {"ok": False, "error": "Metric extraction returned empty result."}
+
+        # Only update columns that are currently NULL or 0 in the run
+        fields = {
+            "n_precursors":              metrics.get("n_precursors"),
+            "n_peptides":                metrics.get("n_peptides"),
+            "n_proteins":                metrics.get("n_proteins"),
+            "ms1_signal":                metrics.get("ms1_signal"),
+            "ms2_signal":                metrics.get("ms2_signal"),
+            "fwhm_rt_min":               metrics.get("fwhm_rt_min"),
+            "fwhm_scans":                metrics.get("fwhm_scans"),
+            "median_mass_acc_ms1_ppm":   metrics.get("median_mass_acc_ms1_ppm"),
+            "median_mass_acc_ms2_ppm":   metrics.get("median_mass_acc_ms2_ppm"),
+            "median_mobility_fwhm":      metrics.get("median_mobility_fwhm"),
+            "median_fragments_per_precursor": metrics.get("median_fragments_per_precursor"),
+            "median_cv_precursor":       metrics.get("median_cv_precursor"),
+            "pct_charge_1":              metrics.get("pct_charge_1"),
+            "pct_charge_2":              metrics.get("pct_charge_2"),
+            "pct_charge_3":              metrics.get("pct_charge_3"),
+            "pct_charge_4plus":          metrics.get("pct_charge_4plus"),
+        }
+        # Filter to non-None new values
+        updates = {k: v for k, v in fields.items() if v is not None}
+        if not updates:
+            return {"ok": False, "error": "No new metrics extracted from report."}
+
+        cols = ", ".join(f"{k} = ?" for k in updates)
+        vals = list(updates.values()) + [run_id]
+        db_path = get_db_path()
+        with _sqlite3_sa.connect(str(db_path)) as con:
+            con.execute(f"UPDATE runs SET {cols} WHERE id = ?", vals)
+
+        return {"ok": True, "updated": list(updates.keys()), "values": updates}
+
+    except Exception as exc:
+        import traceback
+        return {"ok": False, "error": str(exc), "traceback": traceback.format_exc()[-1200:]}
+
+
 @app.patch("/api/runs/{run_id}/annotate")
 async def api_annotate_run(run_id: str, body: dict) -> dict:
     """Set sample_type, workflow, and/or run_notes for a run."""
@@ -2562,7 +2746,8 @@ async def api_annotate_run(run_id: str, body: dict) -> dict:
 
     cols = ", ".join(f"{k} = ?" for k in updates)
     vals = list(updates.values()) + [run_id]
-    with get_db() as con:
+    db_path = get_db_path()
+    with _sqlite3_sa.connect(str(db_path)) as con:
         con.execute(f"UPDATE runs SET {cols} WHERE id = ?", vals)
     return {"ok": True, "updated": list(updates.keys())}
 
@@ -3272,7 +3457,7 @@ async def api_search_unsearched() -> list[dict]:
     with _sqlite3_sa.connect(str(db_path)) as con:
         con.row_factory = _sqlite3_sa.Row
         rows = con.execute(
-            "SELECT id, run_name, instrument, raw_path, run_date, acquisition_mode, lc_system "
+            "SELECT id, run_name, instrument, raw_path, run_date, mode, lc_system "
             "FROM runs WHERE result_path IS NULL OR n_proteins IS NULL "
             "ORDER BY run_date DESC, run_name"
         ).fetchall()
