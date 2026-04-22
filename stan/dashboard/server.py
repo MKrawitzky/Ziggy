@@ -41,12 +41,53 @@ app.add_middleware(
 # Bruker files were historically labelled "DIA"/"DDA" by early baseline
 # versions; modern watcher uses "diaPASEF"/"ddaPASEF".  Always use these
 # helpers for mode comparisons so both labels are handled correctly.
+
 def _is_dia(mode: str) -> bool:
+    """True for any DIA acquisition mode → route to DIA-NN library search."""
     return mode in ("DIA", "diaPASEF")
 
 
 def _is_dda(mode: str) -> bool:
-    return mode in ("DDA", "ddaPASEF")
+    """True for any DDA acquisition mode (all vendors)."""
+    return mode in ("DDA", "ddaPASEF", "ddaMS2", "ddaMRM")
+
+
+def _is_bruker_dda(mode: str) -> bool:
+    """True for Bruker ddaPASEF specifically.
+
+    ddaPASEF is routed to DIA-NN --fasta-search instead of Sage because:
+    - Sage (timsrust 0.2.3) cannot decompress 2020-era Bruker TDF blobs
+    - DIA-NN --fasta-search auto-detects DDA from the Precursors table and
+      searches correctly without requiring a pre-built spectral library
+    """
+    return mode == "ddaPASEF"
+
+
+def _is_thermo_dda(mode: str) -> bool:
+    """True for Thermo DDA → route to Sage with mzML conversion."""
+    return mode in ("DDA", "ddaMS2", "ddaMRM")
+
+
+def _detect_mode_from_tdf(d_path) -> str:
+    """Read MsmsType from a Bruker .d/analysis.tdf and return mode string.
+
+    Returns 'ddaPASEF', 'diaPASEF', or 'diaPASEF' as default.
+    """
+    tdf = Path(d_path) / "analysis.tdf"
+    if not tdf.exists():
+        return "diaPASEF"
+    try:
+        with _sqlite3_sa.connect(str(tdf)) as con:
+            type_rows = con.execute(
+                "SELECT MsmsType FROM Frames GROUP BY MsmsType"
+            ).fetchall()
+            types = {r[0] for r in type_rows}
+            # MsmsType 8 = ddaPASEF, 9 = diaPASEF, 0 = MS1-only
+            if 8 in types and 9 not in types:
+                return "ddaPASEF"
+    except Exception:
+        pass
+    return "diaPASEF"
 
 
 # Config watchers — hot-reload on API access
@@ -2328,6 +2369,13 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
         mode = run.get("mode", "DIA")
         vendor = "bruker" if raw_path.suffix.lower() == ".d" else "thermo"
 
+        # Auto-correct mode if it looks wrong: read MsmsType from TDF when
+        # the stored mode is a generic placeholder set during import.
+        if vendor == "bruker" and mode not in ("ddaPASEF", "diaPASEF"):
+            detected = _detect_mode_from_tdf(raw_path)
+            logger.info("Auto-detected mode %s for %s (was '%s')", detected, raw_path.name, mode)
+            mode = detected
+
         # Resolve output dir — default to <watch_dir>/stan_results/<run_stem>
         output_dir_base = inst_cfg.get("output_dir", "")
         if not output_dir_base:
@@ -2340,13 +2388,22 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
         lib_path = inst_cfg.get("lib_path")
         search_mode = inst_cfg.get("search_mode", "community" if not fasta_path else "local")
 
+        # ── Determine search tool and output file ─────────────────────
+        # Routing table:
+        #   diaPASEF / DIA   → DIA-NN library search  → report.parquet
+        #   ddaPASEF         → DIA-NN --fasta-search   → report.parquet
+        #                      (Sage/timsrust can't read old Bruker TDF blobs)
+        #   DDA / ddaMS2     → Sage (Thermo: +mzML)    → results.sage.parquet
+        use_diann = _is_dia(mode) or _is_bruker_dda(mode)
+        use_sage  = not use_diann
+
         # Check whether a previous search already produced output in the expected location.
         # If so, skip the search entirely and go straight to metric extraction.
         # This lets "Process" recover quickly after a crash mid-extraction, and avoids
         # re-running a multi-hour DIA-NN search just to re-populate missing DB columns.
         # "Re-run" from the UI passes force=True to bypass this shortcut.
         force_rerun = run.get("_force_rerun", False)
-        existing_parquet = (output_dir / "report.parquet") if _is_dia(mode) else (output_dir / "results.sage.parquet")
+        existing_parquet = (output_dir / "report.parquet") if use_diann else (output_dir / "results.sage.parquet")
 
         result_path: Path | None = None
         if not force_rerun and existing_parquet.exists():
@@ -2356,8 +2413,9 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
             )
             _set("running", f"Re-extracting metrics from existing results for {raw_path.name}…")
             result_path = existing_parquet
-        elif _is_dia(mode):
-            _set("running", f"Running DIA-NN on {raw_path.name}…")
+        elif use_diann:
+            acq_mode = "dda_pasef" if _is_bruker_dda(mode) else "dia"
+            _set("running", f"Running DIA-NN ({acq_mode}) on {raw_path.name}…")
             result_path = run_diann_local(
                 raw_path=raw_path,
                 output_dir=output_dir,
@@ -2366,6 +2424,7 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
                 fasta_path=fasta_path,
                 lib_path=lib_path,
                 search_mode=search_mode,
+                acq_mode=acq_mode,
             )
         else:
             sage_exe = inst_cfg.get("sage_path") or "sage"
@@ -2405,7 +2464,9 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
 
         _set("running", "Extracting QC metrics…")
         grad_min = inst_cfg.get("gradient_length_min")
-        if _is_dia(mode):
+        # ddaPASEF output is a DIA-NN report.parquet → extract_dia_metrics
+        # Thermo/generic DDA output is a Sage results.sage.parquet → extract_dda_metrics
+        if _is_dia(mode) or _is_bruker_dda(mode):
             metrics = extract_dia_metrics(result_path, gradient_min=float(grad_min) if grad_min else None)
         else:
             metrics = extract_dda_metrics(result_path, gradient_min=float(grad_min) if grad_min else 60)

@@ -211,6 +211,7 @@ def run_diann_local(
     fasta_path: str | None = None,
     lib_path: str | None = None,
     search_mode: str = "local",
+    acq_mode: str = "dia",
 ) -> Path | None:
     """Run DIA-NN locally as a subprocess.
 
@@ -223,13 +224,43 @@ def run_diann_local(
         fasta_path: Path to FASTA file (required for local mode).
         lib_path: Path to spectral library (optional — DIA-NN runs library-free if omitted).
         search_mode: "local" (user FASTA) or "community" (frozen HF assets).
+        acq_mode: Acquisition mode routing hint —
+            "dia"       → standard DIA-NN library-based search (diaPASEF, DIA)
+            "dda_pasef" → Bruker ddaPASEF: use --fasta-search (no --lib)
+                          DIA-NN auto-detects DDA from the TDF Precursors table.
+                          Required because --lib mode checks for DIA isolation
+                          windows and aborts on pure DDA acquisitions.
+            "dda_ms2"   → Thermo DDA: convert .raw→mzML, then Sage (not DIA-NN).
+                          This path is handled by run_sage_local — should not be
+                          passed to run_diann_local.
 
     Returns:
         Path to report.parquet, or None on failure.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if search_mode == "community":
+    if acq_mode == "dda_pasef":
+        # Bruker ddaPASEF: --fasta-search mode (no speclib, auto-detects DDA)
+        from stan.search.community_params import (
+            ensure_community_assets,
+            get_community_diann_params_dda,
+        )
+        cache_dir = output_dir.parent / "_community_assets"
+        # Only FASTA is needed for ddaPASEF (no speclib download)
+        fasta_dest = cache_dir / "human_hela_202604.fasta"
+        if not fasta_dest.exists():
+            try:
+                ensure_community_assets(vendor, cache_dir)
+            except Exception:
+                logger.warning("Community assets unavailable; using user fasta if set")
+        if fasta_path and Path(fasta_path).exists():
+            # User-provided FASTA overrides community FASTA for DDA mode
+            from stan.search.community_params import COMMUNITY_DIANN_DDA_PARAMS_FROZEN
+            params = dict(COMMUNITY_DIANN_DDA_PARAMS_FROZEN)
+            params["fasta"] = fasta_path
+        else:
+            params = get_community_diann_params_dda(cache_dir=str(cache_dir))
+    elif search_mode == "community":
         from stan.search.community_params import ensure_community_assets, get_community_diann_params
         cache_dir = output_dir.parent / "_community_assets"
         ensure_community_assets(vendor, cache_dir)  # download FASTA + speclib if missing

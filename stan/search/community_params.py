@@ -159,6 +159,53 @@ def get_community_diann_params(vendor: str, cache_dir: str | None = None) -> dic
     return params
 
 
+# ── DIA-NN parameters for Bruker ddaPASEF (DDA mode via fasta-search) ──
+# ddaPASEF files have no DIA windows — DIA-NN's --lib mode bails immediately.
+# --fasta-search makes DIA-NN auto-detect DDA vs DIA from the Precursors table
+# and search directly against predicted spectra without a pre-built library.
+# This is the only DIA-NN mode that works reliably on old Bruker TDF files
+# (e.g. 2020-era otofControl acquisitions).
+
+COMMUNITY_DIANN_DDA_PARAMS_FROZEN: dict = {
+    # fasta set dynamically — see get_community_diann_params_dda()
+    "fasta-search": "",   # flag-only: build in-silico library from FASTA
+    "min-fr-mz": 200,
+    "max-fr-mz": 1800,
+    "cut": "K*,R*",
+    "missed-cleavages": 1,
+    "min-pep-len": 7,
+    "max-pep-len": 30,
+    "var-mods": 1,
+    "var-mod": "UniMod:35,15.994915,M",
+    "mod": "UniMod:4,57.021464,C",
+    "smart-profiling": "",   # flag-only
+    "no-prot-inf": "",       # flag-only
+    "verbose": 1,
+}
+
+
+def get_community_diann_params_dda(cache_dir: str | None = None) -> dict:
+    """Get DIA-NN parameters for Bruker ddaPASEF (DDA) search via --fasta-search.
+
+    Unlike DIA mode, ddaPASEF uses --fasta-search instead of --lib because
+    DIA-NN's library-loading path checks for DIA isolation windows and aborts
+    on pure DDA files. --fasta-search builds an in-silico library and auto-
+    detects DDA mode from the TDF Precursors table.
+
+    Args:
+        cache_dir: Override for the local community assets cache directory.
+
+    Returns:
+        Complete DIA-NN parameter dict with fasta path resolved.
+    """
+    cache = cache_dir or COMMUNITY_CACHE_DIR
+    fasta_filename = COMMUNITY_FASTA_HF_PATH.split("/")[-1]
+
+    params = dict(COMMUNITY_DIANN_DDA_PARAMS_FROZEN)
+    params["fasta"] = f"{cache}/{fasta_filename}"
+    return params
+
+
 # ── Sage parameters (Track A) ────────────────────────────────────────
 # Sage uses the community FASTA directly (no speclib needed for DDA).
 
