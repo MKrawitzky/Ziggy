@@ -20,6 +20,7 @@
   "_tab_search_assistant.jsx",
   "_tab_immuno_discovery.jsx",
   "_tab_histone.jsx",
+  "_tab_metaproteomics.jsx",
   "_tab_mobility_cal.jsx",
   "_app_main.jsx"
 ]

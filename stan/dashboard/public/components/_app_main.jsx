@@ -138,6 +138,7 @@
                   ['immuno',    'Immunopeptidomics'],
                   ['discovery', 'HLA Discovery'],
                   ['histone',   'Histones'],
+                  ['meta',      'Metaproteomics'],
                   ['denovo',    'De Novo'],
                   ['searches',  'Searches'],
                   ['search',    searchLabel],
@@ -180,6 +181,7 @@
             {tab === 'immuno'     && <ImmunopeptidomicsTab />}
             {tab === 'discovery' && <ImmunoDiscoveryTab />}
             {tab === 'histone'   && <HistoneTab />}
+            {tab === 'meta'      && <MetaproteomicsTab />}
             {tab === 'denovo' && <DeNovoTab />}
             {tab === 'searches' && <SearchesTab />}
             {tab === 'search'   && <SearchAssistantTab />}
