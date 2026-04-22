@@ -193,6 +193,10 @@ def _migrate(con: sqlite3.Connection) -> None:
         ("ids_per_minute_in_c2a", "ALTER TABLE runs ADD COLUMN ids_per_minute_in_c2a REAL"),
         # Precursor intensity (added 2026-04-22)
         ("median_precursor_intensity", "ALTER TABLE runs ADD COLUMN median_precursor_intensity REAL"),
+        # Raw file vendor/format detection (added 2026-04-22)
+        ("instrument_vendor", "ALTER TABLE runs ADD COLUMN instrument_vendor TEXT DEFAULT ''"),
+        ("file_format", "ALTER TABLE runs ADD COLUMN file_format TEXT DEFAULT ''"),
+        ("file_subformat", "ALTER TABLE runs ADD COLUMN file_subformat TEXT DEFAULT ''"),
     ]
 
     for col, ddl in migrations:

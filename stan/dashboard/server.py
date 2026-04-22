@@ -24,6 +24,7 @@ from stan.config import (
     resolve_config_path,
 )
 from stan.db import get_db_path, get_run, get_runs, get_tic_trace, get_tic_traces_for_instrument, get_trends, init_db
+from stan.file_detector import detect_format, format_label, format_badge_css
 
 logger = logging.getLogger(__name__)
 
@@ -2099,32 +2100,47 @@ async def api_community_submit(body: CommunitySubmitRequest) -> dict:
 
 @app.get("/api/scan-new-runs")
 async def api_scan_new_runs() -> dict:
-    """Scan configured watch directories for .d folders not yet in the database.
+    """Scan configured watch directories for raw data files/dirs not yet in the database.
+
+    Detects all supported vendor formats:
+      - Bruker .d (timsTOF TDF, QTOF BAF, legacy YEP)
+      - Thermo .raw files
+      - Waters .raw directories
+      - Agilent .d (with AcqData/)
+      - AB Sciex .wiff / .wiff2
+      - Shimadzu .lcd
 
     Returns:
-        found: list of dicts with raw_path, run_name, instrument, mtime
+        found: list of dicts with raw_path, run_name, instrument, mtime,
+               vendor, file_format, file_subformat, format_label, badge_color
         n_known: total runs already in DB
     """
-    import sqlite3 as _sqlite3
-    import os
-
     watcher = _get_instruments_watcher()
     if watcher is None:
         return {"found": [], "n_known": 0, "error": "No instruments.yml found"}
 
     instruments_cfg = watcher.data.get("instruments", [])
 
-    # Collect all known raw_paths from DB (normalised to forward-slash lowercase for comparison)
+    # Collect all known raw_paths from DB (normalised for comparison)
     db_path = get_db_path()
     known_norm: set[str] = set()
     if db_path.exists():
-        with _sqlite3.connect(str(db_path)) as con:
+        with _sqlite3_sa.connect(str(db_path)) as con:
             rows = con.execute(
                 "SELECT raw_path FROM runs WHERE raw_path IS NOT NULL"
             ).fetchall()
             for (rp,) in rows:
                 if rp:
                     known_norm.add(rp.replace("\\", "/").lower())
+
+    # Glob patterns to scan — covers all major vendor formats
+    _SCAN_PATTERNS = [
+        ("*.d",     True),    # Bruker timsTOF / QTOF / Agilent (directories)
+        ("*.raw",   None),    # Thermo (files) or Waters (directories)
+        ("*.wiff",  False),   # AB Sciex (files)
+        ("*.wiff2", False),   # AB Sciex ZenoTOF (files)
+        ("*.lcd",   False),   # Shimadzu (files)
+    ]
 
     found: list[dict] = []
     for inst in instruments_cfg:
@@ -2136,27 +2152,44 @@ async def api_scan_new_runs() -> dict:
             continue
         inst_name = inst.get("name", watch_dir)
 
-        for d_path in sorted(watch_path.glob("*.d")):
-            if not d_path.is_dir():
-                continue
-            # Only Bruker timsTOF acquisitions contain analysis.tdf
-            if not (d_path / "analysis.tdf").exists():
-                continue
-            norm = str(d_path).replace("\\", "/").lower()
+        candidates: set[Path] = set()
+        for pattern, must_be_dir in _SCAN_PATTERNS:
+            for p in watch_path.glob(pattern):
+                if must_be_dir is True and not p.is_dir():
+                    continue
+                if must_be_dir is False and not p.is_file():
+                    continue
+                candidates.add(p)
+
+        for raw_path in sorted(candidates):
+            norm = str(raw_path).replace("\\", "/").lower()
             if norm in known_norm:
                 continue
 
+            # Detect format
+            fmt_info = detect_format(raw_path)
+
+            # Skip completely unrecognised directories (e.g. random .d folders)
+            if fmt_info.get("confidence") == "low" and fmt_info.get("vendor") == "Unknown":
+                continue
+
             try:
-                mtime = d_path.stat().st_mtime
-                mtime_iso = __import__("datetime").datetime.fromtimestamp(mtime).isoformat()
+                mtime = raw_path.stat().st_mtime
+                mtime_iso = datetime.fromtimestamp(mtime).isoformat()
             except OSError:
                 mtime_iso = ""
 
             found.append({
-                "raw_path": str(d_path),
-                "run_name": d_path.name,
-                "instrument": inst_name,
-                "mtime": mtime_iso,
+                "raw_path":      str(raw_path),
+                "run_name":      raw_path.name,
+                "instrument":    inst_name,
+                "mtime":         mtime_iso,
+                "vendor":        fmt_info.get("vendor") or "",
+                "file_format":   fmt_info.get("format") or "",
+                "file_subformat": fmt_info.get("subformat") or "",
+                "format_label":  format_label(fmt_info),
+                "badge_color":   format_badge_css(fmt_info),
+                "instrument_family": fmt_info.get("instrument_family") or "",
             })
 
     # Newest first
@@ -2171,29 +2204,35 @@ class ScanImportRequest(BaseModel):
 
 @app.post("/api/scan-new-runs/import")
 async def api_scan_import(body: ScanImportRequest) -> dict:
-    """Import a discovered .d run into the database (metadata only — no search results).
+    """Import a discovered raw data file/dir into the database (metadata only).
 
-    Reads analysis.tdf for AcquisitionDateTime and MsmsType; inserts a stub
-    row with no QC metrics so the run is visible in Run History immediately.
+    Detects vendor format automatically.  For Bruker timsTOF .d directories,
+    reads analysis.tdf for AcquisitionDateTime and MsmsType.  For all other
+    vendors a stub row is inserted with no QC metrics so the run is visible
+    in Run History immediately.
     """
-    d_path = Path(body.raw_path)
-    if not d_path.exists() or not d_path.is_dir():
+    raw_path = Path(body.raw_path)
+    if not raw_path.exists():
         raise HTTPException(
             status_code=400,
-            detail=f"Path not found or not a directory: {body.raw_path}",
-        )
-    if not (d_path / "analysis.tdf").exists():
-        raise HTTPException(
-            status_code=400,
-            detail=f"Not a valid Bruker timsTOF acquisition (no analysis.tdf): {body.raw_path}",
+            detail=f"Path not found: {body.raw_path}",
         )
 
-    run_name = d_path.name
+    # Detect vendor format first — works for files and directories
+    fmt_info = detect_format(raw_path)
+    vendor    = fmt_info.get("vendor") or ""
+    fmt       = fmt_info.get("format") or ""
+    subfmt    = fmt_info.get("subformat") or ""
+    flabel    = format_label(fmt_info)
+
+    run_name = raw_path.name
     run_date: str | None = None
     mode = "diaPASEF"
 
-    tdf_path = d_path / "analysis.tdf"
-    if tdf_path.exists():
+    # Bruker timsTOF: read acquisition metadata from analysis.tdf
+    is_bruker_tdf = (fmt == "Bruker timsTOF" and (raw_path / "analysis.tdf").exists())
+    if is_bruker_tdf:
+        tdf_path = raw_path / "analysis.tdf"
         try:
             with _sqlite3_sa.connect(str(tdf_path)) as con:
                 meta_row = con.execute(
@@ -2202,7 +2241,7 @@ async def api_scan_import(body: ScanImportRequest) -> dict:
                 if meta_row:
                     run_date = meta_row[0]
 
-                # MsmsType: 8=ddaPASEF, 9=diaPASEF, 0=MS1 only (treat as diaPASEF)
+                # MsmsType: 8=ddaPASEF, 9=diaPASEF, 0=MS1 only
                 type_rows = con.execute(
                     "SELECT MsmsType FROM Frames GROUP BY MsmsType"
                 ).fetchall()
@@ -2211,23 +2250,40 @@ async def api_scan_import(body: ScanImportRequest) -> dict:
                     mode = "ddaPASEF"
         except Exception:
             logger.warning("Could not read analysis.tdf for %s", run_name, exc_info=True)
+    elif "Thermo" in vendor:
+        mode = "ddaMS2"   # Thermo default until searched
+    elif "Waters" in vendor:
+        mode = "Waters"
+    elif "Sciex" in vendor or "AB Sciex" in vendor:
+        mode = "AB Sciex"
 
     from stan.db import insert_run
     run_id = insert_run(
         instrument=body.instrument,
         run_name=run_name,
-        raw_path=str(d_path),
+        raw_path=str(raw_path),
         mode=mode,
         metrics={},
         gate_result="",
         run_date=run_date,
     )
 
+    # Stamp vendor/format onto the new row
+    db_path = get_db_path()
+    with _sqlite3_sa.connect(str(db_path)) as con:
+        con.execute(
+            "UPDATE runs SET instrument_vendor=?, file_format=?, file_subformat=? WHERE id=?",
+            (vendor, fmt, subfmt, run_id),
+        )
+
     return {
         "run_id": run_id,
         "run_name": run_name,
         "mode": mode,
         "run_date": run_date,
+        "vendor": vendor,
+        "file_format": fmt,
+        "format_label": flabel,
         "status": "imported",
     }
 
@@ -3827,6 +3883,80 @@ async def api_clear_stale_results() -> dict:
                 cleared.append({"id": str(run["id"]), "run_name": run.get("run_name", ""),
                                  "stale_path": result})
     return {"cleared": cleared, "n_cleared": len(cleared)}
+
+
+# ── File format detection ─────────────────────────────────────────────────────
+
+@app.get("/api/detect-format")
+async def api_detect_format(path: str) -> dict:
+    """Detect vendor and file format for any given raw data path.
+
+    Query param:
+        path — absolute path to a raw file or directory
+
+    Returns full detection dict: vendor, format, subformat, instrument_family,
+    confidence, format_label, badge_color.
+    """
+    info = detect_format(path)
+    info["format_label"] = format_label(info)
+    info["badge_color"]  = format_badge_css(info)
+    return info
+
+
+@app.post("/api/runs/backfill-formats")
+async def api_backfill_formats() -> dict:
+    """Detect and save file format for all runs that have a raw_path but no vendor label.
+
+    Safe read-only detection — only writes instrument_vendor, file_format,
+    file_subformat to the DB.  Does not modify any QC metrics.
+
+    Returns counts: total, updated, skipped (already labelled), not_found.
+    """
+    all_runs = get_runs(limit=10000)
+    db_path  = get_db_path()
+
+    updated    = []
+    skipped    = []
+    not_found  = []
+
+    with _sqlite3_sa.connect(str(db_path)) as con:
+        for run in all_runs:
+            raw = run.get("raw_path") or ""
+            existing_vendor = run.get("instrument_vendor") or ""
+            if existing_vendor:
+                skipped.append(run.get("run_name", ""))
+                continue
+            if not raw:
+                skipped.append(run.get("run_name", ""))
+                continue
+
+            info = detect_format(raw)
+            if info.get("confidence") == "none":
+                not_found.append({"run_name": run.get("run_name", ""), "raw_path": raw})
+                continue
+
+            vendor = info.get("vendor") or ""
+            fmt    = info.get("format") or ""
+            subfmt = info.get("subformat") or ""
+            con.execute(
+                "UPDATE runs SET instrument_vendor=?, file_format=?, file_subformat=? WHERE id=?",
+                (vendor, fmt, subfmt, str(run["id"])),
+            )
+            updated.append({
+                "run_name":     run.get("run_name", ""),
+                "vendor":       vendor,
+                "file_format":  fmt,
+                "format_label": format_label(info),
+            })
+
+    return {
+        "total":     len(all_runs),
+        "updated":   len(updated),
+        "skipped":   len(skipped),
+        "not_found": len(not_found),
+        "runs":      updated,
+        "missing":   not_found,
+    }
 
 
 @app.get("/")

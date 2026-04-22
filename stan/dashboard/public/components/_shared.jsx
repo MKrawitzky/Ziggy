@@ -998,6 +998,23 @@
         setValidating(false);
       };
 
+      // ── File format backfill ──────────────────────────────────────────
+      const [backfilling, setBackfilling] = useState(false);
+      const [backfillResult, setBackfillResult] = useState(null);
+
+      const doBackfillFormats = async () => {
+        setBackfilling(true);
+        try {
+          const r = await fetch(API + '/api/runs/backfill-formats', {method: 'POST'});
+          const d = r.ok ? await r.json() : null;
+          setBackfillResult(d);
+          if (d && d.updated > 0) reloadRuns();
+        } catch (e) {
+          setBackfillResult({error: 'Network error: ' + e.message});
+        }
+        setBackfilling(false);
+      };
+
       const doClearStale = async () => {
         setClearingStale(true);
         try {
@@ -1113,6 +1130,16 @@
                 border: validationResult?.n_missing > 0 ? '1px solid rgba(249,115,22,0.5)' : '1px solid var(--border)',
                 borderRadius:'0.4rem', fontWeight:600, cursor:'pointer', flexShrink:0}}>
               {validating ? 'Checking…' : validationResult?.n_missing > 0 ? `⚠ ${validationResult.n_missing} missing` : '⊙ Validate paths'}
+            </button>
+            <button
+              onClick={doBackfillFormats}
+              disabled={backfilling}
+              title="Auto-detect vendor/format for all runs (Bruker, Thermo, Waters, Agilent, Sciex…)"
+              style={{padding:'0.35rem 0.75rem', fontSize:'0.85rem', background:'var(--surface)',
+                color: backfillResult?.updated > 0 ? '#22d3ee' : 'var(--text)',
+                border: backfillResult?.updated > 0 ? '1px solid rgba(34,211,238,0.4)' : '1px solid var(--border)',
+                borderRadius:'0.4rem', fontWeight:600, cursor:'pointer', flexShrink:0}}>
+              {backfilling ? 'Detecting…' : backfillResult ? `✓ ${backfillResult.updated} labelled` : '◈ Detect formats'}
             </button>
           </div>
 
@@ -1377,6 +1404,44 @@
                               style={{marginLeft:'0.3rem', padding:'0.1rem 0.3rem', fontSize:'0.65rem', background:'#7c2d12', color:'#fed7aa', borderRadius:'0.2rem', cursor:'pointer', verticalAlign:'middle', fontWeight:700}}
                             >RAW</span>
                           )}
+                          {r.file_format && (() => {
+                            // Vendor color map matching file_detector.py
+                            const v = (r.instrument_vendor || '').toLowerCase();
+                            const color = v.includes('bruker') ? '#22d3ee'
+                              : v.includes('thermo') ? '#f97316'
+                              : v.includes('waters') ? '#a78bfa'
+                              : v.includes('agilent') ? '#34d399'
+                              : v.includes('sciex') || v.includes('ab sciex') ? '#fb7185'
+                              : v.includes('shimadzu') ? '#fbbf24'
+                              : v.includes('open') ? '#94a3b8'
+                              : '#6b7280';
+                            // Compact label: prefer subformat hint, else derive from format
+                            const sf = r.file_subformat || '';
+                            const fmt = r.file_format || '';
+                            let label = fmt.replace('Bruker timsTOF', 'timsTOF')
+                                           .replace('Bruker .d (BAF)', 'Bruker BAF')
+                                           .replace('Bruker .d (YEP)', 'Bruker YEP')
+                                           .replace('Thermo RAW', 'Thermo RAW')
+                                           .replace('Waters .raw', 'Waters RAW')
+                                           .replace('AB Sciex WIFF2', 'Sciex WIFF2')
+                                           .replace('AB Sciex WIFF', 'Sciex WIFF')
+                                           .replace('Agilent .d', 'Agilent .d')
+                                           .replace('Shimadzu LCD', 'Shimadzu');
+                            const isTims = fmt === 'Bruker timsTOF';
+                            const isPASEF = sf && sf.includes('PASEF');
+                            const isMALDI = sf && (sf.includes('MALDI') || sf.includes('single'));
+                            if (isTims) label = isMALDI ? 'timsTOF MALDI' : 'Bruker timsTOF';
+                            return (
+                              <span
+                                title={`${r.instrument_vendor || 'Unknown vendor'} — ${fmt}${sf ? ' / ' + sf : ''}`}
+                                style={{marginLeft:'0.4rem', padding:'0.1rem 0.35rem', fontSize:'0.6rem',
+                                  background: color + '1a', color, border:`1px solid ${color}55`,
+                                  borderRadius:'0.25rem', verticalAlign:'middle', fontWeight:700,
+                                  letterSpacing:'0.02em', whiteSpace:'nowrap'}}>
+                                {label}
+                              </span>
+                            );
+                          })()}
                         </td>
                         <td>{r.instrument}</td>
                         <td>{r.mode}</td>
