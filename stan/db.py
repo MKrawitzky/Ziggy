@@ -179,6 +179,20 @@ def _migrate(con: sqlite3.Connection) -> None:
         ("workflow", "ALTER TABLE runs ADD COLUMN workflow TEXT DEFAULT ''"),
         # Notes / free-text annotation (added 2026-04-17)
         ("run_notes", "ALTER TABLE runs ADD COLUMN run_notes TEXT DEFAULT ''"),
+        # DDA mass accuracy / score metrics (added 2026-04-22)
+        ("pct_delta_mass_lt5ppm", "ALTER TABLE runs ADD COLUMN pct_delta_mass_lt5ppm REAL"),
+        ("pct_hyperscore_gt30", "ALTER TABLE runs ADD COLUMN pct_hyperscore_gt30 REAL"),
+        # Chromatography window metrics (added 2026-04-22)
+        ("peak_width_early_sec", "ALTER TABLE runs ADD COLUMN peak_width_early_sec REAL"),
+        ("peak_width_middle_sec", "ALTER TABLE runs ADD COLUMN peak_width_middle_sec REAL"),
+        ("peak_width_late_sec", "ALTER TABLE runs ADD COLUMN peak_width_late_sec REAL"),
+        # C2A (middle 50% elution band) metrics (added 2026-04-22)
+        ("c2a_rt_start_min", "ALTER TABLE runs ADD COLUMN c2a_rt_start_min REAL"),
+        ("c2a_rt_stop_min", "ALTER TABLE runs ADD COLUMN c2a_rt_stop_min REAL"),
+        ("c2a_width_min", "ALTER TABLE runs ADD COLUMN c2a_width_min REAL"),
+        ("ids_per_minute_in_c2a", "ALTER TABLE runs ADD COLUMN ids_per_minute_in_c2a REAL"),
+        # Precursor intensity (added 2026-04-22)
+        ("median_precursor_intensity", "ALTER TABLE runs ADD COLUMN median_precursor_intensity REAL"),
     ]
 
     for col, ddl in migrations:

@@ -2176,8 +2176,6 @@ async def api_scan_import(body: ScanImportRequest) -> dict:
     Reads analysis.tdf for AcquisitionDateTime and MsmsType; inserts a stub
     row with no QC metrics so the run is visible in Run History immediately.
     """
-    import sqlite3 as _sqlite3
-
     d_path = Path(body.raw_path)
     if not d_path.exists() or not d_path.is_dir():
         raise HTTPException(
@@ -2197,7 +2195,7 @@ async def api_scan_import(body: ScanImportRequest) -> dict:
     tdf_path = d_path / "analysis.tdf"
     if tdf_path.exists():
         try:
-            with _sqlite3.connect(str(tdf_path)) as con:
+            with _sqlite3_sa.connect(str(tdf_path)) as con:
                 meta_row = con.execute(
                     "SELECT Value FROM GlobalMetadata WHERE Key = 'AcquisitionDateTime'"
                 ).fetchone()
@@ -2359,7 +2357,6 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
         # Update the existing run record with all available metrics.
         # Include every writeable DB column that an extractor might return —
         # the filter `if c in metrics` keeps it safe for partial results.
-        import sqlite3 as _sq
         db_path = get_db_path()
         cols = [
             # Core identifications
@@ -2400,7 +2397,7 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
         set_parts = [f"{c} = ?" for c in cols if c in metrics]
         vals = [metrics[c] for c in cols if c in metrics]
         if set_parts:
-            with _sq.connect(str(db_path)) as con:
+            with _sqlite3_sa.connect(str(db_path)) as con:
                 con.execute(
                     f"UPDATE runs SET {', '.join(set_parts)} WHERE id = ?",
                     vals + [run_id],
@@ -3644,6 +3641,192 @@ async def api_search_submit(body: SearchSubmitRequest) -> dict:
 
     threading.Thread(target=_run_batch, daemon=True).start()
     return {"job_id": job_id, "status": "running", "n_runs": len(runs)}
+
+
+@app.get("/api/runs/{run_id}/calibrant-drift")
+async def api_calibrant_drift(run_id: str) -> dict:
+    """True calibration QC: Bruker reference 1/K₀ vs what was measured post-calibration.
+
+    Reads analysis.tdf CalibrationInfo directly — no DIA-NN result needed.
+    Returns one entry per calibrant compound per calibration event stored in the TDF.
+    Drift = MobilitiesCorrectedCalibration − ReferencePeakMobilities (Bruker's known values).
+    """
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    raw_path = run.get("raw_path", "")
+    if not raw_path:
+        return {"error": "no_raw_path", "message": "No raw path stored for this run."}
+    tdf_path = Path(raw_path) / "analysis.tdf"
+    if not tdf_path.exists():
+        return {"error": "no_tdf", "message": f"analysis.tdf not found at {raw_path}"}
+
+    try:
+        import struct, sqlite3 as _sq3
+
+        con = _sq3.connect(str(tdf_path))
+        rows = con.execute("SELECT * FROM CalibrationInfo").fetchall()
+        con.close()
+
+        def _decode_names(blob) -> list:
+            """Decode null-terminated C-string array from bytes blob."""
+            if isinstance(blob, bytes):
+                parts = blob.split(b"\x00")
+                return [p.decode("ascii", errors="replace") for p in parts if p]
+            return []
+
+        def _decode_doubles(blob) -> list:
+            """Decode array of little-endian doubles from bytes blob."""
+            if isinstance(blob, bytes):
+                n = len(blob) // 8
+                return [struct.unpack_from("<d", blob, i * 8)[0] for i in range(n)]
+            return []
+
+        # Group rows into calibration events — each event has a CalibrationDateTime key
+        # The CalibrationInfo table repeats key-value groups for multiple calibration events.
+        # We parse all mobility-related entries.
+        kv: dict = {}
+        for r in rows:
+            kv[r[1]] = r[2]
+
+        # Collect all mobility calibration entries (may have multiple blocks)
+        # We walk rows sequentially so we can detect group boundaries.
+        calib_events = []
+        current: dict = {}
+        for r in rows:
+            key, val = r[1], r[2]
+            if key == "MobilityCalibrationDateTime":
+                if current:
+                    calib_events.append(current)
+                current = {"calib_dt": val}
+            elif key in (
+                "ReferencePeakMobilities", "MobilitiesCorrectedCalibration",
+                "MobilitiesPreviousCalibration", "ReferenceMobilityList",
+                "MobilityStandardDeviationPercent", "MeasuredMobilityPeakIntensities",
+                "ReferenceMobilityPeakNames", "ReferencePeakMasses",
+            ):
+                if key in ("ReferencePeakMobilities", "MobilitiesCorrectedCalibration",
+                           "MobilitiesPreviousCalibration", "MeasuredMobilityPeakIntensities",
+                           "ReferencePeakMasses"):
+                    current[key] = _decode_doubles(val) if isinstance(val, bytes) else (
+                        [float(val)] if isinstance(val, (int, float)) else []
+                    )
+                elif key == "ReferenceMobilityPeakNames":
+                    current["names"] = _decode_names(val)
+                else:
+                    current[key] = val
+        if current:
+            calib_events.append(current)
+
+        if not calib_events:
+            return {"error": "no_calib", "message": "No mobility calibration data found in TDF."}
+
+        # Build response: for the most recent calibration event, compute compound-level drift
+        latest = calib_events[-1]
+        ref_mobs    = latest.get("ReferencePeakMobilities", [])
+        corr_mobs   = latest.get("MobilitiesCorrectedCalibration", [])
+        prev_mobs   = latest.get("MobilitiesPreviousCalibration", [])
+        ref_masses  = latest.get("ReferencePeakMasses", [])
+        names       = latest.get("names", [])
+        intensities = latest.get("MeasuredMobilityPeakIntensities", [])
+
+        n = min(len(ref_mobs), len(corr_mobs))
+        compounds = []
+        for i in range(n):
+            ref_k0  = round(ref_mobs[i], 6)
+            meas_k0 = round(corr_mobs[i], 6) if i < len(corr_mobs) else None
+            prev_k0 = round(prev_mobs[i], 6) if i < len(prev_mobs) else None
+            drift   = round(meas_k0 - ref_k0, 6) if meas_k0 is not None else None
+            compounds.append({
+                "compound": names[i] if i < len(names) else f"Calibrant {i+1}",
+                "ref_mz":   round(ref_masses[i], 4) if i < len(ref_masses) else None,
+                "ref_k0":   ref_k0,
+                "meas_k0":  meas_k0,
+                "prev_k0":  prev_k0,
+                "drift":    drift,        # corrected − reference (Vs/cm²)
+                "pct_dev":  round(abs(drift / ref_k0) * 100, 4) if drift and ref_k0 else None,
+                "intensity": round(intensities[i]) if i < len(intensities) else None,
+            })
+
+        std_pct = latest.get("MobilityStandardDeviationPercent")
+
+        return {
+            "calib_datetime": latest.get("calib_dt"),
+            "ref_list":       latest.get("ReferenceMobilityList"),
+            "std_pct":        float(std_pct) if std_pct else None,
+            "compounds":      compounds,
+            "all_events":     len(calib_events),
+            "thresholds": {
+                "warn":  0.025,   # ~15 mbar air-pressure equivalent
+                "alert": 0.050,
+            },
+        }
+    except Exception as exc:
+        import traceback
+        return {"error": "extraction_failed", "message": str(exc),
+                "traceback": traceback.format_exc()[-600:]}
+
+
+@app.get("/api/validate-paths")
+async def api_validate_paths() -> dict:
+    """Check every run's raw_path and result_path on disk.
+
+    Returns lists of runs whose files are missing so the UI can flag them.
+    """
+    all_runs = get_runs(limit=5000)
+    missing_raw    = []
+    missing_result = []
+    ok             = []
+
+    for run in all_runs:
+        rid       = str(run.get("id", ""))
+        name      = run.get("run_name", "")
+        raw       = run.get("raw_path", "") or ""
+        result    = run.get("result_path", "") or ""
+
+        raw_ok    = bool(raw    and Path(raw).exists())
+        result_ok = bool(not result or Path(result).exists())  # no result path = OK (not yet searched)
+
+        entry = {"id": rid, "run_name": name, "raw_path": raw, "result_path": result}
+        if not raw_ok and raw:
+            entry["missing"] = "raw"
+            missing_raw.append(entry)
+        elif not result_ok:
+            entry["missing"] = "result"
+            missing_result.append(entry)
+        else:
+            ok.append(rid)
+
+    return {
+        "total":          len(all_runs),
+        "ok":             len(ok),
+        "missing_raw":    missing_raw,
+        "missing_result": missing_result,
+        "n_missing":      len(missing_raw) + len(missing_result),
+    }
+
+
+@app.post("/api/validate-paths/clear-stale")
+async def api_clear_stale_results() -> dict:
+    """Null out result_path for runs whose result file no longer exists.
+
+    Safe — only clears the path pointer, does not delete anything.
+    Does NOT touch runs whose raw_path is missing (those need manual action).
+    """
+    all_runs = get_runs(limit=5000)
+    cleared = []
+    db_path = get_db_path()
+    with _sqlite3_sa.connect(str(db_path)) as con:
+        for run in all_runs:
+            result = run.get("result_path", "") or ""
+            if result and not Path(result).exists():
+                con.execute(
+                    "UPDATE runs SET result_path = NULL WHERE id = ?",
+                    (str(run["id"]),)
+                )
+                cleared.append({"id": str(run["id"]), "run_name": run.get("run_name", ""),
+                                 "stale_path": result})
+    return {"cleared": cleared, "n_cleared": len(cleared)}
 
 
 @app.get("/")

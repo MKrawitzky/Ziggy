@@ -385,6 +385,166 @@
       );
     }
 
+    // ── Calibrant QC Panel ───────────────────────────────────────────────────────
+    // Reads Bruker's own reference 1/K₀ values from analysis.tdf and compares
+    // to what the instrument actually measured post-calibration.
+    // No DIA-NN result needed — works on any timsTOF run with a raw .d file.
+    function MobCalCalibrant({ runId }) {
+      const [data, setData] = React.useState(null);
+      const [loading, setLoading] = React.useState(false);
+      const [error, setError] = React.useState('');
+
+      React.useEffect(() => {
+        if (!runId) return;
+        setLoading(true); setError(''); setData(null);
+        fetch(API + `/api/runs/${runId}/calibrant-drift`)
+          .then(r => r.json())
+          .then(d => { if (d.error) setError(d.message); else setData(d); })
+          .catch(e => setError('Network error: ' + e.message))
+          .finally(() => setLoading(false));
+      }, [runId]);
+
+      if (!runId) return (
+        <div style={{padding:'2rem', textAlign:'center', color:'#64748b', fontSize:'0.85rem'}}>
+          Select a timsTOF run above to inspect its Bruker calibrant QC
+        </div>
+      );
+      if (loading) return <div style={{padding:'2rem', textAlign:'center', color:'#22d3ee'}}>Reading calibration from TDF…</div>;
+      if (error) return (
+        <div style={{padding:'0.75rem', background:'rgba(239,68,68,0.08)', border:'1px solid rgba(239,68,68,0.3)',
+          borderRadius:'0.4rem', color:'#fca5a5', fontSize:'0.78rem'}}>{error}</div>
+      );
+      if (!data) return null;
+
+      const WARN = 0.025, ALERT = 0.050;
+      const cpds = data.compounds || [];
+      const maxDrift = cpds.length ? Math.max(...cpds.map(c => Math.abs(c.drift || 0))) : 0;
+      const calStatus = maxDrift < WARN ? 'PASS' : maxDrift < ALERT ? 'WARN' : 'ALERT';
+      const calCol = calStatus === 'PASS' ? '#22c55e' : calStatus === 'WARN' ? '#f97316' : '#ef4444';
+
+      return (
+        <div>
+          {/* Summary header */}
+          <div style={{display:'flex', gap:'0.6rem', flexWrap:'wrap', marginBottom:'0.9rem', alignItems:'stretch'}}>
+            {[
+              {label:'Calibrant List', val: data.ref_list || 'Tuning Mix', col:'#94a3b8'},
+              {label:'Calibration Time', val: data.calib_datetime ? new Date(data.calib_datetime).toLocaleString() : '—', col:'#94a3b8'},
+              {label:'Std Dev (Bruker)', val: data.std_pct != null ? (data.std_pct * 100).toFixed(4) + ' %' : '—', col:'#22d3ee'},
+              {label:'Max |Δ| vs Ref', val: maxDrift.toFixed(5) + ' Vs/cm²', col: calCol},
+              {label:'Status', val: calStatus, col: calCol},
+            ].map(s => (
+              <div key={s.label} style={{background:'rgba(0,0,0,0.45)', border:`1px solid ${s.col}22`,
+                borderRadius:'0.4rem', padding:'0.5rem 0.75rem', textAlign:'center', flex:'1 1 130px'}}>
+                <div style={{fontSize:'1rem', fontWeight:800, color:s.col, lineHeight:1.1}}>{s.val}</div>
+                <div style={{fontSize:'0.67rem', color:'#64748b', marginTop:'0.15rem'}}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Explainer */}
+          <div style={{fontSize:'0.74rem', color:'#64748b', lineHeight:1.6, marginBottom:'0.75rem',
+            padding:'0.5rem 0.75rem', background:'rgba(34,211,238,0.04)', borderRadius:'0.35rem',
+            borderLeft:'3px solid rgba(34,211,238,0.3)'}}>
+            <strong style={{color:'#22d3ee'}}>What this measures:</strong>{' '}
+            Bruker stores reference 1/K₀ values for each calibrant compound in the TDF file
+            (<code style={{color:'#a5b4fc'}}>ReferencePeakMobilities</code>). These are the
+            instrument manufacturer's known values for the Agilent ESI-L tuning mix at STP.
+            After calibration, the instrument measures these same compounds
+            (<code style={{color:'#a5b4fc'}}>MobilitiesCorrectedCalibration</code>).
+            The drift Δ = measured − reference shows how well the calibration succeeded.
+            <strong style={{color:'#DAAA00'}}> This is independent of DIA-NN</strong> — it reflects
+            the hardware calibration state at the time the run was acquired.
+          </div>
+
+          {/* Compound table */}
+          <div style={{overflowX:'auto'}}>
+            <table style={{width:'100%', borderCollapse:'collapse', fontSize:'0.8rem'}}>
+              <thead>
+                <tr style={{background:'rgba(34,211,238,0.06)', borderBottom:'1px solid rgba(34,211,238,0.15)'}}>
+                  {['Compound','Ref m/z','Bruker Ref 1/K₀','Measured 1/K₀','Pre-Cal 1/K₀','Δ (meas − ref)','% Dev','Intensity'].map(h => (
+                    <th key={h} style={{padding:'0.4rem 0.6rem', textAlign:'left', color:'#94a3b8',
+                      fontWeight:600, fontSize:'0.73rem', whiteSpace:'nowrap'}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cpds.map((c, i) => {
+                  const d = c.drift || 0;
+                  const dCol = Math.abs(d) > ALERT ? '#ef4444' : Math.abs(d) > WARN ? '#f97316' : '#22c55e';
+                  return (
+                    <tr key={i} style={{borderBottom:'1px solid rgba(255,255,255,0.04)',
+                      background: i % 2 ? 'rgba(255,255,255,0.01)' : 'transparent'}}>
+                      <td style={{padding:'0.4rem 0.6rem', color:'#e2e8f0', fontFamily:'monospace', fontSize:'0.75rem'}}>{c.compound}</td>
+                      <td style={{padding:'0.4rem 0.6rem', color:'#94a3b8'}}>{c.ref_mz != null ? c.ref_mz.toFixed(3) : '—'}</td>
+                      <td style={{padding:'0.4rem 0.6rem', color:'#22d3ee', fontFamily:'monospace'}}>{c.ref_k0.toFixed(6)}</td>
+                      <td style={{padding:'0.4rem 0.6rem', color:'#e2e8f0', fontFamily:'monospace'}}>{c.meas_k0 != null ? c.meas_k0.toFixed(6) : '—'}</td>
+                      <td style={{padding:'0.4rem 0.6rem', color:'#475569', fontFamily:'monospace', fontSize:'0.73rem'}}>{c.prev_k0 != null ? c.prev_k0.toFixed(6) : '—'}</td>
+                      <td style={{padding:'0.4rem 0.6rem', fontFamily:'monospace', fontWeight:700, color:dCol}}>
+                        {d >= 0 ? '+' : ''}{d.toFixed(6)}
+                      </td>
+                      <td style={{padding:'0.4rem 0.6rem', color:dCol, fontSize:'0.75rem'}}>
+                        {c.pct_dev != null ? c.pct_dev.toFixed(4) + ' %' : '—'}
+                      </td>
+                      <td style={{padding:'0.4rem 0.6rem', color:'#64748b', fontSize:'0.73rem'}}>
+                        {c.intensity != null ? c.intensity.toLocaleString() : '—'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Mini bar chart of drifts */}
+          {cpds.length > 0 && (() => {
+            const maxAbs = Math.max(WARN * 1.5, ...cpds.map(c => Math.abs(c.drift || 0)));
+            return (
+              <div style={{marginTop:'0.9rem'}}>
+                <div style={{fontSize:'0.73rem', color:'#64748b', marginBottom:'0.4rem'}}>Δ 1/K₀ per calibrant compound vs thresholds</div>
+                {cpds.map((c, i) => {
+                  const d = c.drift || 0;
+                  const pct = Math.min(1, Math.abs(d) / maxAbs);
+                  const dCol = Math.abs(d) > ALERT ? '#ef4444' : Math.abs(d) > WARN ? '#f97316' : '#22c55e';
+                  return (
+                    <div key={i} style={{display:'flex', alignItems:'center', gap:'0.5rem', marginBottom:'0.3rem'}}>
+                      <div style={{width:'180px', fontSize:'0.72rem', color:'#94a3b8', textAlign:'right',
+                        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>{c.compound}</div>
+                      <div style={{flex:1, height:'16px', background:'rgba(255,255,255,0.04)',
+                        borderRadius:'2px', position:'relative'}}>
+                        {/* Zero line */}
+                        <div style={{position:'absolute', left:'50%', top:0, bottom:0,
+                          width:'1px', background:'rgba(34,211,238,0.3)'}}/>
+                        {/* Warn lines */}
+                        {[-WARN, WARN].map(w => (
+                          <div key={w} style={{position:'absolute',
+                            left: (0.5 + w / maxAbs / 2 * 100).toFixed(1) + '%',
+                            top:0, bottom:0, width:'1px', background:'rgba(249,115,22,0.35)'}}/>
+                        ))}
+                        {/* Bar */}
+                        <div style={{
+                          position:'absolute',
+                          left: d < 0 ? ((0.5 - pct / 2) * 100).toFixed(1) + '%' : '50%',
+                          width: (pct * 50).toFixed(1) + '%',
+                          top:'2px', bottom:'2px',
+                          background: dCol + 'cc', borderRadius:'2px'
+                        }}/>
+                      </div>
+                      <div style={{width:'90px', fontSize:'0.72rem', fontFamily:'monospace', color:dCol}}>
+                        {d >= 0 ? '+' : ''}{d.toFixed(5)}
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{fontSize:'0.68rem', color:'#475569', marginTop:'0.3rem', textAlign:'center'}}>
+                  ± threshold lines: orange = 0.025 Vs/cm² (warn), red = 0.050 Vs/cm² (alert)
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      );
+    }
+
     // ── Main Mobility Calibration Tab ────────────────────────────────────────────
     function MobilityCalibrationTab() {
       const { data: allRuns } = useFetch('/api/runs?limit=500');
@@ -393,9 +553,10 @@
       const [calData, setCalData] = React.useState(null);
       const [loading, setLoading] = React.useState(false);
       const [error, setError] = React.useState('');
-      const [view, setView] = React.useState('scatter');
+      const [view, setView] = React.useState('calibrant');
 
       const VIEWS = [
+        ['calibrant',  '★ Calibrant QC'],
         ['scatter',   '◎ Obs vs Pred'],
         ['histogram', '▦ Shift Dist'],
         ['trend',     '∿ Run History'],
@@ -443,10 +604,11 @@
                   Ion Mobility Calibration QC
                 </h3>
                 <p style={{color:'#94a3b8', fontSize:'0.76rem', lineHeight:1.5, maxWidth:'680px'}}>
-                  Compares DIA-NN measured 1/K₀ against DIA-NN predicted 1/K₀ (library values) for each precursor.
-                  A systematic shift Δ = Observed − Predicted indicates environmental air pressure drift.{' '}
-                  <span style={{color:'#DAAA00'}}>15 mbar pressure change → ±0.025 Vs/cm² shift</span> (Müller et al. J. Proteome Res. 2025).
-                  Large shifts reduce diaPASEF window coverage and degrade ID rates.
+                  Two complementary layers: <span style={{color:'#DAAA00'}}>★ Calibrant QC</span> reads
+                  Bruker's reference 1/K₀ values directly from the TDF — no search result needed, measures
+                  hardware calibration state at acquisition time. <span style={{color:'#22d3ee'}}>◎ Obs vs Pred</span>{' '}
+                  compares DIA-NN measured vs predicted 1/K₀ across peptides, detecting environmental drift.{' '}
+                  <span style={{color:'#DAAA00'}}>15 mbar pressure change → ±0.025 Vs/cm²</span> (Müller et al. J. Proteome Res. 2025).
                 </p>
               </div>
               <a href="https://pubs.acs.org/doi/10.1021/acs.jproteome.4c00932" target="_blank" rel="noreferrer"
@@ -531,6 +693,13 @@
               Warn ≥ 0.025 · Alert ≥ 0.050 Vs/cm²
             </span>
           </div>
+
+          {/* Calibrant QC — primary, no DIA-NN required */}
+          {view === 'calibrant' && (
+            <div className="card" style={{padding:'0.75rem', background:'rgba(0,0,0,0.5)'}}>
+              <MobCalCalibrant runId={selectedRunId}/>
+            </div>
+          )}
 
           {/* Scatter */}
           {view === 'scatter' && (

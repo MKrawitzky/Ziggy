@@ -617,6 +617,70 @@
             </div>
           </div>
 
+          {/* ── Why 4D-Omics ── */}
+          {(() => {
+            const [showWhy, setShowWhy] = useState(false);
+            return (
+              <div className="card" style={{marginBottom:'1rem', border:'1px solid rgba(218,170,0,0.22)'}}>
+                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', cursor:'pointer', padding:'0.1rem 0'}}
+                  onClick={() => setShowWhy(v => !v)}>
+                  <div>
+                    <span style={{fontWeight:700, color:'#DAAA00', fontSize:'0.88rem'}}>
+                      4 Reasons for 4D-Omics on the timsTOF Pro
+                    </span>
+                    <span style={{marginLeft:'0.7rem', fontSize:'0.73rem', color:'#64748b'}}>
+                      From Bruker's capabilities statement — gas-phase structure as a 4th analytical dimension
+                    </span>
+                  </div>
+                  <span style={{color:'#DAAA00', fontSize:'1rem', marginLeft:'0.5rem'}}>{showWhy ? '▲' : '▼'}</span>
+                </div>
+                {showWhy && (
+                  <div style={{marginTop:'0.9rem', display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(250px,1fr))', gap:'0.7rem'}}>
+                    {[
+                      {
+                        num:'1', color:'#22d3ee', title:'CCS-Aware — A 4th Analytical Dimension',
+                        body:`Just as retention time anchors analytes in the liquid phase, collision cross-section (CCS) anchors them in the gas phase. CCS is reproducible and intrinsic — measured for every ion on every run. It improves identification fidelity, helps decipher isomeric species, and enables CCS-based database pre-filtering.
+
+The TIMS device accumulates ions by balancing an electric field against N₂ gas flow. When the field ramps, ions of different 1/K₀ are released sequentially — a physical sieve operating in microseconds.`,
+                      },
+                      {
+                        num:'2', color:'#DAAA00', title:'CCS-Aware MBR — Complete Quantitative Datasets',
+                        body:`Match Between Runs with only m/z + RT has long been error-prone. Adding CCS as a third coordinate makes each feature uniquely specifiable.
+
+In clinical plasma digests (11-min gradients), CCS-aware MBR increases identified proteins from ~100 to ~200 per run — a 100% gain. Across 20 samples the average improvement was 90%. CCS-aware MBR is especially powerful for low-abundance proteins that are sampled stochastically in DDA.`,
+                      },
+                      {
+                        num:'3', color:'#a855f7', title:'MOMA — Resolving Isobaric Co-Eluters',
+                        body:`Proteolytic digestion generates hundreds of thousands of peptides. Co-eluting near-isobaric precursors produce chimeric MS2 spectra that confuse database searching.
+
+MOMA (Mobility Offset Mass Aligned): when two ions share m/z but differ in 1/K₀, TIMS separates them before TOF analysis. Each receives a clean MS2 spectrum. MOMA is uniquely powerful for PTM positional isomers — phospho-peptide pairs that differ only in modification site are routinely resolved by TIMS where no other platform can.`,
+                      },
+                      {
+                        num:'4', color:'#22c55e', title:'Robustness + Ease of Use',
+                        body:`The orthogonal off-axis glass capillary design admits only ions — neutral contamination is deflected. This means lower sample loads, less fouling of LC/source/optics, and stable performance over months without deep cleaning.
+
+Calibration (mass + IMS) takes under 5 min — vs 45+ min on other platforms. Bruker's longitudinal QC shows consistent performance across 40+ weeks of continuous operation. Low sample requirements (≥1 µg) protect both column longevity and proteome depth.`,
+                      },
+                    ].map(p => (
+                      <div key={p.num} style={{background:'rgba(0,0,0,0.35)',
+                        border:`1px solid ${p.color}22`, borderRadius:'0.45rem', padding:'0.7rem 0.85rem'}}>
+                        <div style={{display:'flex', alignItems:'center', gap:'0.5rem', marginBottom:'0.5rem'}}>
+                          <span style={{width:'22px', height:'22px', borderRadius:'50%',
+                            background:`${p.color}22`, border:`1px solid ${p.color}44`,
+                            display:'flex', alignItems:'center', justifyContent:'center',
+                            fontSize:'0.72rem', fontWeight:800, color:p.color, flexShrink:0}}>{p.num}</span>
+                          <span style={{fontWeight:700, color:p.color, fontSize:'0.8rem'}}>{p.title}</span>
+                        </div>
+                        <div style={{fontSize:'0.74rem', color:'#94a3b8', lineHeight:1.65,
+                          whiteSpace:'pre-line'}}>{p.body}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {(loading || runsLoading) && <div style={{textAlign:'center',padding:'3rem',color:'var(--muted)'}}>Loading ion data…</div>}
           {!loading && !runsLoading && dRuns.length === 0 && (
             <div style={{textAlign:'center',padding:'3rem',color:'var(--muted)'}}>No Bruker .d runs found. Ion mobility data requires timsTOF acquisitions.</div>

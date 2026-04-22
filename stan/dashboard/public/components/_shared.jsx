@@ -979,6 +979,40 @@
         return () => clearTimeout(timer);
       }, [jobStatus]);
 
+      // ── File path validation ─────────────────────────────────────────
+      const [validating, setValidating] = useState(false);
+      const [validationResult, setValidationResult] = useState(null);
+      const [showValidation, setShowValidation] = useState(false);
+      const [clearingStale, setClearingStale] = useState(false);
+
+      const doValidatePaths = async () => {
+        setValidating(true);
+        try {
+          const r = await fetch(API + '/api/validate-paths');
+          const d = r.ok ? await r.json() : null;
+          setValidationResult(d);
+          setShowValidation(true);
+        } catch (e) {
+          setValidationResult({error: 'Network error: ' + e.message});
+        }
+        setValidating(false);
+      };
+
+      const doClearStale = async () => {
+        setClearingStale(true);
+        try {
+          const r = await fetch(API + '/api/validate-paths/clear-stale', {method:'POST'});
+          const d = r.ok ? await r.json() : null;
+          if (d?.n_cleared > 0) {
+            reloadRuns();
+            // Re-validate to refresh the list
+            const r2 = await fetch(API + '/api/validate-paths');
+            if (r2.ok) setValidationResult(await r2.json());
+          }
+        } catch {}
+        setClearingStale(false);
+      };
+
       // Poll scan-panel search jobs (rawPath-keyed) every 4 seconds
       useEffect(() => {
         const active = Object.entries(searchJobs).filter(([, v]) =>
@@ -1070,7 +1104,81 @@
                 </button>
               );
             })()}
+            <button
+              onClick={doValidatePaths}
+              disabled={validating}
+              title="Check that all run files still exist on disk"
+              style={{padding:'0.35rem 0.75rem', fontSize:'0.85rem', background:'var(--surface)',
+                color: validationResult?.n_missing > 0 ? '#f97316' : 'var(--text)',
+                border: validationResult?.n_missing > 0 ? '1px solid rgba(249,115,22,0.5)' : '1px solid var(--border)',
+                borderRadius:'0.4rem', fontWeight:600, cursor:'pointer', flexShrink:0}}>
+              {validating ? 'Checking…' : validationResult?.n_missing > 0 ? `⚠ ${validationResult.n_missing} missing` : '⊙ Validate paths'}
+            </button>
           </div>
+
+          {/* ── File path validation panel ── */}
+          {showValidation && validationResult && !validationResult.error && (
+            <div style={{marginBottom:'0.75rem', padding:'0.65rem 0.9rem', borderRadius:'0.45rem',
+              background: validationResult.n_missing > 0 ? 'rgba(249,115,22,0.06)' : 'rgba(34,197,94,0.06)',
+              border: `1px solid ${validationResult.n_missing > 0 ? 'rgba(249,115,22,0.35)' : 'rgba(34,197,94,0.25)'}`}}>
+              <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'0.5rem'}}>
+                <div style={{fontSize:'0.82rem', fontWeight:700,
+                  color: validationResult.n_missing > 0 ? '#f97316' : '#22c55e'}}>
+                  {validationResult.n_missing === 0
+                    ? `✓ All ${validationResult.total} run paths verified — no missing files`
+                    : `⚠ ${validationResult.n_missing} of ${validationResult.total} runs have missing files`}
+                </div>
+                <div style={{display:'flex', gap:'0.4rem'}}>
+                  {validationResult.missing_result?.length > 0 && (
+                    <button onClick={doClearStale} disabled={clearingStale}
+                      title="Clear result_path pointers for runs whose result file no longer exists"
+                      style={{padding:'0.25rem 0.6rem', fontSize:'0.78rem', background:'rgba(249,115,22,0.15)',
+                        color:'#f97316', border:'1px solid rgba(249,115,22,0.4)', borderRadius:'0.3rem',
+                        cursor:'pointer', fontWeight:600}}>
+                      {clearingStale ? 'Clearing…' : `Clear ${validationResult.missing_result.length} stale results`}
+                    </button>
+                  )}
+                  <button onClick={() => setShowValidation(false)}
+                    style={{padding:'0.25rem 0.55rem', fontSize:'0.78rem', background:'transparent',
+                      color:'#64748b', border:'1px solid rgba(255,255,255,0.08)', borderRadius:'0.3rem', cursor:'pointer'}}>
+                    ✕ Dismiss
+                  </button>
+                </div>
+              </div>
+              {validationResult.missing_raw?.length > 0 && (
+                <div style={{marginBottom:'0.5rem'}}>
+                  <div style={{fontSize:'0.75rem', color:'#ef4444', fontWeight:600, marginBottom:'0.3rem'}}>
+                    Raw files missing on disk ({validationResult.missing_raw.length}) — these runs have no data to search:
+                  </div>
+                  <div style={{maxHeight:'120px', overflowY:'auto', display:'flex', flexDirection:'column', gap:'0.15rem'}}>
+                    {validationResult.missing_raw.map(r => (
+                      <div key={r.id} style={{fontSize:'0.73rem', fontFamily:'monospace', color:'#fca5a5',
+                        padding:'0.15rem 0.4rem', background:'rgba(239,68,68,0.08)', borderRadius:'0.25rem'}}>
+                        <span style={{color:'#94a3b8'}}>{r.run_name}</span>
+                        <span style={{color:'#475569', marginLeft:'0.5rem'}}>{r.raw_path}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {validationResult.missing_result?.length > 0 && (
+                <div>
+                  <div style={{fontSize:'0.75rem', color:'#f97316', fontWeight:600, marginBottom:'0.3rem'}}>
+                    Result files moved/deleted ({validationResult.missing_result.length}) — metrics may be stale (click "Clear stale results" to reset):
+                  </div>
+                  <div style={{maxHeight:'120px', overflowY:'auto', display:'flex', flexDirection:'column', gap:'0.15rem'}}>
+                    {validationResult.missing_result.map(r => (
+                      <div key={r.id} style={{fontSize:'0.73rem', fontFamily:'monospace', color:'#fed7aa',
+                        padding:'0.15rem 0.4rem', background:'rgba(249,115,22,0.08)', borderRadius:'0.25rem'}}>
+                        <span style={{color:'#94a3b8'}}>{r.run_name}</span>
+                        <span style={{color:'#475569', marginLeft:'0.5rem'}}>{r.result_path}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* ── Selection / pin bar ── */}
           {pinnedRunIds.size > 0 && (
@@ -1230,12 +1338,24 @@
                     const isRunning = job.status === 'queued' || job.status === 'running';
                     const noMetrics = ids == null;
                     const isPinned = pinnedRunIds.has(String(r.id));
+                    // File existence from validation (if run)
+                    const missingRaw = validationResult?.missing_raw?.some(m => m.id === String(r.id));
+                    const missingResult = validationResult?.missing_result?.some(m => m.id === String(r.id));
                     return (
-                      <tr key={r.id} onClick={() => setSelectedRun(r)} style={{cursor:'pointer', background: isPinned ? 'rgba(218,170,0,0.07)' : undefined}}>
+                      <tr key={r.id} onClick={() => setSelectedRun(r)} style={{cursor:'pointer',
+                        background: missingRaw ? 'rgba(239,68,68,0.06)' : missingResult ? 'rgba(249,115,22,0.04)' : isPinned ? 'rgba(218,170,0,0.07)' : undefined}}>
                         <td style={{textAlign:'center', width:'2rem'}} onClick={e => { e.stopPropagation(); togglePin(r.id); }}>
                           <input type="checkbox" readOnly checked={isPinned} style={{cursor:'pointer'}} />
                         </td>
                         <td style={{maxWidth:'280px', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+                          {missingRaw && <span title={`Raw file not found: ${r.raw_path}`}
+                            style={{marginRight:'0.3rem', padding:'0.1rem 0.3rem', fontSize:'0.62rem',
+                              background:'rgba(239,68,68,0.2)', color:'#fca5a5', borderRadius:'0.2rem',
+                              fontWeight:700, verticalAlign:'middle'}}>⚠ RAW MISSING</span>}
+                          {missingResult && !missingRaw && <span title={`Result file not found: ${r.result_path}`}
+                            style={{marginRight:'0.3rem', padding:'0.1rem 0.3rem', fontSize:'0.62rem',
+                              background:'rgba(249,115,22,0.15)', color:'#fed7aa', borderRadius:'0.2rem',
+                              fontWeight:700, verticalAlign:'middle'}}>⚠ RESULT MOVED</span>}
                           <span title={r.run_name + ' (click for TIC viewer)'}>{r.run_name}</span>
                           {r.raw_path && r.raw_path.endsWith('.d') && (
                             <span
