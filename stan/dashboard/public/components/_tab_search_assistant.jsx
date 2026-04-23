@@ -1,13 +1,20 @@
     /* ── Search Assistant Tab ─────────────────────────────────────────── */
 
     const PRESET_META = {
-      hela_digest:  { icon: '🧫', color: '#34d399' },
-      single_cell:  { icon: '🔬', color: '#22d3ee' },
-      mhc_class_i:  { icon: '🛡', color: '#f472b6' },
-      mhc_class_ii: { icon: '🛡', color: '#a78bfa' },
-      tmt:          { icon: '🏷', color: '#DAAA00' },
-      phospho:      { icon: '⚡', color: '#fb923c' },
+      hela_digest:      { icon: '🧫', color: '#34d399' },
+      single_cell:      { icon: '🔬', color: '#22d3ee' },
+      mhc_class_i:      { icon: '🛡', color: '#f472b6' },
+      mhc_class_ii:     { icon: '🛡', color: '#a78bfa' },
+      mhc_class_i_dda:  { icon: '🛡', color: '#f472b6' },
+      mhc_class_ii_dda: { icon: '🛡', color: '#a78bfa' },
+      mhc_class_i_dia:  { icon: '🛡', color: '#f472b6' },
+      mhc_class_ii_dia: { icon: '🛡', color: '#a78bfa' },
+      tmt:              { icon: '🏷', color: '#DAAA00' },
+      phospho:          { icon: '⚡', color: '#fb923c' },
     };
+    const _isImmunoPreset = key => key && key.startsWith('mhc_');
+    const _isDdaPreset    = key => key && key.includes('_dda');
+    const _isDiaPreset    = key => key && key.includes('_dia');
 
     function SearchAssistantTab() {
       const { data: unsearched, loading: unsearchedLoading, refetch: refetchUnsearched } = useFetch('/api/search/unsearched');
@@ -150,7 +157,7 @@
               {unsearchedList.length} run{unsearchedList.length !== 1 ? 's' : ''} without search results
             </div>
             <div style={{fontSize:'0.8rem', color:'var(--muted)', marginTop:'0.15rem'}}>
-              These raw files are registered in the database but have not been searched with DIA-NN yet.
+              These raw files are registered but have no search results yet. HLA/immunopeptidomics samples are auto-detected and will be routed to the correct engine and preset.
               Use the wizard below to queue them.
             </div>
           </div>
@@ -332,12 +339,37 @@
                       {selected.has(r.id) ? '✓' : ''}
                     </div>
                     <div style={{flex:1, minWidth:0}}>
-                      <div style={{fontSize:'0.82rem', fontWeight:500,
-                                   overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
-                        {r.run_name}
+                      <div style={{display:'flex', alignItems:'center', gap:'0.35rem', flexWrap:'wrap'}}>
+                        <span style={{fontSize:'0.82rem', fontWeight:500,
+                                     overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', maxWidth:'300px'}}>
+                          {r.run_name}
+                        </span>
+                        {r.is_immuno && (
+                          <span style={{
+                            fontSize:'0.65rem', fontWeight:700, flexShrink:0,
+                            background: r.immuno_class===2 ? 'rgba(167,139,250,0.2)' : 'rgba(244,114,182,0.2)',
+                            color:      r.immuno_class===2 ? '#a78bfa' : '#f472b6',
+                            border:     `1px solid ${r.immuno_class===2 ? '#a78bfa55' : '#f472b255'}`,
+                            borderRadius:'0.25rem', padding:'0.05rem 0.35rem',
+                          }}>
+                            HLA-{r.immuno_class===2 ? 'II' : 'I'}
+                          </span>
+                        )}
+                        <span style={{
+                          fontSize:'0.65rem', flexShrink:0,
+                          background:'rgba(100,116,139,0.15)', color:'var(--muted)',
+                          borderRadius:'0.2rem', padding:'0.05rem 0.3rem',
+                        }}>
+                          {r.mode || '?'}
+                        </span>
                       </div>
-                      <div style={{fontSize:'0.72rem', color:'var(--muted)'}}>
-                        {r.acquisition_mode || '?'} · {(r.run_date||'').slice(0,10)} · {r.lc_system || 'LC unknown'}
+                      <div style={{fontSize:'0.7rem', color:'var(--muted)', marginTop:'0.1rem'}}>
+                        {(r.run_date||'').slice(0,10)} · {r.lc_system || 'LC unknown'}
+                        {r.suggested_preset && (
+                          <span style={{marginLeft:'0.4rem', color:'#60a5fa'}}>
+                            → suggest: {r.suggested_preset}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -348,7 +380,13 @@
 
           <div style={{marginTop:'1rem', display:'flex', justifyContent:'flex-end'}}>
             <button
-              onClick={() => setStep(2)}
+              onClick={() => {
+                // Auto-suggest preset based on selected runs
+                const selRuns = unsearchedList.filter(r => selected.has(r.id));
+                const suggestions = [...new Set(selRuns.map(r => r.suggested_preset).filter(Boolean))];
+                if (suggestions.length === 1 && !chosenPreset) setChosenPreset(suggestions[0]);
+                setStep(2);
+              }}
               disabled={selected.size === 0}
               style={{
                 padding:'0.5rem 1.5rem', fontWeight:700, fontSize:'0.85rem',
@@ -368,51 +406,65 @@
       const step2 = step === 2 && (
         <div className="card">
           <h3 style={{marginBottom:'0.75rem'}}>Choose a search preset</h3>
-          <div style={{
-            display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(240px, 1fr))',
-            gap:'0.65rem', marginBottom:'1rem',
-          }}>
-            {presetList.map(([key, p]) => {
-              const meta = PRESET_META[key] || {};
-              const isSelected = chosenPreset === key;
-              return (
-                <div
-                  key={key}
-                  onClick={() => setChosenPreset(key)}
-                  style={{
-                    padding:'0.85rem 1rem',
-                    borderRadius:'0.6rem',
-                    border: `2px solid ${isSelected ? (meta.color || '#DAAA00') : 'var(--border)'}`,
-                    background: isSelected ? `${(meta.color || '#DAAA00')}18` : 'var(--surface)',
-                    cursor:'pointer',
-                    transition:'all 0.15s',
-                  }}
-                >
-                  <div style={{display:'flex', alignItems:'center', gap:'0.5rem', marginBottom:'0.35rem'}}>
-                    <span style={{fontSize:'1.3rem'}}>{meta.icon || '🔍'}</span>
-                    <span style={{fontWeight:700, fontSize:'0.88rem', color: isSelected ? (meta.color || '#DAAA00') : 'var(--text)'}}>
-                      {p.label}
-                    </span>
-                  </div>
-                  <div style={{fontSize:'0.76rem', color:'var(--muted)', lineHeight:'1.4'}}>
-                    {p.description}
-                  </div>
-                  {isSelected && (
-                    <div style={{
-                      marginTop:'0.5rem', fontSize:'0.7rem', color:'var(--muted)',
-                      fontFamily:'monospace', background:'#00000040',
-                      padding:'0.35rem', borderRadius:'0.3rem',
-                      wordBreak:'break-all',
-                    }}>
-                      {(p.diann_args || []).join(' ')}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+          {/* Group presets: standard + immunopeptidomics */}
+          {[
+            {group:'Standard Proteomics', keys:['hela_digest','single_cell','tmt','phospho']},
+            {group:'Immunopeptidomics — DDA / PASEF (Sage)', keys:['mhc_class_i_dda','mhc_class_ii_dda']},
+            {group:'Immunopeptidomics — DIA / diaPASEF (DIA-NN)', keys:['mhc_class_i_dia','mhc_class_ii_dia']},
+          ].map(({group, keys}) => {
+            const available = keys.filter(k => presetList.some(([pk]) => pk === k));
+            if (!available.length) return null;
+            return React.createElement('div', {key:group, style:{marginBottom:'1rem'}},
+              React.createElement('div', {style:{
+                fontSize:'0.7rem', fontWeight:700, color:'var(--muted)',
+                letterSpacing:'0.08em', textTransform:'uppercase',
+                marginBottom:'0.45rem', paddingBottom:'0.2rem',
+                borderBottom:'1px solid var(--border)',
+              }}, group),
+              React.createElement('div', {style:{
+                display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(260px, 1fr))',
+                gap:'0.55rem',
+              }},
+                available.map(key => {
+                  const p = (presetList.find(([pk]) => pk===key)||[])[1] || {};
+                  const meta = PRESET_META[key] || {};
+                  const isSelected = chosenPreset === key;
+                  const engines = p.engines || (p.diann_args ? ['diann'] : ['sage']);
+                  return React.createElement('div', {
+                    key,
+                    onClick: () => setChosenPreset(key),
+                    style:{
+                      padding:'0.75rem 0.9rem',
+                      borderRadius:'0.55rem',
+                      border:`2px solid ${isSelected ? (meta.color||'#DAAA00') : 'var(--border)'}`,
+                      background: isSelected ? `${(meta.color||'#DAAA00')}15` : 'var(--surface)',
+                      cursor:'pointer', transition:'all 0.15s',
+                    },
+                  },
+                    React.createElement('div', {style:{display:'flex',alignItems:'center',gap:'0.4rem',marginBottom:'0.3rem'}},
+                      React.createElement('span', {style:{fontSize:'1.1rem'}}, p.icon || meta.icon || '🔍'),
+                      React.createElement('span', {style:{fontWeight:700,fontSize:'0.85rem',color:isSelected?(meta.color||'#DAAA00'):'var(--text)',flex:1}}, p.label),
+                      engines.map(e => React.createElement('span', {key:e, style:{
+                        fontSize:'0.6rem', fontWeight:700,
+                        background: e==='diann' ? 'rgba(34,211,238,0.15)' : e==='sage' ? 'rgba(52,211,153,0.15)' : 'rgba(251,191,36,0.15)',
+                        color:      e==='diann' ? '#22d3ee'               : e==='sage' ? '#34d399'               : '#fbbf24',
+                        border:     `1px solid ${e==='diann' ? '#22d3ee44' : e==='sage' ? '#34d39944' : '#fbbf2444'}`,
+                        borderRadius:'0.2rem', padding:'0.05rem 0.3rem',
+                      }}, e.toUpperCase()))
+                    ),
+                    React.createElement('div', {style:{fontSize:'0.73rem',color:'var(--muted)',lineHeight:'1.4'}}, p.description),
+                    isSelected && (p.diann_args||p.sage_enzyme) && React.createElement('div', {style:{
+                      marginTop:'0.4rem',fontSize:'0.68rem',color:'var(--muted)',fontFamily:'monospace',
+                      background:'#00000040',padding:'0.3rem',borderRadius:'0.3rem',wordBreak:'break-all',
+                    }}, p.diann_args ? p.diann_args.join(' ') :
+                      `enzyme: ${p.sage_enzyme||'nonspecific'} · len: ${p.sage_min_len}–${p.sage_max_len}aa`)
+                  );
+                })
+              )
+            );
+          })}
 
-          <div style={{display:'flex', justifyContent:'space-between'}}>
+          <div style={{display:'flex', justifyContent:'space-between', marginTop:'1rem'}}>
             <button onClick={() => setStep(1)} style={{padding:'0.4rem 1rem', fontSize:'0.82rem',
               background:'var(--surface)', border:'1px solid var(--border)',
               borderRadius:'0.4rem', color:'var(--text)', cursor:'pointer'}}>

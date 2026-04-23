@@ -9,16 +9,43 @@
   <script src="/static/vendor/plotly-2.27.0.min.js"></script>
   <style>
     :root {
-      --bg: #0e0018; --surface: #1a0030; --border: #3d1060;
-      --text: #f0e6ff; --muted: #b899d4; --accent: #DAAA00;
-      --pass: #22c55e; --warn: #eab308; --fail: #ef4444;
+      /* ── 80s Synthwave Neon theme ────────────────────────────────────────
+         Background: deep space black-purple — the void between stars.
+         Surface:    dark charcoal with violet tint — cards rise from shadow.
+         Border:     hot magenta neon — electric edge.
+         Text:       cold white-lavender — crisp CRT phosphor.
+         Muted:      neon lavender — secondary glimmer.
+         Accent:     scorching neon yellow-gold — retro CRT burst.
+         Violet:     hot neon magenta — maximum overdrive.
+         Cyan:       electric ice-blue — laser grid.
+         Pass/Warn/Fail: neon green / neon orange / hot red.            */
+      --bg:      #06000f;
+      --surface: #110028;
+      --border:  #ff00cc;
+      --text:    #f0e8ff;
+      --muted:   #cc88ff;
+      --accent:  #ffe600;
+      --violet:  #ff00ff;
+      --cyan:    #00ffff;
+      --pass:    #39ff14; --warn: #ff8c00; --fail: #ff2244;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body {
+      /* Deep void + horizon glow + synthwave grid overlay */
+      background-color: #06000f;
+      background-image:
+        radial-gradient(ellipse 130% 45% at 50% 110%, rgba(255,0,200,0.22) 0%, transparent 60%),
+        radial-gradient(ellipse 90% 35% at 50% -5%,  rgba(80,0,255,0.25)  0%, transparent 65%),
+        linear-gradient(rgba(255,0,204,0.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,0,204,0.055) 1px, transparent 1px);
+      background-size: auto, auto, 44px 44px, 44px 44px;
+      background-attachment: fixed;
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
 
     /* ── Ziggy Stardust backdrop bolt ──────────────────────────────────────
-       Fixed behind all content, pointer-events off so it never intercepts
-       clicks. mix-blend-mode:screen makes it glow rather than block.       */
+       Screen blend so the bolt glows against the dark void.                */
     #ziggy-bolt {
       position: fixed; inset: 0; z-index: 0;
       pointer-events: none; overflow: hidden;
@@ -26,26 +53,35 @@
     }
     #ziggy-bolt svg {
       height: 96vh; width: auto;
-      opacity: 0.13;
+      opacity: 0.22;
       mix-blend-mode: screen;
       transform: translateX(8%);
-      filter: hue-rotate(260deg) saturate(2.5) brightness(1.4);
+      filter: hue-rotate(280deg) saturate(4) brightness(1.6);
     }
 
     .container { position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 1rem; }
-    header { display: flex; align-items: center; justify-content: space-between; padding: 1rem 0; border-bottom: 1px solid var(--border); margin-bottom: 1.5rem; }
-    header h1 { font-size: 1.5rem; font-weight: 700; }
-    header h1 span { color: var(--accent); }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 1rem 0;
+      border-bottom: 2px solid #ff00cc;
+      box-shadow: 0 2px 24px rgba(255,0,204,0.35);
+      margin-bottom: 1.5rem;
+    }
+    header h1 { font-size: 1.5rem; font-weight: 700; color: var(--text); }
+    header h1 span {
+      color: #ff00cc;
+      text-shadow: 0 0 14px #ff00cc, 0 0 40px rgba(255,0,204,0.55);
+    }
     .version { color: var(--muted); font-size: 0.85rem; }
 
     /* ── Tab navigation ────────────────────────────────────────────────────
-       Three labeled rows. Each .tab-group wraps a row label + the tabs.
-       All tabs use identical sizing/style — no emoji inconsistencies.       */
+       Three labeled rows. Each .tab-group wraps a row label + the tabs.    */
     .tabs { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1.5rem; }
     .tab-group { display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; }
     .tab-group-label {
-      font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em;
-      color: #6b3090; text-transform: uppercase;
+      font-size: 0.62rem; font-weight: 700; letter-spacing: 0.1em;
+      color: #ff00cc; text-transform: uppercase;
+      text-shadow: 0 0 8px rgba(255,0,204,0.6);
       width: 68px; flex-shrink: 0; text-align: right;
       padding-right: 0.4rem; line-height: 1.2;
       user-select: none;
@@ -53,41 +89,73 @@
     .tab-row { display: flex; flex-wrap: wrap; gap: 0.25rem; }
     .tab {
       padding: 0.4rem 0.85rem;
-      background: var(--surface); border: 1px solid var(--border);
+      background: rgba(17, 0, 40, 0.85);
+      border: 1.5px solid #ff00cc;
       border-radius: 0.45rem; cursor: pointer; color: var(--muted);
-      font-size: 0.82rem; font-weight: 500;
-      transition: color 0.12s, border-color 0.12s, background 0.12s;
+      font-size: 0.82rem; font-weight: 600;
+      transition: color 0.12s, border-color 0.12s, background 0.12s, box-shadow 0.12s;
       white-space: nowrap;
+      box-shadow: 0 0 8px rgba(255,0,204,0.25), inset 0 0 12px rgba(255,0,204,0.04);
     }
-    .tab:hover { color: var(--text); border-color: #7e22ce; }
+    .tab:hover {
+      color: #00ffff;
+      border-color: #00ffff;
+      background: rgba(0,30,50,0.9);
+      box-shadow: 0 0 16px rgba(0,255,255,0.45), inset 0 0 12px rgba(0,255,255,0.06);
+    }
     .tab.active {
-      background: var(--accent); color: #0e0018;
+      background: var(--accent); color: #06000f;
       border-color: var(--accent); font-weight: 700;
+      box-shadow: 0 0 22px rgba(255,230,0,0.75), 0 0 50px rgba(255,230,0,0.25);
     }
-    /* Subtle row separator between tab groups */
     .tab-group + .tab-group { padding-top: 0.1rem; }
-    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 0.75rem; padding: 1.25rem; margin-bottom: 1rem; }
-    .card h3 { font-size: 1rem; margin-bottom: 0.75rem; color: var(--accent); }
+    .card {
+      background: rgba(17, 0, 40, 0.82);
+      border: 1.5px solid #ff00cc;
+      border-radius: 0.75rem; padding: 1.25rem; margin-bottom: 1rem;
+      box-shadow: 0 0 24px rgba(255,0,204,0.18), inset 0 0 40px rgba(255,0,204,0.03);
+    }
+    .card h3 {
+      font-size: 1rem; margin-bottom: 0.75rem;
+      color: #00ffff;
+      text-shadow: 0 0 10px rgba(0,255,255,0.55);
+    }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
-    .metric { display: flex; justify-content: space-between; padding: 0.35rem 0; border-bottom: 1px solid var(--border); }
+    .metric { display: flex; justify-content: space-between; padding: 0.35rem 0; border-bottom: 1px solid rgba(255,0,204,0.18); }
     .metric:last-child { border: none; }
     .metric-label { color: var(--muted); font-size: 0.85rem; }
-    .metric-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+    .metric-value { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
     .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700; }
-    .badge-pass { background: var(--pass); color: #052e16; }
-    .badge-warn { background: var(--warn); color: #422006; }
-    .badge-fail { background: var(--fail); color: #450a0a; }
-    .badge-grs { background: var(--accent); color: var(--bg); min-width: 2.5rem; text-align: center; }
+    .badge-pass { background: var(--pass); color: #001a00; text-shadow: none; }
+    .badge-warn { background: var(--warn); color: #1a0700; text-shadow: none; }
+    .badge-fail { background: var(--fail); color: #fff; text-shadow: none; }
+    .badge-grs  { background: var(--accent); color: #06000f; min-width: 2.5rem; text-align: center; }
     table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-    th { text-align: left; padding: 0.5rem; color: var(--muted); border-bottom: 2px solid var(--border); font-weight: 600; }
-    td { padding: 0.5rem; border-bottom: 1px solid var(--border); }
-    tr:hover { background: rgba(192, 38, 211, 0.07); }
+    th {
+      text-align: left; padding: 0.5rem;
+      color: #00ffff;
+      text-shadow: 0 0 8px rgba(0,255,255,0.4);
+      border-bottom: 2px solid #ff00cc;
+      font-weight: 700;
+    }
+    td { padding: 0.5rem; border-bottom: 1px solid rgba(255,0,204,0.12); color: var(--text); }
+    tr:hover { background: rgba(255,230,0,0.06); }
     .empty { text-align: center; color: var(--muted); padding: 3rem; }
     @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-    .diagnosis { font-size: 0.85rem; color: var(--warn); margin-top: 0.5rem; font-style: italic; }
-    textarea { width: 100%; min-height: 300px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 0.5rem; padding: 0.75rem; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85rem; resize: vertical; }
-    button { padding: 0.5rem 1rem; background: var(--accent); color: var(--bg); border: none; border-radius: 0.5rem; font-weight: 600; cursor: pointer; }
-    button:hover { opacity: 0.9; }
+    .diagnosis { font-size: 0.85rem; color: #ffaa44; margin-top: 0.5rem; font-style: italic; }
+    textarea {
+      width: 100%; min-height: 300px;
+      background: rgba(17, 0, 40, 0.9); color: var(--text);
+      border: 1.5px solid #ff00cc; border-radius: 0.5rem;
+      padding: 0.75rem; font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85rem; resize: vertical;
+    }
+    button {
+      padding: 0.5rem 1rem; background: var(--accent); color: #06000f;
+      border: none; border-radius: 0.5rem; font-weight: 700; cursor: pointer;
+      box-shadow: 0 0 12px rgba(255,230,0,0.5);
+    }
+    button:hover { opacity: 0.9; box-shadow: 0 0 22px rgba(255,230,0,0.8); }
     .status-msg { margin-top: 0.5rem; font-size: 0.85rem; }
   </style>
 </head>

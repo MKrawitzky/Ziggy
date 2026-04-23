@@ -45,6 +45,10 @@ def list_available_engines() -> list[str]:
     return engines
 
 
+def _is_d_dir(p: Path) -> bool:
+    return p.is_dir() and p.suffix.lower() == ".d"
+
+
 def run_casanovo(
     input_path: Path,
     output_dir: Path,
@@ -53,22 +57,20 @@ def run_casanovo(
     """Run Casanovo 5.x de novo sequencing.
 
     Args:
-        input_path: Input file — either a Bruker .d directory (preferred, reads
-                    natively via TdfParser with ion mobility) or a .mgf file.
-                    Casanovo's depthcharge library auto-selects the parser.
+        input_path: Bruker .d directory (preferred — depthcharge reads natively,
+                    preserving RT and ion mobility) or an .mgf / .mzML file.
         output_dir: Directory to write results.
         model: Path to .ckpt model weights, URL, or "auto" (download default).
 
     Returns list of dicts with keys:
-        sequence, score, precursor_mz, charge, rt_sec, one_over_k0, n_aa
+        sequence, score, precursor_mz, charge, rt_sec, one_over_k0, length, engine
 
-    Note: When passing a .d file, m/z values are not temperature-corrected
-    (a known timsrust_pyo3 limitation). For QC de novo this is acceptable.
+    When the source is a .d directory, depthcharge embeds RT and 1/K₀ directly
+    in the mzTab output — no MGF round-trip required or attempted.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     out_root = "casanovo_results"
 
-    # Build command — casanovo 5.x uses --output_dir / --output_root
     if _CASANOVO_EXE.exists():
         cmd_base = [str(_CASANOVO_EXE)]
     else:
@@ -82,21 +84,12 @@ def run_casanovo(
         "--force_overwrite",
     ]
 
-    # Add model flag if not auto
     if model and model not in ("auto", "nontryptic"):
         cmd += ["--model", model]
 
-    # Alias mgf_path for parsers below
-    mgf_path = input_path
-
     logger.info("Running Casanovo: %s", " ".join(str(x) for x in cmd))
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=3600,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
         if result.returncode != 0:
             logger.error("Casanovo failed (rc=%d):\nSTDOUT:\n%s\nSTDERR:\n%s",
                          result.returncode, result.stdout[-3000:], result.stderr[-3000:])
@@ -109,112 +102,162 @@ def run_casanovo(
         logger.error("Casanovo executable not found at %s", _CASANOVO_EXE)
         return []
 
-    # Casanovo 5.x outputs a .mztab file by default
     out_mztab = output_dir / f"{out_root}.mztab"
     if not out_mztab.exists():
-        # Try .csv fallback (some versions output CSV)
         out_csv = output_dir / f"{out_root}.csv"
         if out_csv.exists():
-            return _parse_casanovo_csv(out_csv, mgf_path)
+            return _parse_casanovo_csv(out_csv, input_path)
         logger.warning("Casanovo output not found. Files in %s: %s",
                        output_dir, list(output_dir.iterdir()))
         return []
 
-    return _parse_casanovo_mztab(out_mztab, mgf_path)
+    return _parse_casanovo_mztab(out_mztab, input_path)
 
 
-def _parse_casanovo_mztab(mztab_path: Path, mgf_path: Path) -> list[dict]:
-    """Parse Casanovo mzTab output into a list of result dicts."""
+def _parse_casanovo_mztab(mztab_path: Path, source_path: Path) -> list[dict]:
+    """Parse Casanovo mzTab output.
+
+    source_path is the original input — a .d directory or an MGF file.
+    When source is .d, depthcharge writes RT and 1/K₀ directly into the mzTab
+    (retention_time column + opt_ms_run[*]_*ion_mobility* column), so we read
+    them from there.  When source is MGF, we fall back to parsing the MGF for
+    titles that carry RTINSECONDS/IONMOBILITY fields.
+    """
     if not mztab_path.exists():
-        logger.warning("Casanovo output not found: %s", mztab_path)
+        logger.warning("Casanovo mzTab not found: %s", mztab_path)
         return []
 
-    # Build title→RT/IM map from the MGF
+    # MGF fallback: only attempt if source is a plain file (not a .d dir)
     title_meta: dict[str, dict] = {}
-    with open(mgf_path) as f:
-        cur: dict = {}
-        for line in f:
-            line = line.strip()
-            if line == "BEGIN IONS":
-                cur = {}
-            elif line.startswith("TITLE="):
-                cur["title"] = line[6:]
-            elif line.startswith("RTINSECONDS="):
-                cur["rt"] = float(line[12:])
-            elif line.startswith("IONMOBILITY="):
-                cur["im"] = float(line[12:])
-            elif line == "END IONS" and "title" in cur:
-                title_meta[cur["title"]] = cur.copy()
+    if source_path.is_file() and source_path.suffix.lower() == ".mgf":
+        try:
+            with open(source_path) as f:
+                cur: dict = {}
+                for line in f:
+                    line = line.strip()
+                    if line == "BEGIN IONS":
+                        cur = {}
+                    elif line.startswith("TITLE="):
+                        cur["title"] = line[6:]
+                    elif line.startswith("RTINSECONDS="):
+                        cur["rt"] = float(line[12:])
+                    elif line.startswith("IONMOBILITY="):
+                        cur["im"] = float(line[12:])
+                    elif line == "END IONS" and "title" in cur:
+                        title_meta[cur["title"]] = cur.copy()
+        except OSError as e:
+            logger.warning("Could not read MGF for metadata: %s", e)
 
     results = []
     psm_section = False
+    headers: list[str] = []
+    im_col: str | None = None  # discovered on first PSH line
+
     with open(mztab_path) as f:
         for line in f:
             line = line.rstrip()
             if line.startswith("PSH"):
                 psm_section = True
                 headers = line.split("\t")
+                # Find the ion-mobility optional column written by depthcharge
+                for h in headers:
+                    hl = h.lower()
+                    if "ion_mobility" in hl or "one_over_k0" in hl or "im_value" in hl:
+                        im_col = h
+                        break
                 continue
-            if psm_section and line.startswith("PSM"):
-                parts = line.split("\t")
-                row = dict(zip(headers, parts))
-                seq = row.get("sequence", "")
-                score_str = row.get("search_engine_score[1]", "0")
-                try:
-                    score = float(score_str)
-                except ValueError:
-                    score = 0.0
+
+            if not (psm_section and line.startswith("PSM")):
+                continue
+
+            parts = line.split("\t")
+            row = dict(zip(headers, parts))
+
+            seq = row.get("sequence", "")
+            try:
+                score = float(row.get("search_engine_score[1]", "0") or 0)
+            except ValueError:
+                score = 0.0
+            try:
                 prec_mz = float(row.get("exp_mass_to_charge", "0") or 0)
+            except ValueError:
+                prec_mz = 0.0
+            try:
                 charge = int(float(row.get("charge", "0") or 0))
+            except ValueError:
+                charge = 0
+
+            # RT — mzTab retention_time column (seconds) when source is .d
+            try:
+                rt_sec = float(row.get("retention_time", "0") or 0)
+            except ValueError:
+                rt_sec = 0.0
+
+            # 1/K₀ — dedicated opt column written by depthcharge for timsTOF
+            im = 0.0
+            if im_col:
+                try:
+                    im = float(row.get(im_col, "0") or 0)
+                except ValueError:
+                    pass
+
+            # Fallback: scan from spectra_ref encoded fields
+            if not im:
                 spectra_ref = row.get("spectra_ref", "")
-                title = row.get("PSM_ID", "")
+                m = re.search(r"(?:ion_mobility|one_over_k0|im)=([\d.]+)", spectra_ref)
+                if m:
+                    im = float(m.group(1))
 
-                # Look up RT and IM from MGF title
-                meta = title_meta.get(title, {})
-                rt_sec = meta.get("rt", 0.0)
-                im = meta.get("im", 0.0)
-
-                # Parse IM from spectra_ref if not in title_meta
+            # Last resort: MGF title_meta (only populated when source is .mgf)
+            if (not rt_sec or not im) and title_meta:
+                meta = title_meta.get(row.get("PSM_ID", ""), {})
+                if not rt_sec:
+                    rt_sec = meta.get("rt", 0.0)
                 if not im:
-                    m = re.search(r"im=([\d.]+)", spectra_ref)
-                    if m:
-                        im = float(m.group(1))
+                    im = meta.get("im", 0.0)
 
-                clean_seq = re.sub(r"[+\-][\d.]+", "", seq)  # strip modifications
-                results.append({
-                    "sequence":     seq,
-                    "sequence_clean": clean_seq,
-                    "score":        round(score, 4),
-                    "precursor_mz": round(prec_mz, 5),
-                    "charge":       charge,
-                    "rt_sec":       round(rt_sec, 2),
-                    "one_over_k0":  round(im, 4),
-                    "length":       len(clean_seq),
-                    "engine":       "casanovo",
-                })
+            clean_seq = re.sub(r"[+\-][\d.]+", "", seq)
+            results.append({
+                "sequence":       seq,
+                "sequence_clean": clean_seq,
+                "score":          round(score, 4),
+                "precursor_mz":   round(prec_mz, 5),
+                "charge":         charge,
+                "rt_sec":         round(rt_sec, 2),
+                "one_over_k0":    round(im, 4),
+                "length":         len(clean_seq),
+                "engine":         "casanovo",
+            })
 
     logger.info("Casanovo: parsed %d PSMs from %s", len(results), mztab_path)
     return results
 
 
-def _parse_casanovo_csv(csv_path: Path, mgf_path: Path) -> list[dict]:
-    """Parse Casanovo CSV output (some versions output CSV instead of mzTab)."""
-    # Build title→meta map from MGF
+def _parse_casanovo_csv(csv_path: Path, source_path: Path) -> list[dict]:
+    """Parse Casanovo CSV output (some versions output CSV instead of mzTab).
+
+    source_path is the original input (.d dir or .mgf).  RT and IM come from
+    CSV columns when available; MGF title lookup is a fallback for .mgf sources.
+    """
     title_meta: dict[str, dict] = {}
-    with open(mgf_path) as f:
-        cur: dict = {}
-        for line in f:
-            line = line.strip()
-            if line == "BEGIN IONS":
-                cur = {}
-            elif line.startswith("TITLE="):
-                cur["title"] = line[6:]
-            elif line.startswith("RTINSECONDS="):
-                cur["rt"] = float(line[12:])
-            elif line.startswith("IONMOBILITY="):
-                cur["im"] = float(line[12:])
-            elif line == "END IONS" and "title" in cur:
-                title_meta[cur["title"]] = cur.copy()
+    if source_path.is_file() and source_path.suffix.lower() == ".mgf":
+        try:
+            with open(source_path) as f:
+                cur: dict = {}
+                for line in f:
+                    line = line.strip()
+                    if line == "BEGIN IONS":
+                        cur = {}
+                    elif line.startswith("TITLE="):
+                        cur["title"] = line[6:]
+                    elif line.startswith("RTINSECONDS="):
+                        cur["rt"] = float(line[12:])
+                    elif line.startswith("IONMOBILITY="):
+                        cur["im"] = float(line[12:])
+                    elif line == "END IONS" and "title" in cur:
+                        title_meta[cur["title"]] = cur.copy()
+        except OSError as e:
+            logger.warning("Could not read MGF for metadata: %s", e)
 
     results = []
     with open(csv_path, newline="") as f:
@@ -225,19 +268,41 @@ def _parse_casanovo_csv(csv_path: Path, mgf_path: Path) -> list[dict]:
                 score = float(row.get("score", row.get("search_engine_score", "0")) or 0)
                 prec_mz = float(row.get("precursor_mz", row.get("exp_mass_to_charge", "0")) or 0)
                 charge = int(float(row.get("charge", "0") or 0))
-                title = row.get("spectrum_id", row.get("title", ""))
-                meta = title_meta.get(title, {})
+
+                # RT/IM from CSV columns first (present when Casanovo processed .d directly)
+                try:
+                    rt_sec = float(row.get("retention_time", "0") or 0)
+                except ValueError:
+                    rt_sec = 0.0
+                im = 0.0
+                for key in row:
+                    if "ion_mobility" in key.lower() or "one_over_k0" in key.lower():
+                        try:
+                            im = float(row[key] or 0)
+                        except ValueError:
+                            pass
+                        break
+
+                # MGF fallback
+                if not rt_sec or not im:
+                    title = row.get("spectrum_id", row.get("title", ""))
+                    meta = title_meta.get(title, {})
+                    if not rt_sec:
+                        rt_sec = meta.get("rt", 0.0)
+                    if not im:
+                        im = meta.get("im", 0.0)
+
                 clean_seq = re.sub(r"[+\-][\d.]+", "", seq)
                 results.append({
-                    "sequence": seq,
+                    "sequence":       seq,
                     "sequence_clean": clean_seq,
-                    "score": round(score, 4),
-                    "precursor_mz": round(prec_mz, 5),
-                    "charge": charge,
-                    "rt_sec": round(meta.get("rt", 0.0), 2),
-                    "one_over_k0": round(meta.get("im", 0.0), 4),
-                    "length": len(clean_seq),
-                    "engine": "casanovo",
+                    "score":          round(score, 4),
+                    "precursor_mz":   round(prec_mz, 5),
+                    "charge":         charge,
+                    "rt_sec":         round(rt_sec, 2),
+                    "one_over_k0":    round(im, 4),
+                    "length":         len(clean_seq),
+                    "engine":         "casanovo",
                 })
             except (ValueError, KeyError):
                 continue

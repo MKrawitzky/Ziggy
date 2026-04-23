@@ -200,6 +200,79 @@
       return <span className="badge badge-grs">GRS {score}</span>;
     }
 
+    // ── Cleanup missing runs button ────────────────────────────────────────
+    function CleanupMissingBtn({ onDone }) {
+      const [state, setState] = React.useState('idle');  // idle | preview | confirm | running | done | error
+      const [preview, setPreview] = React.useState(null);
+
+      const doPreview = async () => {
+        setState('preview');
+        try {
+          const r = await fetch('/api/runs/cleanup-missing', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({dry_run: true}),
+          });
+          const d = await r.json();
+          setPreview(d);
+          setState(d.previewed > 0 ? 'confirm' : 'done');
+          if (d.previewed === 0) setTimeout(() => setState('idle'), 2000);
+        } catch {
+          setState('error');
+        }
+      };
+
+      const doDelete = async () => {
+        setState('running');
+        try {
+          const r = await fetch('/api/runs/cleanup-missing', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({dry_run: false}),
+          });
+          const d = await r.json();
+          setPreview(d);
+          setState('done');
+          if (d.deleted > 0 && onDone) setTimeout(onDone, 500);
+          setTimeout(() => setState('idle'), 4000);
+        } catch {
+          setState('error');
+        }
+      };
+
+      if (state === 'confirm' && preview) {
+        return React.createElement('div',{style:{display:'flex',gap:4,alignItems:'center',flexShrink:0}},
+          React.createElement('span',{style:{fontSize:'0.78rem',color:'#f97316'}},
+            `Remove ${preview.previewed} missing runs?`),
+          React.createElement('button',{onClick:doDelete,
+            style:{padding:'0.2rem 0.5rem',fontSize:'0.75rem',cursor:'pointer',borderRadius:3,
+              background:'#ef4444',color:'#fff',border:'1px solid #ef4444',fontWeight:700}},
+            'Delete'),
+          React.createElement('button',{onClick:()=>setState('idle'),
+            style:{padding:'0.2rem 0.5rem',fontSize:'0.75rem',cursor:'pointer',borderRadius:3,
+              background:'var(--surface)',color:'var(--muted)',border:'1px solid var(--border)'}},
+            'Cancel'),
+        );
+      }
+
+      const label = state === 'idle' ? '⌫ Remove missing' :
+                    state === 'preview' ? 'Checking…' :
+                    state === 'running' ? 'Removing…' :
+                    state === 'done' ? (preview?.deleted > 0 ? `✓ ${preview.deleted} removed` : '✓ None missing') :
+                    '✗ Error';
+      const col = state === 'done' && preview?.deleted > 0 ? '#4ade80' :
+                  state === 'error' ? '#ef4444' : 'var(--text)';
+
+      return React.createElement('button',{
+        onClick: state === 'idle' ? doPreview : undefined,
+        disabled: state !== 'idle',
+        title: 'Preview and delete runs whose raw files no longer exist on disk',
+        style:{padding:'0.35rem 0.75rem',fontSize:'0.85rem',background:'var(--surface)',
+          color:col,border:'1px solid var(--border)',borderRadius:'0.4rem',
+          fontWeight:600,cursor:state==='idle'?'pointer':'default',flexShrink:0},
+      }, label);
+    }
+
     function GateBadge({ result }) {
       if (!result) return null;
       const cls = result === 'pass' ? 'badge-pass' : result === 'warn' ? 'badge-warn' : 'badge-fail';
@@ -678,6 +751,11 @@
             </div>
           </div>
 
+          {/* ── Cleanup action strip ──────────────────────────────────────── */}
+          <div style={{display:'flex', alignItems:'center', gap:'0.5rem', marginBottom:'0.75rem'}}>
+            <CleanupMissingBtn onDone={reload} />
+          </div>
+
           {runs.length > 0 ? (
             <QuickStatus runs={runs} />
           ) : (
@@ -1141,6 +1219,7 @@
                 borderRadius:'0.4rem', fontWeight:600, cursor:'pointer', flexShrink:0}}>
               {backfilling ? 'Detecting…' : backfillResult ? `✓ ${backfillResult.updated} labelled` : '◈ Detect formats'}
             </button>
+            <CleanupMissingBtn onDone={reloadRuns} />
           </div>
 
           {/* ── File path validation panel ── */}

@@ -60,6 +60,10 @@
           .then(r => r.ok ? r.json() : null).then(setAtlasCoverage).catch(() => {});
       }, [selectedRun?.id, atlasStatus?.available]);
 
+      const startAtlasSeed = () => {
+        setAtlasDownloading(true);
+        fetch(API + '/api/hla-atlas/seed', {method:'POST'}).catch(() => setAtlasDownloading(false));
+      };
       const startAtlasDownload = () => {
         setAtlasDownloading(true);
         fetch(API + '/api/hla-atlas/download', {method:'POST'}).catch(() => setAtlasDownloading(false));
@@ -678,6 +682,38 @@
               )}
               {selectedRun && !loading && data && (
                 <div>
+                  {/* DDA vs DIA acquisition mode notice */}
+                  {data.acq_mode && (
+                    <div style={{
+                      marginBottom:'0.6rem',
+                      padding:'0.45rem 0.8rem',
+                      borderRadius:'0.4rem',
+                      background: data.is_dia_immuno
+                        ? 'rgba(251,191,36,0.08)'
+                        : 'rgba(34,211,238,0.06)',
+                      border: `1px solid ${data.is_dia_immuno ? 'rgba(251,191,36,0.3)' : 'rgba(34,211,238,0.2)'}`,
+                      display:'flex', alignItems:'center', gap:'0.6rem', flexWrap:'wrap',
+                    }}>
+                      <span style={{
+                        fontWeight:700, fontSize:'0.75rem',
+                        color: data.is_dia_immuno ? '#fbbf24' : '#22d3ee',
+                        background: data.is_dia_immuno ? 'rgba(251,191,36,0.15)' : 'rgba(34,211,238,0.12)',
+                        padding:'0.1rem 0.45rem', borderRadius:'0.25rem',
+                      }}>
+                        {data.acq_mode}
+                      </span>
+                      {data.is_dda_immuno && (
+                        <span style={{fontSize:'0.72rem',color:'var(--muted)'}}>
+                          DDA immunopeptidomics — each spectrum is a single-precursor fragmentation event. High-confidence PSMs, sequence coverage limited by precursor selection.
+                        </span>
+                      )}
+                      {data.is_dia_immuno && (
+                        <span style={{fontSize:'0.72rem',color:'#fbbf24'}}>
+                          ⚠ DIA immunopeptidomics — requires an MHC-specific spectral library (not tryptic). If searched with the HeLa tryptic library the peptide IDs here reflect tryptic contamination, not true ligandome.
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {/* Summary metrics */}
                   <div className="card" style={{marginBottom:'0.75rem',padding:'0.65rem 1rem'}}>
                     <div style={{display:'flex',gap:'1.25rem',flexWrap:'wrap',alignItems:'center'}}>
@@ -1127,17 +1163,29 @@
                   <div>
                     <h3 style={{margin:'0 0 0.2rem',color:'#c084fc'}}>HLA Reference Atlas</h3>
                     <div style={{fontSize:'0.72rem',color:'var(--muted)'}}>
-                      HLA Ligand Atlas · 90K class-I + 142K class-II peptides · 29 human tissues · allele-annotated
+                      {atlasStatus?.available
+                        ? (atlasStatus.source?.includes('seed') || atlasStatus.source?.includes('built-in')
+                          ? 'Built-in seed · well-characterised ligands from published benchmarks (SYFPEITHI / IEDB)'
+                          : `${atlasStatus.source || 'Downloaded atlas'} · allele-annotated`)
+                        : 'Known HLA ligands · allele + tissue annotated · used for peptide cross-reference'}
                     </div>
                   </div>
                   {atlasStatus?.available ? (
                     <div style={{display:'flex',gap:'0.5rem',alignItems:'center',flexWrap:'wrap'}}>
                       <span style={{fontSize:'0.75rem',color:'#22c55e',fontWeight:600}}>
-                        {atlasStatus.n_total?.toLocaleString()} peptides
+                        ✓ {atlasStatus.n_total?.toLocaleString()} peptides
                       </span>
                       <span style={{fontSize:'0.72rem',color:'var(--muted)'}}>
                         {atlasStatus.n_alleles} alleles · {atlasStatus.n_tissues} tissues
                       </span>
+                      {(atlasStatus.source?.includes('seed') || atlasStatus.source?.includes('built-in')) && (
+                        <button onClick={startAtlasDownload} disabled={atlasDownloading}
+                          style={{fontSize:'0.72rem',padding:'0.2rem 0.6rem',background:'rgba(96,165,250,0.12)',
+                            border:'1px solid rgba(96,165,250,0.3)',borderRadius:'0.3rem',color:'#60a5fa',cursor:'pointer',
+                            opacity:atlasDownloading?0.7:1}}>
+                          {atlasDownloading ? 'Expanding…' : '↑ Expand (full dataset)'}
+                        </button>
+                      )}
                       <button onClick={loadStandards}
                         style={{fontSize:'0.74rem',padding:'0.2rem 0.6rem',background:'rgba(168,85,247,0.15)',
                           border:'1px solid rgba(168,85,247,0.35)',borderRadius:'0.3rem',color:'#c084fc',cursor:'pointer'}}>
@@ -1145,12 +1193,20 @@
                       </button>
                     </div>
                   ) : (
-                    <button onClick={startAtlasDownload} disabled={atlasDownloading}
-                      style={{fontSize:'0.78rem',padding:'0.3rem 0.9rem',background:'rgba(168,85,247,0.2)',
-                        border:'1px solid rgba(168,85,247,0.4)',borderRadius:'0.4rem',color:'#c084fc',cursor:'pointer',
-                        opacity:atlasDownloading?0.7:1}}>
-                      {atlasDownloading ? 'Downloading…' : 'Download Atlas (~30 MB)'}
-                    </button>
+                    <div style={{display:'flex',gap:'0.5rem',alignItems:'center'}}>
+                      <button onClick={startAtlasSeed} disabled={atlasDownloading}
+                        style={{fontSize:'0.78rem',padding:'0.3rem 0.9rem',background:'rgba(34,197,94,0.15)',
+                          border:'1px solid rgba(34,197,94,0.4)',borderRadius:'0.4rem',color:'#22c55e',cursor:'pointer',
+                          opacity:atlasDownloading?0.7:1}}>
+                        {atlasDownloading ? 'Installing…' : '⚡ Install Seed (instant)'}
+                      </button>
+                      <button onClick={startAtlasDownload} disabled={atlasDownloading}
+                        style={{fontSize:'0.78rem',padding:'0.3rem 0.9rem',background:'rgba(168,85,247,0.15)',
+                          border:'1px solid rgba(168,85,247,0.35)',borderRadius:'0.4rem',color:'#c084fc',cursor:'pointer',
+                          opacity:atlasDownloading?0.7:1}}>
+                        {atlasDownloading ? 'Downloading…' : '↓ Full Dataset'}
+                      </button>
+                    </div>
                   )}
                 </div>
 

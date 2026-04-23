@@ -119,6 +119,49 @@ def _build_local_sage_params(
     }
 
 
+def _build_sage_immuno_params(fasta_path: str, mhc_class: int = 1) -> dict:
+    """Build Sage JSON config for immunopeptidomics (non-specific cleavage).
+
+    MHC-I:  8–12 aa, z = 1–3, non-specific enzyme
+    MHC-II: 13–25 aa, z = 1–4, non-specific enzyme
+
+    Sage represents non-specific cleavage as an empty cleave_at string with
+    missed_cleavages = 0 and semi_enzymatic = false.  This allows every
+    contiguous sub-sequence of the FASTA to be a candidate precursor — the
+    correct model for proteasomally-generated HLA peptides.
+    """
+    if mhc_class == 2:
+        min_len, max_len, charges = 13, 25, [1, 4]
+    else:  # MHC-I (default)
+        min_len, max_len, charges = 8, 12, [1, 3]
+
+    return {
+        "database": {
+            "fasta": fasta_path,
+            # Non-specific cleavage: empty cleave_at, 0 missed cleavages.
+            # Sage interprets cleave_at="" + missed_cleavages=0 as fully
+            # non-specific, generating all sub-sequences of min/max length.
+            "enzyme": {"cleave_at": "", "restrict": "", "missed_cleavages": 0},
+            "min_len": min_len,
+            "max_len": max_len,
+            "static_mods": {"C": 57.0215},
+            "variable_mods": {
+                "M": [15.9949],    # Oxidation
+                "N": [0.9840],     # Deamidation
+                "Q": [0.9840],     # Deamidation
+            },
+            "generate_decoys": True,
+        },
+        "precursor_tol": {"ppm": [-10, 10]},
+        "fragment_tol": {"ppm": [-20, 20]},
+        "precursor_charge": charges,
+        "min_peaks": 4,        # HLA peptides are short — fewer fragments
+        "max_peaks": 100,
+        "report_psms": 1,
+        "wide_window": False,
+    }
+
+
 def _sanitize_path_for_diann(raw_path: Path, staging_dir: Path) -> Path:
     """Return a DIA-NN-safe path, creating a junction/symlink if needed.
 
@@ -415,6 +458,7 @@ def run_sage_local(
     threads: int = 0,
     fasta_path: str | None = None,
     search_mode: str = "local",
+    immuno_class: int = 0,   # 0 = tryptic, 1 = MHC-I, 2 = MHC-II
 ) -> Path | None:
     """Run Sage locally as a subprocess.
 
@@ -462,7 +506,10 @@ def run_sage_local(
         if not Path(fasta_path).exists():
             logger.error("FASTA file not found: %s", fasta_path)
             return None
-        params = _build_local_sage_params(fasta_path)
+        if immuno_class:
+            params = _build_sage_immuno_params(fasta_path, mhc_class=immuno_class)
+        else:
+            params = _build_local_sage_params(fasta_path)
 
     params["mzml_paths"] = [input_path]
     params["output_directory"] = str(output_dir)

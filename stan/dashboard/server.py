@@ -41,6 +41,14 @@ app.add_middleware(
 # Bruker files were historically labelled "DIA"/"DDA" by early baseline
 # versions; modern watcher uses "diaPASEF"/"ddaPASEF".  Always use these
 # helpers for mode comparisons so both labels are handled correctly.
+#
+# Search engine routing:
+#   DIA (diaPASEF)  → DIA-NN   (library-based)
+#   DDA (ddaPASEF)  → Sage     (native .d, non-specific for immuno)
+#   DDA (Thermo)    → Sage     (.raw → mzML conversion)
+#   DDA (ddaPASEF)  → MSFragger if FragPipe installed (preferred for DDA)
+#
+# DIA-NN is ONLY used for DIA data.  DDA searches go to MSFragger/Sage.
 
 def _is_dia(mode: str) -> bool:
     """True for any DIA acquisition mode → route to DIA-NN library search."""
@@ -53,19 +61,66 @@ def _is_dda(mode: str) -> bool:
 
 
 def _is_bruker_dda(mode: str) -> bool:
-    """True for Bruker ddaPASEF specifically.
-
-    ddaPASEF is routed to DIA-NN --fasta-search instead of Sage because:
-    - Sage (timsrust 0.2.3) cannot decompress 2020-era Bruker TDF blobs
-    - DIA-NN --fasta-search auto-detects DDA from the Precursors table and
-      searches correctly without requiring a pre-built spectral library
-    """
+    """True for Bruker ddaPASEF — routes to Sage (or MSFragger if available)."""
     return mode == "ddaPASEF"
 
 
 def _is_thermo_dda(mode: str) -> bool:
     """True for Thermo DDA → route to Sage with mzML conversion."""
     return mode in ("DDA", "ddaMS2", "ddaMRM")
+
+
+# ── Immunopeptidomics auto-detection ─────────────────────────────────
+_IMMUNO_KEYWORDS = frozenset([
+    "hla", "mhc", "immuno", "immunopep", "peptidome", "ligandome",
+    "hla1", "hla2", "mhci", "mhcii", "mhc1", "mhc2",
+    "immunopeptidomics", "hla_pool", "hlapool",
+])
+_MHC2_KEYWORDS = frozenset([
+    "hla2", "mhc2", "mhcii", "hla_ii", "hla-ii", "classii", "class_ii",
+    "hla2pool", "mhcii", "drb", "dp", "dq",
+])
+
+
+def _is_immuno_run(run_name: str) -> bool:
+    """Return True if the run name looks like an immunopeptidomics sample."""
+    lower = run_name.lower()
+    return any(kw in lower for kw in _IMMUNO_KEYWORDS)
+
+
+def _immuno_class(run_name: str) -> int:
+    """Return 1 (MHC-I), 2 (MHC-II), or 0 (unknown/mixed) for HLA samples."""
+    lower = run_name.lower()
+    if any(kw in lower for kw in _MHC2_KEYWORDS):
+        return 2
+    # 'hla1', 'mhci', 'mhc1', 'class_i' → MHC-I
+    if any(kw in lower for kw in ["hla1", "mhc1", "mhci", "classi", "class_i", "hla1pool"]):
+        return 1
+    # Generic 'hla' or 'mhc' without class marker → treat as MHC-I (more common)
+    return 1
+
+
+def _suggest_preset(run: dict) -> str:
+    """Return the best search preset key for a run based on name + mode."""
+    name = run.get("run_name", "")
+    mode = run.get("mode", "")
+    if _is_immuno_run(name):
+        cls = _immuno_class(name)
+        if _is_dia(mode):
+            return "mhc_class_i_dia" if cls == 1 else "mhc_class_ii_dia"
+        else:
+            return "mhc_class_i_dda" if cls == 1 else "mhc_class_ii_dda"
+    # Non-immuno
+    name_lower = name.lower()
+    if "k562" in name_lower or "hela" in name_lower:
+        return "hela_digest"
+    if any(k in name_lower for k in ["phospho", "phos", "sty"]):
+        return "phospho"
+    if any(k in name_lower for k in ["tmt", "itraq"]):
+        return "tmt"
+    if any(k in name_lower for k in ["sc_", "singlecell", "single_cell", "1cell", "1pg", "8pg", "40pg"]):
+        return "single_cell"
+    return "hela_digest"
 
 
 def _detect_mode_from_tdf(d_path) -> str:
@@ -413,6 +468,57 @@ async def api_assign_library(body: AssignLibraryRequest) -> dict:
         watcher.reload()
 
     return {"status": "ok", "instrument": inst.get("name", str(body.instrument_index))}
+
+
+# ── Global search parameters (mods, enzyme, FASTA defaults) ─────────────────
+
+_DEFAULT_SEARCH_PARAMS: dict = {
+    "enzyme":            "Trypsin/P",
+    "missed_cleavages":  2,
+    "var_mods":          "Oxidation (M); Acetyl (Protein N-term)",
+    "fixed_mods":        "Carbamidomethyl (C)",
+    "min_pep_len":       7,
+    "max_pep_len":       30,
+    "min_charge":        2,
+    "max_charge":        4,
+    "ms1_tol_ppm":       20,
+    "ms2_tol_ppm":       20,
+    "fasta_path":        "",
+    "spectral_lib":      "",
+}
+
+def _search_params_path() -> Path:
+    from stan.config import get_user_config_dir
+    return get_user_config_dir() / "search_params.json"
+
+
+def get_search_params() -> dict:
+    """Load global search params, falling back to defaults for missing keys."""
+    import json
+    p = _search_params_path()
+    stored: dict = {}
+    if p.exists():
+        try:
+            stored = json.loads(p.read_text())
+        except Exception:
+            pass
+    return {**_DEFAULT_SEARCH_PARAMS, **stored}
+
+
+@app.get("/api/search-params")
+async def api_get_search_params() -> dict:
+    """Return the global search parameter defaults used by comparison engines."""
+    return get_search_params()
+
+
+@app.post("/api/search-params")
+async def api_set_search_params(body: dict) -> dict:
+    """Persist global search parameters (enzyme, mods, tolerances, FASTA path)."""
+    import json
+    current = get_search_params()
+    merged = {**current, **{k: v for k, v in body.items() if k in _DEFAULT_SEARCH_PARAMS}}
+    _search_params_path().write_text(json.dumps(merged, indent=2))
+    return merged
 
 
 # ── UniProt FASTA download ────────────────────────────────────────────────────
@@ -1497,6 +1603,12 @@ async def api_immunopeptidomics(run_id: str) -> dict:
             if len(top_peptides) >= 500:
                 break
 
+        acq_mode = run.get("mode", "")
+        # DDA immunopeptidomics: ddaPASEF (timsTOF) or ddaMS2 (Thermo)
+        # DIA immunopeptidomics: diaPASEF — needs MHC-specific speclib (not tryptic)
+        is_dia_immuno = acq_mode in ("diaPASEF", "DIA")
+        is_dda_immuno = acq_mode in ("ddaPASEF", "DDA", "ddaMS2")
+
         return {
             "n_total":              n_total,
             "n_mhc1":               mhc1,
@@ -1515,6 +1627,9 @@ async def api_immunopeptidomics(run_id: str) -> dict:
             "radar":                radar,
             "motif_matrix":         motif_matrix,
             "top_source_proteins":  top_source_proteins,
+            "acq_mode":             acq_mode,
+            "is_dia_immuno":        is_dia_immuno,
+            "is_dda_immuno":        is_dda_immuno,
         }
     except Exception as e:
         logger.exception("immunopeptidomics endpoint failed")
@@ -2369,12 +2484,19 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
         mode = run.get("mode", "DIA")
         vendor = "bruker" if raw_path.suffix.lower() == ".d" else "thermo"
 
-        # Auto-correct mode if it looks wrong: read MsmsType from TDF when
-        # the stored mode is a generic placeholder set during import.
-        if vendor == "bruker" and mode not in ("ddaPASEF", "diaPASEF"):
+        # Always re-verify mode from TDF for Bruker files — the DB value can be
+        # wrong if the run was registered before the detector was in place, or
+        # if the file was mis-labelled.  Trusting a stale "diaPASEF" tag on a
+        # ddaPASEF file causes DIA-NN to load a speclib, find no DIA windows,
+        # and segfault (Windows "referenced memory" crash).
+        if vendor == "bruker" and (raw_path / "analysis.tdf").exists():
             detected = _detect_mode_from_tdf(raw_path)
-            logger.info("Auto-detected mode %s for %s (was '%s')", detected, raw_path.name, mode)
-            mode = detected
+            if detected != mode:
+                logger.warning(
+                    "Mode mismatch for %s: DB says '%s', TDF says '%s' — using TDF value.",
+                    raw_path.name, mode, detected,
+                )
+                mode = detected
 
         # Resolve output dir — default to <watch_dir>/stan_results/<run_stem>
         output_dir_base = inst_cfg.get("output_dir", "")
@@ -2388,19 +2510,34 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
         lib_path = inst_cfg.get("lib_path")
         search_mode = inst_cfg.get("search_mode", "community" if not fasta_path else "local")
 
-        # ── Determine search tool and output file ─────────────────────
+        # ── Determine search tool and immunopeptidomics class ─────────────────
         # Routing table:
-        #   diaPASEF / DIA   → DIA-NN library search  → report.parquet
-        #   ddaPASEF         → DIA-NN --fasta-search   → report.parquet
-        #                      (Sage/timsrust can't read old Bruker TDF blobs)
-        #   DDA / ddaMS2     → Sage (Thermo: +mzML)    → results.sage.parquet
-        use_diann = _is_dia(mode) or _is_bruker_dda(mode)
-        use_sage  = not use_diann
+        #   diaPASEF / DIA   → DIA-NN (library-based)    → report.parquet
+        #   ddaPASEF         → Sage   (native .d)         → results.sage.parquet
+        #   DDA / ddaMS2     → Sage   (Thermo: +mzML)     → results.sage.parquet
+        #
+        # DIA-NN is ONLY used for DIA data.  DDA searches use Sage (or MSFragger
+        # if FragPipe is installed — comparison.py handles that in the background).
+        #
+        # For immunopeptidomics samples (HLA / MHC in run name), the preset's
+        # immuno_class (1 or 2) is passed through so Sage uses non-specific enzyme
+        # params with the correct peptide length window.
+        use_diann = _is_dia(mode)   # DIA only — NOT ddaPASEF
+        use_sage  = not use_diann   # all DDA modes → Sage
 
-        # Check whether a previous search already produced output in the expected location.
-        # If so, skip the search entirely and go straight to metric extraction.
-        # This lets "Process" recover quickly after a crash mid-extraction, and avoids
-        # re-running a multi-hour DIA-NN search just to re-populate missing DB columns.
+        # Resolve immunopeptidomics class from preset or run name
+        preset_key  = run.get("_preset", "")
+        preset_info = SEARCH_PRESETS.get(preset_key, {})
+        immuno_class = preset_info.get("immuno_class", 0)
+        if immuno_class == 0 and _is_immuno_run(raw_path.name):
+            immuno_class = _immuno_class(raw_path.name)
+
+        # For DIA immuno presets, override DIA-NN args from the preset
+        diann_extra: list[str] = []
+        if use_diann and preset_info.get("diann_args"):
+            diann_extra = preset_info["diann_args"]
+
+        # Check whether a previous search already produced output.
         # "Re-run" from the UI passes force=True to bypass this shortcut.
         force_rerun = run.get("_force_rerun", False)
         existing_parquet = (output_dir / "report.parquet") if use_diann else (output_dir / "results.sage.parquet")
@@ -2414,8 +2551,11 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
             _set("running", f"Re-extracting metrics from existing results for {raw_path.name}…")
             result_path = existing_parquet
         elif use_diann:
-            acq_mode = "dda_pasef" if _is_bruker_dda(mode) else "dia"
-            _set("running", f"Running DIA-NN ({acq_mode}) on {raw_path.name}…")
+            acq_mode_diann = "dia"
+            if immuno_class:
+                _set("running", f"Running DIA-NN MHC-{'I' * immuno_class} on {raw_path.name}…")
+            else:
+                _set("running", f"Running DIA-NN on {raw_path.name}…")
             result_path = run_diann_local(
                 raw_path=raw_path,
                 output_dir=output_dir,
@@ -2424,11 +2564,14 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
                 fasta_path=fasta_path,
                 lib_path=lib_path,
                 search_mode=search_mode,
-                acq_mode=acq_mode,
+                acq_mode=acq_mode_diann,
             )
         else:
             sage_exe = inst_cfg.get("sage_path") or "sage"
-            _set("running", f"Running Sage on {raw_path.name}…")
+            engine_label = "Sage"
+            if immuno_class:
+                engine_label = f"Sage MHC-{'I' * immuno_class} (non-specific)"
+            _set("running", f"Running {engine_label} on {raw_path.name}…")
             result_path = run_sage_local(
                 raw_path=raw_path,
                 output_dir=output_dir,
@@ -2436,6 +2579,7 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
                 sage_exe=sage_exe,
                 fasta_path=fasta_path,
                 search_mode=search_mode,
+                immuno_class=immuno_class,
             )
 
         if result_path is None:
@@ -3286,14 +3430,87 @@ async def api_run_denovo(
             job["engine_used"] = engine_used
             job["n_results"] = len(results)
 
-            # Sort by score descending, convert any numpy types
+            # ── 4D CCS confidence scoring ─────────────────────────────────
+            # Theoretical 1/K₀ from empirical linear CCS model (same as UI)
+            def _ccs_expected(mz, z):
+                return 0.3 + z * 0.12 + mz * (0.00015 + z * 0.00008)
+
+            for r in results:
+                mz = r.get("precursor_mz", 0) or 0
+                z  = r.get("charge", 0) or 0
+                im = r.get("one_over_k0", 0) or 0
+                if z > 0 and mz > 0:
+                    theo = _ccs_expected(mz, z)
+                    r["ccs_theo"] = round(theo, 4)
+                    if im > 0:
+                        delta = im - theo
+                        r["ccs_delta"] = round(delta, 4)
+                        r["ccs_ok"]    = abs(delta) <= 0.08
+                    else:
+                        r["ccs_delta"] = None
+                        r["ccs_ok"]    = None   # no IM available
+                else:
+                    r["ccs_theo"]  = None
+                    r["ccs_delta"] = None
+                    r["ccs_ok"]    = None
+
+            # ── Post-search DB match filter ───────────────────────────────
+            # Load identified neutral masses from DIA-NN report (if present)
+            # and flag every de novo hit that falls within ±5 ppm of a known PSM.
+            import bisect as _bisect
+            identified_masses: list[float] = []
+            report_path = _resolve_report_path(run)
+            if report_path and report_path.exists():
+                try:
+                    import polars as _pl
+                    _df = _pl.read_parquet(
+                        str(report_path),
+                        columns=["Precursor.Mz", "Precursor.Charge"],
+                    )
+                    _mz_col = _df["Precursor.Mz"].to_list()
+                    _z_col  = _df["Precursor.Charge"].to_list()
+                    identified_masses = sorted(
+                        float(mz) * int(z) - int(z) * 1.007276
+                        for mz, z in zip(_mz_col, _z_col)
+                        if mz and z and float(mz) > 0 and int(z) > 0
+                    )
+                    job["n_identified"] = len(identified_masses)
+                    logger.info(
+                        "De novo: loaded %d identified masses from DIA-NN report for cross-reference",
+                        len(identified_masses),
+                    )
+                except Exception as _e:
+                    logger.warning("Could not load DIA-NN report for de novo filtering: %s", _e)
+
+            for r in results:
+                mz = r.get("precursor_mz", 0) or 0
+                z  = r.get("charge", 0) or 0
+                if not identified_masses or mz <= 0 or z <= 0:
+                    r["db_match"]     = False
+                    r["db_delta_ppm"] = None
+                    continue
+                neutral = mz * z - z * 1.007276
+                tol     = neutral * 5e-6
+                idx     = _bisect.bisect_left(identified_masses, neutral - tol)
+                matched   = False
+                best_ppm  = None
+                while idx < len(identified_masses) and identified_masses[idx] <= neutral + tol:
+                    ppm = (neutral - identified_masses[idx]) / max(identified_masses[idx], 1e-9) * 1e6
+                    if best_ppm is None or abs(ppm) < abs(best_ppm):
+                        best_ppm = ppm
+                    matched = True
+                    idx += 1
+                r["db_match"]     = matched
+                r["db_delta_ppm"] = round(best_ppm, 2) if best_ppm is not None else None
+
+            # ── Sort and serialise ────────────────────────────────────────
             results.sort(key=lambda r: r["score"], reverse=True)
             for r in results:
                 for k, v in r.items():
                     if hasattr(v, "tolist"):
                         r[k] = v.tolist()
             job["results"] = results
-            job["status"] = "done"
+            job["status"]  = "done"
 
         except Exception as e:
             logger.exception("De novo job %s failed", job_id)
@@ -3327,6 +3544,19 @@ async def api_denovo_status(job_id: str) -> dict:
 _atlas_download_job: dict = {"status": "idle"}
 
 
+@app.on_event("startup")
+async def _auto_seed_hla_atlas():
+    """Install built-in seed atlas at startup if no atlas exists yet."""
+    try:
+        from stan.search.hla_atlas import AtlasManager
+        am = AtlasManager()
+        if not am.is_available():
+            logger.info("HLA atlas not found — installing built-in seed…")
+            am.build_seed()
+    except Exception as e:
+        logger.warning("HLA seed install failed at startup: %s", e)
+
+
 @app.get("/api/hla-atlas/status")
 async def api_hla_atlas_status() -> dict:
     """Return HLA atlas availability stats + current download job state."""
@@ -3336,6 +3566,40 @@ async def api_hla_atlas_status() -> dict:
     except Exception as e:
         stats = {"available": False, "error": str(e)}
     return {**stats, "download_job": _atlas_download_job}
+
+
+@app.post("/api/hla-atlas/seed")
+async def api_hla_atlas_seed() -> dict:
+    """Install the built-in seed atlas immediately (no network required)."""
+    global _atlas_download_job
+    if _atlas_download_job.get("status") == "running":
+        return {"started": False, "reason": "Download already in progress"}
+
+    _atlas_download_job = {"status": "running", "log": []}
+
+    def _worker():
+        global _atlas_download_job
+        try:
+            from stan.search.hla_atlas import AtlasManager
+            msgs: list[str] = []
+
+            def _cb(msg: str):
+                msgs.append(msg)
+                _atlas_download_job["log"] = msgs
+                logger.info("[HLA atlas seed] %s", msg)
+
+            result = AtlasManager().build_seed(callback=_cb)
+            _atlas_download_job = {
+                "status": "done" if result.get("success") else "error",
+                "log": msgs,
+                **result,
+            }
+        except Exception as e:
+            logger.exception("HLA atlas seed failed")
+            _atlas_download_job = {"status": "error", "error": str(e), "log": [str(e)]}
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"started": True}
 
 
 @app.post("/api/hla-atlas/download")
@@ -3478,11 +3742,13 @@ _search_jobs: dict = {}
 
 
 SEARCH_PRESETS = {
+    # ── Standard proteomics ─────────────────────────────────────────────────
     "hela_digest": {
         "label": "HeLa / K562 Digest (QC)",
         "description": "Standard tryptic digest QC. Optimized for 50 ng HeLa or K562 benchmarks.",
         "icon": "🧫",
         "color": "#34d399",
+        "engines": ["diann", "sage"],
         "diann_args": [
             "--qvalue", "0.01",
             "--min-pep-len", "7", "--max-pep-len", "30",
@@ -3496,6 +3762,7 @@ SEARCH_PRESETS = {
         "description": "Ultra-low input. Match Between Runs enabled. Optimized for <1 ng.",
         "icon": "🔬",
         "color": "#22d3ee",
+        "engines": ["diann", "sage"],
         "diann_args": [
             "--qvalue", "0.01",
             "--min-pep-len", "7", "--max-pep-len", "30",
@@ -3505,38 +3772,12 @@ SEARCH_PRESETS = {
             "--reanalyse",
         ],
     },
-    "mhc_class_i": {
-        "label": "MHC Class I",
-        "description": "HLA-I immunopeptidomics. Non-tryptic, 8–11 aa, 0 missed cleavages.",
-        "icon": "🛡",
-        "color": "#f472b6",
-        "diann_args": [
-            "--qvalue", "0.01",
-            "--min-pep-len", "8", "--max-pep-len", "11",
-            "--missed-cleavages", "0",
-            "--cut", "*",
-            "--no-cut-before-mod",
-            "--threads", "8",
-        ],
-    },
-    "mhc_class_ii": {
-        "label": "MHC Class II",
-        "description": "HLA-II immunopeptidomics. Non-tryptic, 13–25 aa, 0 missed cleavages.",
-        "icon": "🛡",
-        "color": "#a78bfa",
-        "diann_args": [
-            "--qvalue", "0.01",
-            "--min-pep-len", "13", "--max-pep-len", "25",
-            "--missed-cleavages", "0",
-            "--cut", "*",
-            "--threads", "8",
-        ],
-    },
     "tmt": {
         "label": "TMT",
         "description": "TMT6/TMT10/TMT16 isobaric labeling. Fixed TMT mod on K and peptide N-term.",
         "icon": "🏷",
         "color": "#DAAA00",
+        "engines": ["diann"],
         "diann_args": [
             "--qvalue", "0.01",
             "--min-pep-len", "7", "--max-pep-len", "30",
@@ -3552,6 +3793,7 @@ SEARCH_PRESETS = {
         "description": "Variable phosphorylation on STY. 2 missed cleavages for enriched samples.",
         "icon": "⚡",
         "color": "#fb923c",
+        "engines": ["diann", "sage"],
         "diann_args": [
             "--qvalue", "0.01",
             "--min-pep-len", "7", "--max-pep-len", "30",
@@ -3561,12 +3803,106 @@ SEARCH_PRESETS = {
             "--threads", "8",
         ],
     },
+
+    # ── Immunopeptidomics — DDA (Sage, non-specific cleavage) ───────────────
+    # DDA immunopeptidomics uses a proper DDA engine (Sage / MSFragger).
+    # Key parameters: no enzyme, short peptide window, OxM + Deam NQ variable mods.
+    "mhc_class_i_dda": {
+        "label": "MHC-I Immunopeptidomics (DDA / PASEF)",
+        "description": (
+            "HLA Class I — ddaPASEF or DDA. Non-specific cleavage, 8–12 aa, charge 1–3. "
+            "Engine: Sage (MSFragger if installed). Variable: OxM, Deamid NQ."
+        ),
+        "icon": "🛡",
+        "color": "#f472b6",
+        "engines": ["sage", "msfragger"],
+        "acq_modes": ["ddaPASEF", "DDA", "ddaMS2"],
+        "immuno_class": 1,
+        # Sage params (built dynamically in run_sage_local with immuno_class=1)
+        "sage_enzyme": "nonspecific",
+        "sage_min_len": 8,
+        "sage_max_len": 12,
+    },
+    "mhc_class_ii_dda": {
+        "label": "MHC-II Immunopeptidomics (DDA / PASEF)",
+        "description": (
+            "HLA Class II — ddaPASEF or DDA. Non-specific cleavage, 13–25 aa, charge 1–4. "
+            "Engine: Sage (MSFragger if installed). Variable: OxM, Deamid NQ."
+        ),
+        "icon": "🛡",
+        "color": "#a78bfa",
+        "engines": ["sage", "msfragger"],
+        "acq_modes": ["ddaPASEF", "DDA", "ddaMS2"],
+        "immuno_class": 2,
+        "sage_enzyme": "nonspecific",
+        "sage_min_len": 13,
+        "sage_max_len": 25,
+    },
+
+    # ── Immunopeptidomics — DIA (DIA-NN, non-specific) ──────────────────────
+    # DIA immunopeptidomics requires a non-tryptic MHC spectral library for
+    # correct results. The HeLa community library is used as a fallback but
+    # will produce tryptic-biased IDs. A warning is shown in the UI.
+    "mhc_class_i_dia": {
+        "label": "MHC-I Immunopeptidomics (DIA / diaPASEF)",
+        "description": (
+            "HLA Class I — diaPASEF. DIA-NN, non-specific, 8–12 aa, charge 1–3. "
+            "⚠ Best results require an MHC-I spectral library (not tryptic)."
+        ),
+        "icon": "🛡",
+        "color": "#f472b6",
+        "engines": ["diann"],
+        "acq_modes": ["diaPASEF", "DIA"],
+        "immuno_class": 1,
+        "diann_args": [
+            "--qvalue", "0.01",
+            "--min-pep-len", "8", "--max-pep-len", "12",
+            "--missed-cleavages", "0",
+            "--min-pr-charge", "1", "--max-pr-charge", "3",
+            "--cut", "*",
+            "--no-prot-inf",
+            "--smart-profiling",
+            "--threads", "8",
+        ],
+    },
+    "mhc_class_ii_dia": {
+        "label": "MHC-II Immunopeptidomics (DIA / diaPASEF)",
+        "description": (
+            "HLA Class II — diaPASEF. DIA-NN, non-specific, 13–25 aa, charge 1–4. "
+            "⚠ Best results require an MHC-II spectral library (not tryptic)."
+        ),
+        "icon": "🛡",
+        "color": "#a78bfa",
+        "engines": ["diann"],
+        "acq_modes": ["diaPASEF", "DIA"],
+        "immuno_class": 2,
+        "diann_args": [
+            "--qvalue", "0.01",
+            "--min-pep-len", "13", "--max-pep-len", "25",
+            "--missed-cleavages", "0",
+            "--min-pr-charge", "1", "--max-pr-charge", "4",
+            "--cut", "*",
+            "--no-prot-inf",
+            "--smart-profiling",
+            "--threads", "8",
+        ],
+    },
+
+    # ── Legacy keys — kept for backwards compat with saved jobs ────────────
+    "mhc_class_i":  {"label": "MHC Class I (legacy)", "icon": "🛡", "color": "#f472b6",
+                     "_alias": "mhc_class_i_dda", "engines": ["sage"],
+                     "description": "Use mhc_class_i_dda or mhc_class_i_dia instead.",
+                     "immuno_class": 1},
+    "mhc_class_ii": {"label": "MHC Class II (legacy)", "icon": "🛡", "color": "#a78bfa",
+                     "_alias": "mhc_class_ii_dda", "engines": ["sage"],
+                     "description": "Use mhc_class_ii_dda or mhc_class_ii_dia instead.",
+                     "immuno_class": 2},
 }
 
 
 @app.get("/api/search/unsearched")
 async def api_search_unsearched() -> list[dict]:
-    """Return all runs that have no DIA-NN result (n_proteins IS NULL)."""
+    """Return all runs that have no search result, with auto-suggested preset."""
     db_path = get_db_path()
     with _sqlite3_sa.connect(str(db_path)) as con:
         con.row_factory = _sqlite3_sa.Row
@@ -3575,7 +3911,14 @@ async def api_search_unsearched() -> list[dict]:
             "FROM runs WHERE result_path IS NULL OR n_proteins IS NULL "
             "ORDER BY run_date DESC, run_name"
         ).fetchall()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["suggested_preset"] = _suggest_preset(d)
+        d["is_immuno"] = _is_immuno_run(d.get("run_name", ""))
+        d["immuno_class"] = _immuno_class(d.get("run_name", "")) if d["is_immuno"] else 0
+        result.append(d)
+    return result
 
 
 @app.get("/api/search/presets")
@@ -3631,24 +3974,29 @@ class SearchSubmitRequest(BaseModel):
 
 @app.post("/api/search/submit")
 async def api_search_submit(body: SearchSubmitRequest) -> dict:
-    """Launch a DIA-NN search job for the given runs."""
-    import shutil
+    """Launch a search job for the given runs.
 
-    diann = shutil.which("diann") or shutil.which("diann.exe")
-    if not diann:
-        # Try common Windows location
-        diann_win = Path("C:/DIA-NN/2.3.2/diann.exe")
-        if diann_win.exists():
-            diann = str(diann_win)
-    if not diann:
-        raise HTTPException(status_code=400, detail="DIA-NN not found on PATH. Install DIA-NN 2.x and ensure it is on your PATH.")
+    Routing:
+      DIA preset (diaPASEF / DIA mode)  → DIA-NN  (library search)
+      DDA preset (ddaPASEF / DDA mode)  → Sage    (native .d; MSFragger if FragPipe installed)
+      Immuno presets (mhc_class_i/ii)   → Sage non-specific (or MSFragger non-specific)
+    """
+    import shutil
 
     if body.preset not in SEARCH_PRESETS:
         raise HTTPException(status_code=400, detail=f"Unknown preset: {body.preset}")
 
-    fasta_path = Path(body.fasta_path)
-    if not fasta_path.exists():
-        raise HTTPException(status_code=400, detail=f"FASTA not found: {body.fasta_path}")
+    preset_info = SEARCH_PRESETS[body.preset]
+    # Resolve alias (legacy preset keys)
+    if "_alias" in preset_info:
+        preset_info = SEARCH_PRESETS.get(preset_info["_alias"], preset_info)
+
+    immuno_class = preset_info.get("immuno_class", 0)
+    preset_engines = preset_info.get("engines", ["diann"])
+
+    # Validate fasta for DDA/immuno presets (always needed for Sage)
+    fasta_path_str = body.fasta_path or ""
+    fasta_ok = fasta_path_str and Path(fasta_path_str).exists()
 
     if body.library_path and not Path(body.library_path).exists():
         raise HTTPException(status_code=400, detail=f"Library not found: {body.library_path}")
@@ -3659,7 +4007,7 @@ async def api_search_submit(body: SearchSubmitRequest) -> dict:
         con.row_factory = _sqlite3_sa.Row
         runs = []
         for rid in body.run_ids:
-            row = con.execute("SELECT id, run_name, raw_path FROM runs WHERE id = ?", (rid,)).fetchone()
+            row = con.execute("SELECT id, run_name, raw_path, mode FROM runs WHERE id = ?", (rid,)).fetchone()
             if row:
                 runs.append(dict(row))
 
@@ -3674,86 +4022,118 @@ async def api_search_submit(body: SearchSubmitRequest) -> dict:
         "n_done": 0,
         "n_failed": 0,
         "started_at": datetime.now(timezone.utc).isoformat(),
-        "label": body.label or SEARCH_PRESETS[body.preset]["label"],
+        "label": body.label or preset_info["label"],
         "log": [],
+        "n_runs": len(runs),
     }
 
-    # Run in background thread so API returns immediately
+    extra_args = body.extra_args.split() if body.extra_args.strip() else []
+    results_base = Path("E:/timsTOF/stan_results")
+
     def _run_batch():
         job = _search_jobs[job_id]
-        preset_args = SEARCH_PRESETS[body.preset]["diann_args"]
-        extra = body.extra_args.split() if body.extra_args.strip() else []
-
-        # Default results dir alongside each run's raw file
-        results_base = Path("E:/timsTOF/stan_results")
         results_base.mkdir(parents=True, exist_ok=True)
 
         for run in runs:
             raw = Path(run["raw_path"])
-            stem = run["run_name"].replace(".d", "")
+            mode = run.get("mode", "")
+            stem = Path(run["run_name"]).stem
             out_dir = results_base / stem
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_parquet = out_dir / "report.parquet"
 
-            job["log"].append(f"\n▶ {run['run_name']}")
+            job["log"].append(f"\n▶ {run['run_name']}  [{mode}]")
 
             if not raw.exists():
                 job["log"].append(f"  ✗ Raw file not found: {raw}")
                 job["n_failed"] += 1
                 continue
 
-            cmd = [diann, "--f", str(raw), "--out", str(out_parquet)] + preset_args
-            if body.fasta_path:
-                cmd += ["--fasta", body.fasta_path]
-            if body.library_path:
-                cmd += ["--lib", body.library_path]
-            cmd += extra
-
-            job["log"].append(f"  cmd: {' '.join(cmd)}")
+            # Per-run engine decision: DIA → DIA-NN, DDA → Sage
+            run_is_dia = _is_dia(mode)
+            run_immuno = immuno_class or (_immuno_class(run["run_name"]) if _is_immuno_run(run["run_name"]) else 0)
 
             try:
-                proc = _subprocess.Popen(
-                    cmd,
-                    stdout=_subprocess.PIPE,
-                    stderr=_subprocess.STDOUT,
-                    text=True,
-                )
-                for line in proc.stdout:
-                    line = line.rstrip()
-                    if line:
-                        job["log"].append(f"  {line}")
-                proc.wait()
+                if run_is_dia and "diann" in preset_engines:
+                    # ── DIA-NN path ──────────────────────────────────────────
+                    diann_exe = _find_diann_exe()
+                    if not diann_exe:
+                        job["log"].append("  ✗ DIA-NN not found. Install DIA-NN 2.x and add to PATH.")
+                        job["n_failed"] += 1
+                        continue
 
-                if proc.returncode == 0 and out_parquet.exists():
-                    # Count proteins and update DB
+                    out_parquet = out_dir / "report.parquet"
+                    diann_args = preset_info.get("diann_args", [])
+                    cmd = [diann_exe, "--f", str(raw), "--out", str(out_parquet)] + diann_args
+                    if fasta_path_str:
+                        cmd += ["--fasta", fasta_path_str]
+                    if body.library_path:
+                        cmd += ["--lib", body.library_path]
+                    cmd += extra_args
+                    engine_label = f"DIA-NN {'MHC-' + 'I'*run_immuno if run_immuno else 'DIA'}"
+                    job["log"].append(f"  engine: {engine_label}")
+                    job["log"].append(f"  cmd: {' '.join(cmd)}")
+
+                    proc = _subprocess.Popen(cmd, stdout=_subprocess.PIPE, stderr=_subprocess.STDOUT, text=True)
+                    for line in proc.stdout:
+                        line = line.rstrip()
+                        if line:
+                            job["log"].append(f"  {line}")
+                    proc.wait()
+                    result_file = out_parquet if out_parquet.exists() else None
+
+                else:
+                    # ── Sage path (DDA / ddaPASEF / immuno) ─────────────────
+                    from stan.search.local import run_sage_local
+                    vendor = "bruker" if raw.suffix.lower() == ".d" else "thermo"
+                    sage_exe = shutil.which("sage") or "sage"
+                    engine_label = f"Sage {'MHC-' + 'I'*run_immuno + ' (non-specific)' if run_immuno else 'DDA'}"
+                    job["log"].append(f"  engine: {engine_label}")
+
+                    # community mode uses bundled FASTA; local mode requires user FASTA
+                    s_mode = "community" if not fasta_ok else "local"
+                    result_file = run_sage_local(
+                        raw_path=raw,
+                        output_dir=out_dir,
+                        vendor=vendor,
+                        sage_exe=sage_exe,
+                        fasta_path=fasta_path_str if fasta_ok else None,
+                        search_mode=s_mode,
+                        immuno_class=run_immuno,
+                    )
+
+                if result_file and result_file.exists():
+                    # Parse result and update DB
                     try:
-                        import pandas as pd
-                        df = pd.read_parquet(str(out_parquet))
-                        if "Protein.Group" in df.columns and "Q.Value" in df.columns:
-                            n = int(df[df["Q.Value"] < 0.01]["Protein.Group"].nunique())
-                        elif "Protein.Group" in df.columns:
-                            n = int(df["Protein.Group"].nunique())
+                        import polars as pl
+                        df = pl.read_parquet(str(result_file))
+                        q_col = "Q.Value" if "Q.Value" in df.columns else ("q_value" if "q_value" in df.columns else None)
+                        prot_col = "Protein.Group" if "Protein.Group" in df.columns else ("proteins" if "proteins" in df.columns else None)
+                        if q_col and prot_col:
+                            n = df.filter(pl.col(q_col) < 0.01)[prot_col].n_unique()
+                        elif prot_col:
+                            n = df[prot_col].n_unique()
                         else:
-                            n = None
-
-                        with _sqlite3_sa.connect(str(db_path)) as con:
-                            con.execute(
+                            n = len(df)
+                        with _sqlite3_sa.connect(str(db_path)) as con2:
+                            con2.execute(
                                 "UPDATE runs SET n_proteins = ?, result_path = ? WHERE id = ?",
-                                (n, str(out_parquet), run["id"]),
+                                (int(n), str(result_file), run["id"]),
                             )
-                        job["log"].append(f"  ✓ {n} protein groups")
+                        job["log"].append(f"  ✓ {n:,} protein/source groups at 1% FDR")
                         job["n_done"] += 1
                     except Exception as e:
-                        job["log"].append(f"  ⚠ Could not parse result: {e}")
+                        job["log"].append(f"  ⚠ Result written but metrics failed: {e}")
                         job["n_done"] += 1
                 else:
-                    job["log"].append(f"  ✗ DIA-NN failed (exit {proc.returncode})")
+                    job["log"].append("  ✗ Search produced no output file — check engine log above")
                     job["n_failed"] += 1
+
             except Exception as e:
                 job["log"].append(f"  ✗ Error: {e}")
                 job["n_failed"] += 1
 
         job["status"] = "done"
+        job["n_runs"] = len(runs)
         job["log"].append(f"\n✓ Batch complete: {job['n_done']} succeeded, {job['n_failed']} failed")
 
     threading.Thread(target=_run_batch, daemon=True).start()
@@ -3847,6 +4227,16 @@ async def api_calibrant_drift(run_id: str) -> dict:
         names       = latest.get("names", [])
         intensities = latest.get("MeasuredMobilityPeakIntensities", [])
 
+        # The 3 CCS compendium anchor masses (Agilent ESI-L tuning mix, singly charged).
+        # These are the ions used to fit the calibration line — ±5 Da matching tolerance.
+        _TARGET_MZ = [622.0, 922.0, 1221.0]
+        _TARGET_TOL = 5.0
+
+        def _is_target(mz: float | None) -> bool:
+            if mz is None:
+                return False
+            return any(abs(mz - t) <= _TARGET_TOL for t in _TARGET_MZ)
+
         n = min(len(ref_mobs), len(corr_mobs))
         compounds = []
         for i in range(n):
@@ -3854,15 +4244,17 @@ async def api_calibrant_drift(run_id: str) -> dict:
             meas_k0 = round(corr_mobs[i], 6) if i < len(corr_mobs) else None
             prev_k0 = round(prev_mobs[i], 6) if i < len(prev_mobs) else None
             drift   = round(meas_k0 - ref_k0, 6) if meas_k0 is not None else None
+            rmz     = round(ref_masses[i], 4) if i < len(ref_masses) else None
             compounds.append({
-                "compound": names[i] if i < len(names) else f"Calibrant {i+1}",
-                "ref_mz":   round(ref_masses[i], 4) if i < len(ref_masses) else None,
-                "ref_k0":   ref_k0,
-                "meas_k0":  meas_k0,
-                "prev_k0":  prev_k0,
-                "drift":    drift,        # corrected − reference (Vs/cm²)
-                "pct_dev":  round(abs(drift / ref_k0) * 100, 4) if drift and ref_k0 else None,
+                "compound":  names[i] if i < len(names) else f"Calibrant {i+1}",
+                "ref_mz":    rmz,
+                "ref_k0":    ref_k0,
+                "meas_k0":   meas_k0,
+                "prev_k0":   prev_k0,
+                "drift":     drift,        # corrected − reference (Vs/cm²)
+                "pct_dev":   round(abs(drift / ref_k0) * 100, 4) if drift and ref_k0 else None,
                 "intensity": round(intensities[i]) if i < len(intensities) else None,
+                "is_target": _is_target(rmz),   # True for the 622 / 922 / 1221 anchor ions
             })
 
         std_pct = latest.get("MobilityStandardDeviationPercent")
@@ -3882,6 +4274,193 @@ async def api_calibrant_drift(run_id: str) -> dict:
         import traceback
         return {"error": "extraction_failed", "message": str(exc),
                 "traceback": traceback.format_exc()[-600:]}
+
+
+@app.get("/api/runs/{run_id}/method-config")
+async def api_method_config(run_id: str) -> dict:
+    """Parse the Bruker acquisition method file from a timsTOF .d folder.
+
+    Looks for <name>.m/microTOFQImpacTemAcquisition.method inside the .d folder.
+    Returns structured hardware config: IMS calibration, TOF calibration, TOF hardware,
+    source, and general instrument info.
+    """
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    raw_path = run.get("raw_path", "")
+    if not raw_path:
+        return {"error": "no_raw_path"}
+    d_path = Path(raw_path)
+    if not d_path.exists():
+        return {"error": "no_raw_file", "message": f"Folder not found: {raw_path}"}
+
+    # Locate .m subfolder and method file (case-insensitive)
+    m_folder: Path | None = None
+    for entry in d_path.iterdir():
+        if entry.is_dir() and entry.suffix.lower() == ".m":
+            m_folder = entry
+            break
+    if not m_folder:
+        return {"error": "no_m_folder", "message": "No .m subfolder found in .d folder."}
+
+    method_file: Path | None = None
+    for entry in m_folder.iterdir():
+        if entry.is_file() and "microTOFQImpacTemAcquisition".lower() in entry.name.lower():
+            method_file = entry
+            break
+    if not method_file:
+        return {"error": "no_method_file",
+                "message": f"microTOFQImpacTemAcquisition.method not found in {m_folder.name}"}
+
+    try:
+        import xml.etree.ElementTree as ET
+
+        tree = ET.parse(str(method_file))
+        root = tree.getroot()
+
+        # ── Helpers ──────────────────────────────────────────────────────────
+        def _get_pol_block(node, pol: str):
+            if node.get("polarity") == pol:
+                return node
+            for c in node:
+                r = _get_pol_block(c, pol)
+                if r is not None:
+                    return r
+            return None
+
+        def _params(node) -> dict:
+            """Flatten all para_* entries under node into {permname: value}."""
+            out: dict = {}
+            for child in node.iter():
+                perm = child.get("permname", "")
+                val  = child.get("value", "")
+                if not perm or not val:
+                    continue
+                if child.tag == "para_vec_double":
+                    entries = [float(e.get("value", 0)) for e in child if e.tag == "entry_double"]
+                    out[perm] = entries
+                elif child.tag in ("para_int", "para_double", "para_string"):
+                    try:
+                        out[perm] = int(val) if child.tag == "para_int" else (
+                            float(val) if child.tag == "para_double" else val.strip()
+                        )
+                    except (ValueError, TypeError):
+                        out[perm] = val.strip()
+            return out
+
+        def _fv(p: dict, key: str, default=None):
+            return p.get(key, default)
+
+        # ── General info ─────────────────────────────────────────────────────
+        gi   = root.find("generalinfo") or root
+        fi   = root.find("fileinfo")
+        conf = (gi.findtext("configuration") or "").strip()
+        # Extract model from configuration string  (e.g. "... timsTOF_Ultra ...")
+        model = "timsTOF"
+        for token in conf.split():
+            if token.startswith("timsTOF"):
+                model = token.replace("_", " ")
+                break
+
+        general = {
+            "model":           model,
+            "hostname":        gi.findtext("hostname", "").strip(),
+            "author":          gi.findtext("author", "").strip(),
+            "timstof_version": fi.get("appversion", "") if fi is not None else "",
+            "created":         fi.get("createdate", "") if fi is not None else "",
+            "configuration":   conf,
+        }
+
+        # ── Polarity blocks ──────────────────────────────────────────────────
+        pos = _get_pol_block(root, "positive")
+        neg = _get_pol_block(root, "negative")
+        # Use positive if available; fall back to negative (some instruments only have one)
+        pp  = _params(pos) if pos is not None else {}
+        pn  = _params(neg) if neg is not None else {}
+        pg  = _params(root)  # global (polarity-independent)
+
+        def _pv(key, default=None):
+            return pp.get(key, pn.get(key, pg.get(key, default)))
+
+        # ── IMS calibration ───────────────────────────────────────────────────
+        ims_calib = {
+            "date":                 _pv("IMS_Calibration_LastCalibrationDate"),
+            "score":                _pv("IMS_Calibration_Score"),
+            "std_dev":              _pv("IMS_Calibration_StdDev"),
+            "reference_mass_list":  _pv("IMS_Calibration_LastCalibrationReferenceMassList"),
+            "mobility_start":       _pv("IMS_Calibration_MobilityStart_Save"),
+            "mobility_end":         _pv("IMS_Calibration_MobilityEnd_Save"),
+            "ramp_velocity":        _pv("IMS_Calibration_RampVelocity_Save"),
+            "ramp_start":           _pv("IMS_CalibrationRampStart"),
+            "ramp_end":             _pv("IMS_CalibrationRampEnd"),
+            "funnel_pressure":      _pv("IMS_Calibration_Funnel1In_Pressure"),
+            "pressure_compensation":_pv("IMS_Calibration_SwitchPressureCompensation"),
+            "pressure_comp_factor": _pv("IMS_Calibration_Funnel1In_PressureCompensationFactor"),
+            "transit_time":         _pv("IMS_CalibrationTransitTime"),
+            "n_cycles":             _pv("IMS_CalibrationRampNumberOfCycles"),
+        }
+
+        # ── TOF (mass) calibration ────────────────────────────────────────────
+        tof_calib = {
+            "date":              _pv("Calibration_LastCalibrationDate"),
+            "score":             _pv("Calibration_Score"),
+            "std_dev":           _pv("Calibration_StdDev"),
+            "std_dev_ppm":       _pv("Calibration_StdDevInPPM"),
+            "reference_mass_list": _pv("Calibration_LastUsedReferenceMassList"),
+            "scan_begin":        _pv("Calibration_ScanBegin"),
+            "scan_end":          _pv("Calibration_ScanEnd"),
+            "regression_mode":   _pv("Calibration_RegressionMode"),
+            "tof2_c0":           _pv("Calibration_Tof2CalC0"),
+            "tof2_c1":           _pv("Calibration_Tof2CalC1"),
+            "tof2_std_dev":      _pv("Calibration_Tof2StdDev"),
+            "tof2_std_dev_ppm":  _pv("Calibration_Tof2StdDevInPPM"),
+        }
+
+        # ── TOF hardware ──────────────────────────────────────────────────────
+        tof_hw = {
+            "flight_tube_v":  _pv("TOF_FlightTubeSetValue"),
+            "detector_v":     _pv("Calibration_TOF_DetectorTofSetValue", _pv("TOF_DetectorTofSetValue")),
+            "pulser_lens_v":  _pv("TOF_PulserLensSetValue"),
+            "reflector_v":    _pv("TOF_ReflectorSetValue"),
+            "corrector_fill": _pv("TOF_CorrectorFillSetValue"),
+            "corrector_extract": _pv("TOF_CorrectorExtractSetValue"),
+            "temp_1":         _pv("TOF_DeviceReferenceTemp1"),
+            "temp_2":         _pv("TOF_DeviceReferenceTemp2"),
+            "temp_compensation": _pv("TOF_SwitchTempCompensation"),
+        }
+
+        # ── Source ────────────────────────────────────────────────────────────
+        source = {
+            "capillary_exit_v":  _pv("Transfer_CapillaryExit_Base_Set"),
+            "dry_gas_flow":      _pv("Source_AcqDryGasFlowRateSetValue"),
+            "dry_gas_temp":      _pv("Source_AcqDryGasTemperatureSetValue"),
+            "nebulizer_bar":     _pv("Source_AcqNebulizerPressureSetValue"),
+            "capillary_v":       _pv("Source_AcqCapillaryVoltageSetValue"),
+            "end_plate_offset":  _pv("Source_AcqEndPlateOffsetSetValue"),
+        }
+
+        # ── PASEF / acquisition ───────────────────────────────────────────────
+        acquisition = {
+            "pasef_mz_width":    _pv("MSMS_Pasef_MobilogramGridMzWidth"),
+            "pasef_mz_overlap":  _pv("MSMS_Pasef_MobilogramGridMzOverlap"),
+            "tof_resolution":    _pv("MSMS_Pasef_TofResolution"),
+            "collision_gas":     _pv("Collision_GasSupply_Set"),
+        }
+
+        return {
+            "general":     general,
+            "ims_calib":   ims_calib,
+            "tof_calib":   tof_calib,
+            "tof_hw":      tof_hw,
+            "source":      source,
+            "acquisition": acquisition,
+            "method_file": str(method_file),
+        }
+
+    except Exception as exc:
+        import traceback
+        return {"error": "parse_failed", "message": str(exc),
+                "traceback": traceback.format_exc()[-800:]}
 
 
 @app.get("/api/validate-paths")
@@ -4017,6 +4596,139 @@ async def api_backfill_formats() -> dict:
         "not_found": len(not_found),
         "runs":      updated,
         "missing":   not_found,
+    }
+
+
+@app.post("/api/runs/{run_id}/compare")
+async def api_run_compare(run_id: str) -> dict:
+    """Manually trigger comparison searches (MSFragger, X!Tandem, MaxQuant) for an existing run.
+
+    Fires background daemon threads immediately — does not re-run the primary
+    DIA-NN / Sage search.  Returns as soon as threads are dispatched.
+
+    FASTA and spectral library are resolved from the instrument config (Config tab)
+    exactly as the primary search would, falling back to community assets.
+
+    The run must have a raw_path stored in the DB and the file must exist.
+    """
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    raw = run.get("raw_path") or ""
+    if not raw:
+        return {"ok": False, "error": "No raw_path stored for this run"}
+
+    raw_path = Path(raw)
+    if not raw_path.exists():
+        return {"ok": False, "error": f"Raw file not found: {raw}"}
+
+    mode = run.get("mode") or "DDA"
+
+    # Resolve instrument config — same lookup as primary search (Config tab settings)
+    watcher = _get_instruments_watcher()
+    instruments_cfg = watcher.data.get("instruments", []) if watcher else []
+    inst_name = run.get("instrument", "")
+    inst_cfg = next((i for i in instruments_cfg if i.get("name") == inst_name), {})
+
+    # FASTA priority: instrument config (Config tab) → community FASTA in STAN dir
+    fasta_path: str | None = inst_cfg.get("fasta_path") or None
+    if not fasta_path or not Path(fasta_path).exists():
+        from stan.config import get_user_config_dir
+        from stan.search.community_params import COMMUNITY_FASTA_HF_PATH
+        fasta_filename = COMMUNITY_FASTA_HF_PATH.split("/")[-1]
+        # Check common community asset locations
+        for candidate in [
+            get_user_config_dir() / "community_assets" / fasta_filename,
+            raw_path.parent / "_community_assets" / fasta_filename,
+            raw_path.parent / "stan_results" / "_community_assets" / fasta_filename,
+        ]:
+            if candidate.exists():
+                fasta_path = str(candidate)
+                break
+
+    # Output base: instrument output_dir → parent of raw file
+    output_dir_base = inst_cfg.get("output_dir") or str(raw_path.parent / "stan_results")
+    output_base = Path(output_dir_base) / raw_path.stem
+
+    try:
+        from stan.search.comparison import dispatch_comparison_searches
+        dispatch_comparison_searches(
+            run_id=raw_path.stem,
+            raw_path=raw_path,
+            mode=mode,
+            output_base=output_base,
+            fasta_path=fasta_path,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    return {
+        "ok": True,
+        "message": "Comparison searches dispatched",
+        "run_id": run_id,
+        "mode": mode,
+        "fasta": fasta_path or "not found",
+        "output_base": str(output_base),
+    }
+
+
+@app.post("/api/runs/cleanup-missing")
+async def api_cleanup_missing_runs(body: dict = {}) -> dict:
+    """Delete runs from the DB whose raw file no longer exists on disk.
+
+    Pass {"dry_run": true} to preview without deleting (default: false).
+    Also removes orphaned rows from search_comparisons for deleted runs.
+
+    Returns lists of deleted and kept run names.
+    """
+    import sqlite3 as _sl
+
+    dry_run: bool = body.get("dry_run", False)
+    all_runs = get_runs(limit=50000)
+    db_path  = get_db_path()
+
+    to_delete: list[dict] = []
+    kept:      list[dict] = []
+
+    for run in all_runs:
+        raw = run.get("raw_path") or ""
+        if not raw:
+            # No raw_path stored — keep in DB (might be manually imported)
+            kept.append({"run_name": run.get("run_name", ""), "reason": "no_raw_path"})
+            continue
+        if not Path(raw).exists():
+            to_delete.append({
+                "id":       str(run["id"]),
+                "run_name": run.get("run_name", ""),
+                "raw_path": raw,
+            })
+        else:
+            kept.append({"run_name": run.get("run_name", ""), "reason": "exists"})
+
+    if not dry_run and to_delete:
+        ids_to_delete = [r["id"] for r in to_delete]
+        placeholders = ",".join("?" for _ in ids_to_delete)
+        with _sl.connect(str(db_path)) as con:
+            con.execute(f"DELETE FROM runs WHERE id IN ({placeholders})", ids_to_delete)
+            # Also clean up comparison results for deleted runs
+            # search_comparisons uses run_id = raw_path.stem, not the UUID
+            # Remove by matching run stems of deleted runs
+            stems = [Path(r["raw_path"]).stem for r in to_delete]
+            if stems:
+                stem_ph = ",".join("?" for _ in stems)
+                con.execute(
+                    f"DELETE FROM search_comparisons WHERE run_id IN ({stem_ph})",
+                    stems,
+                )
+
+    return {
+        "dry_run":  dry_run,
+        "deleted":  len(to_delete) if not dry_run else 0,
+        "previewed": len(to_delete) if dry_run else 0,
+        "kept":     len(kept),
+        "removed":  to_delete if not dry_run else [],
+        "would_remove": to_delete if dry_run else [],
     }
 
 

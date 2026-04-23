@@ -385,14 +385,325 @@
       );
     }
 
+    // ── Mass Drift Panel ─────────────────────────────────────────────────────────
+    // Fits a linear calibration line through the 3 CCS compendium anchor points
+    // (m/z 622, 922, 1221 → their reference 1/K₀ from analysis.tdf CalibrationInfo).
+    // Then plots Δ(1/K₀) = actual − predicted for EVERY detected ion in the run.
+    // The 3 calibrant ions appear as labelled anchors; all other ions are coloured by charge.
+    // Requires: calibrant-drift (TDF, no DIA-NN) + mobility-3d (4DFF or DIA-NN).
+    function MobCalMassDrift({ runId }) {
+      const cvRef   = React.useRef(null);
+      const ptsRef  = React.useRef([]);
+      const [hov,   setHov]     = React.useState(null);
+      const [calib, setCalib]   = React.useState(null);   // calibrant-drift response
+      const [ions,  setIons]    = React.useState(null);   // mobility-3d response
+      const [loading, setLoading] = React.useState(false);
+      const [error,   setError]   = React.useState('');
+
+      React.useEffect(() => {
+        if (!runId) { setCalib(null); setIons(null); setError(''); return; }
+        setLoading(true); setError(''); setCalib(null); setIons(null);
+        Promise.all([
+          fetch(API + `/api/runs/${runId}/calibrant-drift`).then(r => r.json()).catch(() => null),
+          fetch(API + `/api/runs/${runId}/mobility-3d?max_features=8000`).then(r => r.json()).catch(() => null),
+        ]).then(([cDrift, m3d]) => {
+          if (!cDrift || cDrift.error) { setError(cDrift?.message || 'No TDF calibration data.'); return; }
+          if (!m3d || !m3d.mz || !m3d.mz.length) { setError('No ion data (needs 4DFF features or DIA-NN report).'); return; }
+          setCalib(cDrift);
+          setIons(m3d);
+        }).finally(() => setLoading(false));
+      }, [runId]);
+
+      React.useEffect(() => {
+        if (!calib || !ions) return;
+        const cv = cvRef.current; if (!cv) return;
+        const ctx = cv.getContext('2d');
+        const W = cv.width, H = cv.height;
+        const PAD = { l: 70, r: 28, t: 36, b: 58 };
+
+        // ── Linear fit through the 3 CCS compendium anchor ions (622, 922, 1221) ──
+        // Fall back to all compounds if none are tagged is_target (TDF may lack ReferencePeakMasses)
+        let anchors = (calib.compounds || []).filter(c => c.is_target && c.ref_mz != null && c.ref_k0 != null);
+        if (anchors.length < 2) {
+          anchors = (calib.compounds || [])
+            .filter(c => c.ref_mz != null && c.ref_k0 != null)
+            .sort((a, b) => a.ref_mz - b.ref_mz);
+        }
+        if (anchors.length < 2) {
+          ctx.fillStyle = '#06000f'; ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = '#64748b'; ctx.font = '13px system-ui'; ctx.textAlign = 'center';
+          ctx.fillText('Not enough calibrant data to fit a calibration line.', W/2, H/2 - 12);
+          ctx.fillText(`TDF returned ${(calib.compounds||[]).length} compound(s) — need ≥ 2 with m/z values.`, W/2, H/2 + 12);
+          return;
+        }
+        const ax = anchors.map(a => a.ref_mz);
+        const ay = anchors.map(a => a.ref_k0);
+        const n  = ax.length;
+        let sx=0, sy=0, sxy=0, sx2=0;
+        for (let i=0;i<n;i++) { sx+=ax[i]; sy+=ay[i]; sxy+=ax[i]*ay[i]; sx2+=ax[i]*ax[i]; }
+        const fitA = (n*sxy - sx*sy) / (n*sx2 - sx*sx);
+        const fitB = (sy - fitA*sx) / n;
+        const predicted = mz => fitA * mz + fitB;
+
+        // ── Ion data → compute Δ per ion ──────────────────────────────────────
+        const mzArr     = ions.mz     || [];
+        const ook0Arr   = ions.ook0   || [];
+        const chargeArr = ions.charge || [];
+        const N = mzArr.length;
+
+        // Axis extents
+        let mzMin = Infinity, mzMax = -Infinity;
+        let dMin = Infinity,  dMax = -Infinity;
+        for (let i=0;i<N;i++) {
+          const mz = mzArr[i], k0 = ook0Arr[i];
+          if (mz == null || k0 == null) continue;
+          const delta = k0 - predicted(mz);
+          if (mz < mzMin) mzMin = mz;
+          if (mz > mzMax) mzMax = mz;
+          if (delta < dMin) dMin = delta;
+          if (delta > dMax) dMax = delta;
+        }
+        // Symmetrise Y and add margin
+        const dAbs   = Math.max(0.06, Math.abs(dMin), Math.abs(dMax)) * 1.15;
+        const yLo    = -dAbs, yHi = dAbs;
+        mzMin = Math.max(200, mzMin - 50);
+        mzMax = Math.min(1600, mzMax + 50);
+
+        const toX = mz  => PAD.l + (mz - mzMin)  / (mzMax - mzMin)  * (W - PAD.l - PAD.r);
+        const toY = val => H - PAD.b - (val - yLo) / (yHi - yLo) * (H - PAD.t - PAD.b);
+
+        ctx.fillStyle = '#06000f'; ctx.fillRect(0, 0, W, H);
+
+        // ── Grid ─────────────────────────────────────────────────────────────
+        ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 0.5;
+        [300,400,500,600,700,800,900,1000,1100,1200,1300,1400,1500].forEach(v => {
+          const x = toX(v); if (x < PAD.l || x > W - PAD.r) return;
+          ctx.beginPath(); ctx.moveTo(x, PAD.t); ctx.lineTo(x, H - PAD.b); ctx.stroke();
+          ctx.fillStyle = '#475569'; ctx.font = '8.5px system-ui'; ctx.textAlign = 'center';
+          ctx.fillText(v, x, H - PAD.b + 13);
+        });
+        const yTicks = [-0.08,-0.06,-0.04,-0.02,0,0.02,0.04,0.06,0.08].filter(v => v >= yLo && v <= yHi);
+        yTicks.forEach(v => {
+          const y = toY(v);
+          ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 0.5;
+          ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(W - PAD.r, y); ctx.stroke();
+          ctx.fillStyle = '#475569'; ctx.font = '8.5px system-ui'; ctx.textAlign = 'right';
+          ctx.fillText((v >= 0 ? '+' : '') + v.toFixed(2), PAD.l - 5, y + 3);
+        });
+
+        // ── Threshold lines ───────────────────────────────────────────────────
+        const WARN = 0.025, ALERT = 0.050;
+        [
+          [0,      '#22d3ee', 1.5, [6,4],  'Perfect (Δ=0)'],
+          [WARN,   '#f97316', 0.9, [4,5],  '+warn'],
+          [-WARN,  '#f97316', 0.9, [4,5],  '-warn'],
+          [ALERT,  '#ef4444', 0.7, [2,5],  ''],
+          [-ALERT, '#ef4444', 0.7, [2,5],  ''],
+        ].forEach(([v, col, lw, dash, lbl]) => {
+          if (v < yLo || v > yHi) return;
+          const y = toY(v);
+          ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.setLineDash(dash);
+          ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(W - PAD.r, y); ctx.stroke();
+          ctx.setLineDash([]);
+          if (lbl) {
+            ctx.fillStyle = col + 'cc'; ctx.font = '8px system-ui'; ctx.textAlign = 'left';
+            ctx.fillText(lbl, W - PAD.r + 2, y + 3);
+          }
+        });
+
+        // ── Ion dots (charge-coloured) ────────────────────────────────────────
+        const CHARGE_COL = {1:'#2dd4bf', 2:'#60a5fa', 3:'#22c55e', 4:'#f97316', 5:'#a855f7'};
+        const pts = [];
+        for (let i=0;i<N;i++) {
+          const mz = mzArr[i], k0 = ook0Arr[i];
+          if (mz == null || k0 == null) continue;
+          const delta = k0 - predicted(mz);
+          const x = toX(mz), y = toY(delta);
+          if (x < PAD.l - 1 || x > W - PAD.r + 1 || y < PAD.t - 1 || y > H - PAD.b + 1) continue;
+          const z = chargeArr[i] || 0;
+          const col = CHARGE_COL[z] || '#94a3b8';
+          ctx.beginPath(); ctx.arc(x, y, 1.8, 0, Math.PI*2);
+          ctx.fillStyle = col + '55'; ctx.fill();
+          pts.push({ i, x, y, mz, k0, delta, z, col });
+        }
+        ptsRef.current = pts;
+
+        // ── Calibrant anchors ────────────────────────────────────────────────
+        anchors.forEach((a, ai) => {
+          const anchorDelta = (a.meas_k0 || a.ref_k0) - predicted(a.ref_mz);
+          const x = toX(a.ref_mz);
+          const y = toY(anchorDelta);
+          // Glow ring
+          const dCol = Math.abs(anchorDelta) > ALERT ? '#ef4444'
+                     : Math.abs(anchorDelta) > WARN  ? '#f97316' : '#22c55e';
+          ctx.beginPath(); ctx.arc(x, y, 11, 0, Math.PI*2);
+          ctx.strokeStyle = dCol + '55'; ctx.lineWidth = 4; ctx.stroke();
+          // Filled circle
+          ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2);
+          ctx.fillStyle = dCol; ctx.fill();
+          // Label: m/z value above dot
+          const label = a.ref_mz ? Math.round(a.ref_mz) + '' : (a.compound || `C${ai+1}`);
+          ctx.fillStyle = '#f0e8ff'; ctx.font = 'bold 9px system-ui'; ctx.textAlign = 'center';
+          ctx.fillText('m/z ' + label, x, y - 16);
+          // Δ value below dot
+          ctx.fillStyle = dCol; ctx.font = '8px monospace';
+          ctx.fillText((anchorDelta >= 0 ? '+' : '') + anchorDelta.toFixed(4), x, y + 22);
+        });
+
+        // ── Hover tooltip ────────────────────────────────────────────────────
+        if (hov !== null) {
+          const pt = pts.find(p => p.i === hov);
+          if (pt) {
+            const { x, y, mz, k0, delta, z, col } = pt;
+            const tw = 190, th = 72;
+            const tx = Math.min(x + 10, W - tw - 4);
+            const ty = Math.max(y - th - 4, PAD.t + 2);
+            ctx.fillStyle = 'rgba(6,0,15,0.95)';
+            ctx.strokeStyle = col + '88'; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.roundRect(tx, ty, tw, th, 5); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = col; ctx.font = 'bold 9px system-ui'; ctx.textAlign = 'left';
+            ctx.fillText(`z+${z}  m/z ${mz.toFixed(3)}`, tx + 6, ty + 14);
+            ctx.fillStyle = '#e2e8f0'; ctx.font = '8.5px system-ui';
+            ctx.fillText(`Actual  1/K₀: ${k0.toFixed(4)} Vs/cm²`,     tx + 6, ty + 28);
+            ctx.fillText(`Predicted 1/K₀: ${predicted(mz).toFixed(4)} Vs/cm²`, tx + 6, ty + 40);
+            ctx.fillStyle = Math.abs(delta) > WARN ? '#f97316' : '#22c55e';
+            ctx.font = 'bold 8.5px system-ui';
+            ctx.fillText(`Δ = ${delta >= 0 ? '+' : ''}${delta.toFixed(4)} Vs/cm²`, tx + 6, ty + 58);
+          }
+        }
+
+        // ── Axis labels ───────────────────────────────────────────────────────
+        ctx.fillStyle = '#64748b'; ctx.font = '9.5px system-ui'; ctx.textAlign = 'center';
+        ctx.fillText('m/z', W / 2, H - 2);
+        ctx.save(); ctx.translate(13, H / 2); ctx.rotate(-Math.PI / 2);
+        ctx.fillText('Δ 1/K₀ (actual − calibration line)  Vs/cm²', 0, 0); ctx.restore();
+
+        // ── Title ─────────────────────────────────────────────────────────────
+        ctx.fillStyle = '#94a3b8'; ctx.font = 'bold 9px system-ui'; ctx.textAlign = 'left';
+        ctx.fillText(`Linear fit through ${anchors.length} calibrant anchors · ${N.toLocaleString()} ions`, PAD.l + 4, PAD.t - 8);
+
+        // ── Charge legend ─────────────────────────────────────────────────────
+        [1,2,3,4,5].forEach((z, i) => {
+          const lx = W - PAD.r - 220 + i * 44;
+          ctx.beginPath(); ctx.arc(lx + 5, PAD.t - 14, 4, 0, Math.PI*2);
+          ctx.fillStyle = (CHARGE_COL[z] || '#94a3b8'); ctx.fill();
+          ctx.fillStyle = '#94a3b8'; ctx.font = '8px system-ui'; ctx.textAlign = 'left';
+          ctx.fillText(`+${z}`, lx + 12, PAD.t - 10);
+        });
+      }, [calib, ions, hov]);
+
+      const handleMove = e => {
+        const cv = cvRef.current; if (!cv || !ptsRef.current.length) return;
+        const rect = cv.getBoundingClientRect();
+        const mx = (e.clientX - rect.left) * (cv.width  / rect.width);
+        const my = (e.clientY - rect.top)  * (cv.height / rect.height);
+        let best = null, bestD = 14;
+        ptsRef.current.forEach(pt => {
+          const d = Math.hypot(mx - pt.x, my - pt.y);
+          if (d < bestD) { bestD = d; best = pt.i; }
+        });
+        setHov(best);
+      };
+
+      if (!runId) return (
+        <div style={{padding:'2rem', textAlign:'center', color:'#64748b', fontSize:'0.85rem'}}>
+          Select a timsTOF run above to view mass drift
+        </div>
+      );
+      if (loading) return <div style={{padding:'2rem', textAlign:'center', color:'#22d3ee'}}>Loading calibrant + ion data…</div>;
+      if (error) return (
+        <div style={{padding:'0.75rem', background:'rgba(239,68,68,0.08)', border:'1px solid rgba(239,68,68,0.3)',
+          borderRadius:'0.4rem', color:'#fca5a5', fontSize:'0.78rem'}}>{error}</div>
+      );
+      if (!calib || !ions) return null;
+
+      // Summary stats — target ions first, fall back to all if none tagged
+      let anchors = (calib.compounds || []).filter(c => c.is_target && c.ref_mz != null && c.ref_k0 != null);
+      if (anchors.length < 2) anchors = (calib.compounds || []).filter(c => c.ref_mz != null && c.ref_k0 != null).sort((a,b) => a.ref_mz - b.ref_mz);
+      const ax = anchors.map(a => a.ref_mz);
+      const ay = anchors.map(a => a.ref_k0);
+      const nA = ax.length;
+      let sx=0,sy=0,sxy=0,sx2=0;
+      for(let i=0;i<nA;i++){sx+=ax[i];sy+=ay[i];sxy+=ax[i]*ay[i];sx2+=ax[i]*ax[i];}
+      const fitA = (nA*sxy-sx*sy)/(nA*sx2-sx*sx);
+      const fitB = (sy-fitA*sx)/nA;
+      const anchorDeltas = anchors.map(a => ((a.meas_k0||a.ref_k0) - (fitA*a.ref_mz+fitB)));
+      const maxAnchorDrift = Math.max(...anchorDeltas.map(Math.abs));
+      const overallStatus = maxAnchorDrift < 0.025 ? 'PASS' : maxAnchorDrift < 0.050 ? 'WARN' : 'ALERT';
+      const statusCol = overallStatus === 'PASS' ? '#22c55e' : overallStatus === 'WARN' ? '#f97316' : '#ef4444';
+
+      return (
+        <div>
+          <div style={{display:'flex', gap:'0.5rem', flexWrap:'wrap', marginBottom:'0.75rem', alignItems:'stretch'}}>
+            {[
+              {label:'Calibrant anchors', val: `${anchors.length} ions`,   col:'#22d3ee'},
+              {label:'Fit slope',         val: `${fitA >= 0 ? '+' : ''}${fitA.toFixed(5)} Vs·cm⁻²/Th`, col:'#94a3b8'},
+              {label:'Fit intercept',     val: `${fitB >= 0 ? '+' : ''}${fitB.toFixed(4)} Vs/cm²`, col:'#94a3b8'},
+              {label:'Max anchor |Δ|',    val: `${maxAnchorDrift.toFixed(5)} Vs/cm²`, col: statusCol},
+              {label:'Status',            val: overallStatus, col: statusCol},
+              {label:'Total ions shown',  val: (ions.mz||[]).length.toLocaleString(), col:'#64748b'},
+            ].map(s => (
+              <div key={s.label} style={{background:'rgba(0,0,0,0.45)', border:`1px solid ${s.col}22`,
+                borderRadius:'0.4rem', padding:'0.45rem 0.65rem', textAlign:'center', flex:'1 1 120px'}}>
+                <div style={{fontSize:'0.95rem', fontWeight:800, color:s.col, lineHeight:1.1}}>{s.val}</div>
+                <div style={{fontSize:'0.67rem', color:'#64748b', marginTop:'0.15rem'}}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{fontSize:'0.73rem', color:'#64748b', lineHeight:1.6, marginBottom:'0.65rem',
+            padding:'0.45rem 0.7rem', background:'rgba(34,211,238,0.04)', borderRadius:'0.35rem',
+            borderLeft:'3px solid rgba(34,211,238,0.3)'}}>
+            <strong style={{color:'#22d3ee'}}>How to read this:</strong>{' '}
+            A linear calibration line is fitted through the 3 Agilent ESI-L calibrant reference 1/K₀ values
+            (m/z 622 · 922 · 1221).
+            Every detected ion is then plotted as its residual{' '}
+            <strong style={{color:'#DAAA00'}}>Δ(1/K₀) = actual − predicted</strong> vs its m/z.
+            A flat cloud centred on Δ=0 means the calibration holds uniformly across the mass range.
+            A tilt or systematic offset indicates mass-dependent drift.
+            The labelled anchor circles show where the 3 calibrant ions landed vs the fitted line.
+          </div>
+
+          <canvas ref={cvRef} width={900} height={460}
+            onMouseMove={handleMove} onMouseLeave={() => setHov(null)}
+            style={{width:'100%', display:'block', borderRadius:'0.4rem', cursor:'crosshair'}}/>
+
+          {/* Per-anchor detail row */}
+          <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(220px,1fr))', gap:'0.4rem', marginTop:'0.65rem'}}>
+            {anchors.map((a, i) => {
+              const d = (a.meas_k0||a.ref_k0) - (fitA*a.ref_mz+fitB);
+              const dCol = Math.abs(d) > 0.050 ? '#ef4444' : Math.abs(d) > 0.025 ? '#f97316' : '#22c55e';
+              return (
+                <div key={i} style={{background:'rgba(0,0,0,0.4)', border:`1px solid ${dCol}33`,
+                  borderRadius:'0.4rem', padding:'0.45rem 0.65rem', fontSize:'0.78rem'}}>
+                  <div style={{fontWeight:700, color:'#e2e8f0', marginBottom:'0.2rem'}}>
+                    {a.compound || `Calibrant ${i+1}`}
+                    <span style={{color:'#64748b', fontWeight:400, marginLeft:'0.4rem', fontSize:'0.7rem'}}>
+                      m/z {a.ref_mz?.toFixed(2)}
+                    </span>
+                  </div>
+                  <div style={{display:'flex', gap:'1rem'}}>
+                    <span style={{color:'#94a3b8'}}>Ref 1/K₀: <strong style={{color:'#22d3ee'}}>{a.ref_k0?.toFixed(5)}</strong></span>
+                    <span style={{color:'#94a3b8'}}>Meas: <strong style={{color:'#e2e8f0'}}>{(a.meas_k0||a.ref_k0)?.toFixed(5)}</strong></span>
+                    <span style={{color:'#94a3b8'}}>Δ calib line: <strong style={{color:dCol}}>{d >= 0 ? '+' : ''}{d.toFixed(5)}</strong></span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
     // ── Calibrant QC Panel ───────────────────────────────────────────────────────
     // Reads Bruker's own reference 1/K₀ values from analysis.tdf and compares
     // to what the instrument actually measured post-calibration.
-    // No DIA-NN result needed — works on any timsTOF run with a raw .d file.
+    // Focuses on the 3 CCS compendium anchor ions: m/z 622, 922, 1221.
     function MobCalCalibrant({ runId }) {
       const [data, setData] = React.useState(null);
       const [loading, setLoading] = React.useState(false);
       const [error, setError] = React.useState('');
+      const [showAll, setShowAll] = React.useState(false);
 
       React.useEffect(() => {
         if (!runId) return;
@@ -417,130 +728,299 @@
       if (!data) return null;
 
       const WARN = 0.025, ALERT = 0.050;
-      const cpds = data.compounds || [];
-      const maxDrift = cpds.length ? Math.max(...cpds.map(c => Math.abs(c.drift || 0))) : 0;
+      const allCpds = data.compounds || [];
+
+      // Separate the 3 target anchors from the rest
+      const TARGET_NOMINAL = [622, 922, 1221];
+      const targets = TARGET_NOMINAL.map(nom => allCpds.find(c => c.is_target && c.ref_mz != null && Math.abs(c.ref_mz - nom) <= 5) || null);
+      const otherCpds = allCpds.filter(c => !c.is_target);
+
+      // Status based on the 3 targets only (or all if targets missing)
+      const statusCpds = targets.filter(Boolean).length > 0 ? targets.filter(Boolean) : allCpds;
+      const maxDrift = statusCpds.length ? Math.max(...statusCpds.map(c => Math.abs(c.drift || 0))) : 0;
       const calStatus = maxDrift < WARN ? 'PASS' : maxDrift < ALERT ? 'WARN' : 'ALERT';
       const calCol = calStatus === 'PASS' ? '#22c55e' : calStatus === 'WARN' ? '#f97316' : '#ef4444';
+      const foundCount = targets.filter(Boolean).length;
 
       return (
         <div>
           {/* Summary header */}
-          <div style={{display:'flex', gap:'0.6rem', flexWrap:'wrap', marginBottom:'0.9rem', alignItems:'stretch'}}>
+          <div style={{display:'flex', gap:'0.5rem', flexWrap:'wrap', marginBottom:'0.85rem', alignItems:'stretch'}}>
             {[
-              {label:'Calibrant List', val: data.ref_list || 'Tuning Mix', col:'#94a3b8'},
-              {label:'Calibration Time', val: data.calib_datetime ? new Date(data.calib_datetime).toLocaleString() : '—', col:'#94a3b8'},
+              {label:'Calibrant list',   val: data.ref_list || 'Agilent ESI-L', col:'#94a3b8'},
+              {label:'Calibration time', val: data.calib_datetime ? new Date(data.calib_datetime).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—', col:'#94a3b8'},
               {label:'Std Dev (Bruker)', val: data.std_pct != null ? (data.std_pct * 100).toFixed(4) + ' %' : '—', col:'#22d3ee'},
-              {label:'Max |Δ| vs Ref', val: maxDrift.toFixed(5) + ' Vs/cm²', col: calCol},
-              {label:'Status', val: calStatus, col: calCol},
+              {label:'Anchors found',    val: `${foundCount} / 3`, col: foundCount === 3 ? '#22c55e' : '#f97316'},
+              {label:'Max |Δ| anchors',  val: maxDrift.toFixed(5) + ' Vs/cm²', col: calCol},
+              {label:'Status',           val: calStatus, col: calCol},
             ].map(s => (
               <div key={s.label} style={{background:'rgba(0,0,0,0.45)', border:`1px solid ${s.col}22`,
-                borderRadius:'0.4rem', padding:'0.5rem 0.75rem', textAlign:'center', flex:'1 1 130px'}}>
-                <div style={{fontSize:'1rem', fontWeight:800, color:s.col, lineHeight:1.1}}>{s.val}</div>
+                borderRadius:'0.4rem', padding:'0.45rem 0.7rem', textAlign:'center', flex:'1 1 110px'}}>
+                <div style={{fontSize:'0.95rem', fontWeight:800, color:s.col, lineHeight:1.1}}>{s.val}</div>
                 <div style={{fontSize:'0.67rem', color:'#64748b', marginTop:'0.15rem'}}>{s.label}</div>
               </div>
             ))}
           </div>
 
-          {/* Explainer */}
-          <div style={{fontSize:'0.74rem', color:'#64748b', lineHeight:1.6, marginBottom:'0.75rem',
-            padding:'0.5rem 0.75rem', background:'rgba(34,211,238,0.04)', borderRadius:'0.35rem',
-            borderLeft:'3px solid rgba(34,211,238,0.3)'}}>
-            <strong style={{color:'#22d3ee'}}>What this measures:</strong>{' '}
-            Bruker stores reference 1/K₀ values for each calibrant compound in the TDF file
-            (<code style={{color:'#a5b4fc'}}>ReferencePeakMobilities</code>). These are the
-            instrument manufacturer's known values for the Agilent ESI-L tuning mix at STP.
-            After calibration, the instrument measures these same compounds
-            (<code style={{color:'#a5b4fc'}}>MobilitiesCorrectedCalibration</code>).
-            The drift Δ = measured − reference shows how well the calibration succeeded.
-            <strong style={{color:'#DAAA00'}}> This is independent of DIA-NN</strong> — it reflects
-            the hardware calibration state at the time the run was acquired.
-          </div>
-
-          {/* Compound table */}
-          <div style={{overflowX:'auto'}}>
-            <table style={{width:'100%', borderCollapse:'collapse', fontSize:'0.8rem'}}>
-              <thead>
-                <tr style={{background:'rgba(34,211,238,0.06)', borderBottom:'1px solid rgba(34,211,238,0.15)'}}>
-                  {['Compound','Ref m/z','Bruker Ref 1/K₀','Measured 1/K₀','Pre-Cal 1/K₀','Δ (meas − ref)','% Dev','Intensity'].map(h => (
-                    <th key={h} style={{padding:'0.4rem 0.6rem', textAlign:'left', color:'#94a3b8',
-                      fontWeight:600, fontSize:'0.73rem', whiteSpace:'nowrap'}}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {cpds.map((c, i) => {
-                  const d = c.drift || 0;
-                  const dCol = Math.abs(d) > ALERT ? '#ef4444' : Math.abs(d) > WARN ? '#f97316' : '#22c55e';
-                  return (
-                    <tr key={i} style={{borderBottom:'1px solid rgba(255,255,255,0.04)',
-                      background: i % 2 ? 'rgba(255,255,255,0.01)' : 'transparent'}}>
-                      <td style={{padding:'0.4rem 0.6rem', color:'#e2e8f0', fontFamily:'monospace', fontSize:'0.75rem'}}>{c.compound}</td>
-                      <td style={{padding:'0.4rem 0.6rem', color:'#94a3b8'}}>{c.ref_mz != null ? c.ref_mz.toFixed(3) : '—'}</td>
-                      <td style={{padding:'0.4rem 0.6rem', color:'#22d3ee', fontFamily:'monospace'}}>{c.ref_k0.toFixed(6)}</td>
-                      <td style={{padding:'0.4rem 0.6rem', color:'#e2e8f0', fontFamily:'monospace'}}>{c.meas_k0 != null ? c.meas_k0.toFixed(6) : '—'}</td>
-                      <td style={{padding:'0.4rem 0.6rem', color:'#475569', fontFamily:'monospace', fontSize:'0.73rem'}}>{c.prev_k0 != null ? c.prev_k0.toFixed(6) : '—'}</td>
-                      <td style={{padding:'0.4rem 0.6rem', fontFamily:'monospace', fontWeight:700, color:dCol}}>
-                        {d >= 0 ? '+' : ''}{d.toFixed(6)}
-                      </td>
-                      <td style={{padding:'0.4rem 0.6rem', color:dCol, fontSize:'0.75rem'}}>
-                        {c.pct_dev != null ? c.pct_dev.toFixed(4) + ' %' : '—'}
-                      </td>
-                      <td style={{padding:'0.4rem 0.6rem', color:'#64748b', fontSize:'0.73rem'}}>
-                        {c.intensity != null ? c.intensity.toLocaleString() : '—'}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Mini bar chart of drifts */}
-          {cpds.length > 0 && (() => {
-            const maxAbs = Math.max(WARN * 1.5, ...cpds.map(c => Math.abs(c.drift || 0)));
-            return (
-              <div style={{marginTop:'0.9rem'}}>
-                <div style={{fontSize:'0.73rem', color:'#64748b', marginBottom:'0.4rem'}}>Δ 1/K₀ per calibrant compound vs thresholds</div>
-                {cpds.map((c, i) => {
-                  const d = c.drift || 0;
-                  const pct = Math.min(1, Math.abs(d) / maxAbs);
-                  const dCol = Math.abs(d) > ALERT ? '#ef4444' : Math.abs(d) > WARN ? '#f97316' : '#22c55e';
-                  return (
-                    <div key={i} style={{display:'flex', alignItems:'center', gap:'0.5rem', marginBottom:'0.3rem'}}>
-                      <div style={{width:'180px', fontSize:'0.72rem', color:'#94a3b8', textAlign:'right',
-                        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>{c.compound}</div>
-                      <div style={{flex:1, height:'16px', background:'rgba(255,255,255,0.04)',
-                        borderRadius:'2px', position:'relative'}}>
-                        {/* Zero line */}
-                        <div style={{position:'absolute', left:'50%', top:0, bottom:0,
-                          width:'1px', background:'rgba(34,211,238,0.3)'}}/>
-                        {/* Warn lines */}
-                        {[-WARN, WARN].map(w => (
-                          <div key={w} style={{position:'absolute',
-                            left: (0.5 + w / maxAbs / 2 * 100).toFixed(1) + '%',
-                            top:0, bottom:0, width:'1px', background:'rgba(249,115,22,0.35)'}}/>
-                        ))}
-                        {/* Bar */}
-                        <div style={{
-                          position:'absolute',
-                          left: d < 0 ? ((0.5 - pct / 2) * 100).toFixed(1) + '%' : '50%',
-                          width: (pct * 50).toFixed(1) + '%',
-                          top:'2px', bottom:'2px',
-                          background: dCol + 'cc', borderRadius:'2px'
-                        }}/>
-                      </div>
-                      <div style={{width:'90px', fontSize:'0.72rem', fontFamily:'monospace', color:dCol}}>
-                        {d >= 0 ? '+' : ''}{d.toFixed(5)}
-                      </div>
+          {/* 3 target anchor cards */}
+          <div style={{display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'0.55rem', marginBottom:'0.85rem'}}>
+            {targets.map((c, ti) => {
+              if (!c) return null;
+              const d = c.drift || 0;
+              const dCol = Math.abs(d) > ALERT ? '#ef4444' : Math.abs(d) > WARN ? '#f97316' : '#22c55e';
+              const maxAbs = Math.max(ALERT * 1.5, Math.abs(d));
+              const barPct = Math.min(50, Math.abs(d) / maxAbs * 50);
+              return (
+                <div key={ti} style={{background:'rgba(0,0,0,0.5)', border:`1.5px solid ${dCol}44`,
+                  borderRadius:'0.5rem', padding:'0.7rem 0.85rem'}}>
+                  {/* Title row */}
+                  <div style={{display:'flex', alignItems:'baseline', gap:'0.4rem', marginBottom:'0.45rem'}}>
+                    <span style={{fontSize:'1.15rem', fontWeight:900, color:'#f0e8ff', fontVariantNumeric:'tabular-nums'}}>
+                      m/z {Math.round(c.ref_mz)}
+                    </span>
+                    <span style={{fontSize:'0.68rem', color:'#64748b'}}>({c.ref_mz?.toFixed(3)})</span>
+                  </div>
+                  {/* Metrics */}
+                  {[
+                    {lbl:'Ref 1/K₀',   val: c.ref_k0?.toFixed(6),  col:'#22d3ee'},
+                    {lbl:'Meas 1/K₀',  val: c.meas_k0?.toFixed(6) || '—', col:'#f0e8ff'},
+                    {lbl:'Pre-cal 1/K₀', val: c.prev_k0?.toFixed(6) || '—', col:'#475569'},
+                    {lbl:'Intensity',   val: c.intensity != null ? c.intensity.toLocaleString() : '—', col:'#64748b'},
+                  ].map(m => (
+                    <div key={m.lbl} style={{display:'flex', justifyContent:'space-between',
+                      fontSize:'0.72rem', marginBottom:'0.15rem'}}>
+                      <span style={{color:'#64748b'}}>{m.lbl}</span>
+                      <span style={{fontFamily:'monospace', color:m.col}}>{m.val}</span>
                     </div>
-                  );
-                })}
-                <div style={{fontSize:'0.68rem', color:'#475569', marginTop:'0.3rem', textAlign:'center'}}>
-                  ± threshold lines: orange = 0.025 Vs/cm² (warn), red = 0.050 Vs/cm² (alert)
+                  ))}
+                  {/* Drift value */}
+                  <div style={{marginTop:'0.45rem', paddingTop:'0.4rem', borderTop:'1px solid rgba(255,255,255,0.06)'}}>
+                    <div style={{display:'flex', justifyContent:'space-between', marginBottom:'0.3rem'}}>
+                      <span style={{fontSize:'0.72rem', color:'#94a3b8'}}>Δ (meas − ref)</span>
+                      <span style={{fontFamily:'monospace', fontWeight:700, fontSize:'0.82rem', color:dCol}}>
+                        {d >= 0 ? '+' : ''}{d.toFixed(6)}
+                      </span>
+                    </div>
+                    {/* Drift bar */}
+                    <div style={{height:'10px', background:'rgba(255,255,255,0.05)', borderRadius:'2px', position:'relative'}}>
+                      <div style={{position:'absolute', left:'50%', top:0, bottom:0, width:'1px', background:'rgba(34,211,238,0.4)'}}/>
+                      <div style={{position:'absolute',
+                        left: d < 0 ? (50 - barPct).toFixed(1) + '%' : '50%',
+                        width: barPct.toFixed(1) + '%',
+                        top:'1px', bottom:'1px',
+                        background: dCol + 'cc', borderRadius:'2px'}}/>
+                    </div>
+                    <div style={{display:'flex', justifyContent:'space-between', fontSize:'0.67rem', color:'#475569', marginTop:'0.2rem'}}>
+                      <span>{c.pct_dev != null ? c.pct_dev.toFixed(4) + ' %' : ''}</span>
+                      <span style={{color: dCol, fontWeight:600}}>
+                        {Math.abs(d) > ALERT ? '⚠ ALERT' : Math.abs(d) > WARN ? '⚑ WARN' : '✓ PASS'}
+                      </span>
+                    </div>
+                  </div>
                 </div>
+              );
+            })}
+          </div>
+
+          {/* Other compounds (collapsed by default) */}
+          {otherCpds.length > 0 && (
+            <div style={{marginBottom:'0.75rem'}}>
+              <button onClick={() => setShowAll(v => !v)}
+                style={{background:'none', border:'none', color:'#64748b', cursor:'pointer',
+                  fontSize:'0.73rem', padding:'0.2rem 0', fontWeight:600}}>
+                {showAll ? '▾' : '▸'} {otherCpds.length} other calibrant {otherCpds.length === 1 ? 'compound' : 'compounds'} in TDF
+              </button>
+              {showAll && (
+                <div style={{overflowX:'auto', marginTop:'0.4rem'}}>
+                  <table style={{width:'100%', borderCollapse:'collapse', fontSize:'0.76rem'}}>
+                    <thead>
+                      <tr style={{borderBottom:'1px solid rgba(255,255,255,0.07)'}}>
+                        {['Compound','Ref m/z','Ref 1/K₀','Meas 1/K₀','Δ','% Dev'].map(h => (
+                          <th key={h} style={{padding:'0.3rem 0.5rem', textAlign:'left',
+                            color:'#64748b', fontWeight:600, fontSize:'0.7rem', whiteSpace:'nowrap'}}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {otherCpds.map((c, i) => {
+                        const d = c.drift || 0;
+                        const dCol = Math.abs(d) > ALERT ? '#ef4444' : Math.abs(d) > WARN ? '#f97316' : '#4ade80';
+                        return (
+                          <tr key={i} style={{borderBottom:'1px solid rgba(255,255,255,0.03)'}}>
+                            <td style={{padding:'0.3rem 0.5rem', color:'#94a3b8', fontFamily:'monospace', fontSize:'0.7rem'}}>{c.compound}</td>
+                            <td style={{padding:'0.3rem 0.5rem', color:'#64748b'}}>{c.ref_mz?.toFixed(3) ?? '—'}</td>
+                            <td style={{padding:'0.3rem 0.5rem', color:'#22d3ee', fontFamily:'monospace'}}>{c.ref_k0?.toFixed(6)}</td>
+                            <td style={{padding:'0.3rem 0.5rem', color:'#e2e8f0', fontFamily:'monospace'}}>{c.meas_k0?.toFixed(6) ?? '—'}</td>
+                            <td style={{padding:'0.3rem 0.5rem', fontFamily:'monospace', fontWeight:600, color:dCol}}>
+                              {d >= 0 ? '+' : ''}{d.toFixed(6)}
+                            </td>
+                            <td style={{padding:'0.3rem 0.5rem', color:dCol, fontSize:'0.7rem'}}>
+                              {c.pct_dev?.toFixed(4) ?? '—'} %
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Footer note */}
+          <div style={{fontSize:'0.7rem', color:'#475569', lineHeight:1.5}}>
+            Δ = MobilitiesCorrectedCalibration − ReferencePeakMobilities (Bruker TDF) ·{' '}
+            <span style={{color:'#f97316'}}>warn ≥ 0.025</span> ·{' '}
+            <span style={{color:'#ef4444'}}>alert ≥ 0.050 Vs/cm²</span> ·{' '}
+            independent of DIA-NN — reflects hardware calibration state at acquisition time
+          </div>
+        </div>
+      );
+    }
+
+    // ── Method Config Panel ──────────────────────────────────────────────────────
+    // Reads microTOFQImpacTemAcquisition.method from the .d/.m folder.
+    // Shows IMS calibration, TOF calibration, TOF hardware, source, and general info.
+    function MobCalMethod({ runId }) {
+      const [data, setData]     = React.useState(null);
+      const [loading, setLoading] = React.useState(false);
+      const [error, setError]   = React.useState('');
+
+      React.useEffect(() => {
+        if (!runId) { setData(null); setError(''); return; }
+        setLoading(true); setError(''); setData(null);
+        fetch(API + `/api/runs/${runId}/method-config`)
+          .then(r => r.json())
+          .then(d => { if (d.error) setError(d.message || d.error); else setData(d); })
+          .catch(e => setError('Network error: ' + e.message))
+          .finally(() => setLoading(false));
+      }, [runId]);
+
+      if (!runId) return (
+        <div style={{padding:'2rem', textAlign:'center', color:'#64748b', fontSize:'0.85rem'}}>
+          Select a timsTOF run above to read its acquisition method
+        </div>
+      );
+      if (loading) return <div style={{padding:'2rem', textAlign:'center', color:'#22d3ee'}}>Reading .m method file…</div>;
+      if (error) return (
+        <div style={{padding:'0.75rem', background:'rgba(239,68,68,0.08)', border:'1px solid rgba(239,68,68,0.3)',
+          borderRadius:'0.4rem', color:'#fca5a5', fontSize:'0.78rem'}}>{error}</div>
+      );
+      if (!data) return null;
+
+      const { general: g, ims_calib: ims, tof_calib: tof, tof_hw: hw, source: src, acquisition: acq } = data;
+
+      const fmtDate = iso => {
+        if (!iso) return '—';
+        try { return new Date(iso).toLocaleString([], {month:'short',day:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'}); }
+        catch { return iso; }
+      };
+      const fmtF = (v, dp=4) => v != null ? Number(v).toFixed(dp) : '—';
+      const scoreCol = s => s == null ? '#64748b' : s >= 0.99 ? '#22c55e' : s >= 0.95 ? '#f97316' : '#ef4444';
+
+      // Reusable row renderer
+      const KV = ({label, val, col, mono=false}) => (
+        <div style={{display:'flex', justifyContent:'space-between', alignItems:'baseline',
+          padding:'0.25rem 0', borderBottom:'1px solid rgba(255,255,255,0.04)', gap:'0.5rem'}}>
+          <span style={{fontSize:'0.72rem', color:'#64748b', flexShrink:0}}>{label}</span>
+          <span style={{fontSize:'0.78rem', color: col || '#e2e8f0', fontFamily: mono ? 'monospace' : 'inherit',
+            textAlign:'right', wordBreak:'break-all'}}>{val ?? '—'}</span>
+        </div>
+      );
+
+      const Section = ({title, col, children}) => (
+        <div style={{background:'rgba(0,0,0,0.45)', border:`1px solid ${col}22`,
+          borderRadius:'0.5rem', padding:'0.65rem 0.8rem'}}>
+          <div style={{fontSize:'0.72rem', fontWeight:700, color: col, letterSpacing:'0.06em',
+            textTransform:'uppercase', marginBottom:'0.45rem'}}>{title}</div>
+          {children}
+        </div>
+      );
+
+      return (
+        <div>
+          {/* General header */}
+          <div style={{display:'flex', gap:'0.5rem', flexWrap:'wrap', marginBottom:'0.85rem', alignItems:'stretch'}}>
+            {[
+              {label:'Model',       val: g.model,           col:'#f0e8ff'},
+              {label:'Host',        val: g.hostname,         col:'#94a3b8'},
+              {label:'Author',      val: g.author,           col:'#94a3b8'},
+              {label:'timsControl', val: g.timstof_version,  col:'#22d3ee'},
+              {label:'Created',     val: fmtDate(g.created), col:'#64748b'},
+            ].map(s => (
+              <div key={s.label} style={{background:'rgba(0,0,0,0.45)', border:'1px solid rgba(255,255,255,0.06)',
+                borderRadius:'0.4rem', padding:'0.4rem 0.65rem', textAlign:'center', flex:'1 1 100px'}}>
+                <div style={{fontSize:'0.88rem', fontWeight:700, color:s.col, lineHeight:1.2}}>{s.val || '—'}</div>
+                <div style={{fontSize:'0.65rem', color:'#475569', marginTop:'0.1rem'}}>{s.label}</div>
               </div>
-            );
-          })()}
+            ))}
+          </div>
+
+          <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))', gap:'0.6rem'}}>
+
+            {/* IMS Calibration */}
+            <Section title="IMS Calibration" col="#22d3ee">
+              <KV label="Date"              val={fmtDate(ims.date)} />
+              <KV label="Reference masses"  val={ims.reference_mass_list} col="#ffe600" />
+              <KV label="Score"             val={fmtF(ims.score, 6)}  col={scoreCol(ims.score)} mono />
+              <KV label="Std dev (1/K₀)"   val={fmtF(ims.std_dev, 6)} col={ims.std_dev != null && ims.std_dev < 0.001 ? '#22c55e' : '#f97316'} mono />
+              <KV label="Mobility range"    val={ims.mobility_start != null ? `${fmtF(ims.mobility_start,3)} – ${fmtF(ims.mobility_end,3)} Vs/cm²` : null} />
+              <KV label="Ramp velocity"     val={ims.ramp_velocity != null ? fmtF(ims.ramp_velocity,6) + ' Vs/cm²/ms' : null} mono />
+              <KV label="Funnel pressure"   val={ims.funnel_pressure != null ? fmtF(ims.funnel_pressure,4) + ' mbar' : null} col="#a5b4fc" />
+              <KV label="Pressure comp"     val={ims.pressure_compensation ? `On (factor ${ims.pressure_comp_factor})` : 'Off'} />
+              <KV label="Transit time"      val={ims.transit_time != null ? fmtF(ims.transit_time,2) + ' ms' : null} />
+              <KV label="Ramp cycles"       val={ims.n_cycles} />
+            </Section>
+
+            {/* TOF (mass) calibration */}
+            <Section title="TOF Mass Calibration" col="#DAAA00">
+              <KV label="Date"             val={fmtDate(tof.date)} />
+              <KV label="Reference masses" val={tof.reference_mass_list} col="#ffe600" />
+              <KV label="Score"            val={fmtF(tof.score, 6)} col={scoreCol(tof.score)} mono />
+              <KV label="Std dev (mDa)"    val={fmtF(tof.std_dev, 6)} col={tof.std_dev != null && tof.std_dev < 0.001 ? '#22c55e' : '#f97316'} mono />
+              <KV label="Std dev (ppm)"    val={tof.std_dev_ppm != null ? fmtF(tof.std_dev_ppm, 4) + ' ppm' : null} mono />
+              <KV label="Scan range"       val={tof.scan_begin != null ? `${fmtF(tof.scan_begin,1)} – ${fmtF(tof.scan_end,1)} m/z` : null} />
+              <KV label="Tof2 C0"          val={fmtF(tof.tof2_c0, 4)} mono />
+              <KV label="Tof2 C1"          val={fmtF(tof.tof2_c1, 2)} mono />
+              <KV label="Tof2 std dev"     val={fmtF(tof.tof2_std_dev, 6)} mono />
+            </Section>
+
+            {/* TOF hardware */}
+            <Section title="TOF Hardware" col="#a855f7">
+              <KV label="Flight tube"    val={hw.flight_tube_v != null ? hw.flight_tube_v + ' V' : null} mono />
+              <KV label="Detector"       val={hw.detector_v != null ? hw.detector_v + ' V' : null} mono />
+              <KV label="Pulser lens"    val={hw.pulser_lens_v != null ? fmtF(hw.pulser_lens_v, 2) + ' V' : null} mono />
+              <KV label="Reflector"      val={hw.reflector_v != null ? hw.reflector_v + ' V' : null} mono />
+              <KV label="Corrector fill" val={hw.corrector_fill != null ? fmtF(hw.corrector_fill, 2) + ' V' : null} mono />
+              <KV label="Corrector ext"  val={hw.corrector_extract != null ? fmtF(hw.corrector_extract, 2) + ' V' : null} mono />
+              <KV label="Temp sensor 1"  val={hw.temp_1 != null ? fmtF(hw.temp_1, 3) + ' °C' : null} col="#f97316" />
+              <KV label="Temp sensor 2"  val={hw.temp_2 != null ? fmtF(hw.temp_2, 3) + ' °C' : null} col="#f97316" />
+              <KV label="Temp comp"      val={hw.temp_compensation ? 'On' : 'Off'} />
+            </Section>
+
+            {/* Source */}
+            <Section title="Source" col="#f97316">
+              <KV label="Capillary exit"   val={src.capillary_exit_v != null ? src.capillary_exit_v + ' V' : null} mono />
+              <KV label="Capillary V"      val={src.capillary_v != null ? src.capillary_v + ' V' : null} mono />
+              <KV label="End plate offset" val={src.end_plate_offset != null ? src.end_plate_offset + ' V' : null} mono />
+              <KV label="Dry gas flow"     val={src.dry_gas_flow != null ? fmtF(src.dry_gas_flow, 1) + ' L/min' : null} />
+              <KV label="Dry gas temp"     val={src.dry_gas_temp != null ? fmtF(src.dry_gas_temp, 0) + ' °C' : null} />
+              <KV label="Nebulizer"        val={src.nebulizer_bar != null ? fmtF(src.nebulizer_bar, 2) + ' bar' : null} />
+            </Section>
+
+            {/* Acquisition */}
+            <Section title="Acquisition / PASEF" col="#e879f9">
+              <KV label="PASEF m/z width"   val={acq.pasef_mz_width != null ? acq.pasef_mz_width + ' Th' : null} />
+              <KV label="PASEF m/z overlap" val={acq.pasef_mz_overlap != null ? acq.pasef_mz_overlap + ' Th' : null} />
+              <KV label="TOF resolution"    val={acq.tof_resolution != null ? Number(acq.tof_resolution).toLocaleString() : null} />
+              <KV label="Collision gas"     val={acq.collision_gas != null ? acq.collision_gas + ' %' : null} />
+            </Section>
+
+          </div>
+
+          <div style={{marginTop:'0.6rem', fontSize:'0.68rem', color:'#334155'}}>
+            {data.method_file}
+          </div>
         </div>
       );
     }
@@ -557,6 +1037,8 @@
 
       const VIEWS = [
         ['calibrant',  '★ Calibrant QC'],
+        ['massdrift',  '◬ Mass Drift'],
+        ['method',    '⚙ Method'],
         ['scatter',   '◎ Obs vs Pred'],
         ['histogram', '▦ Shift Dist'],
         ['trend',     '∿ Run History'],
@@ -698,6 +1180,26 @@
           {view === 'calibrant' && (
             <div className="card" style={{padding:'0.75rem', background:'rgba(0,0,0,0.5)'}}>
               <MobCalCalibrant runId={selectedRunId}/>
+            </div>
+          )}
+
+          {/* Mass Drift — calibration line from 3 anchors, all-ion residual scatter */}
+          {view === 'massdrift' && (
+            <div className="card" style={{padding:'0.75rem', background:'rgba(0,0,0,0.5)'}}>
+              <div style={{fontSize:'0.76rem', color:'#64748b', marginBottom:'0.5rem'}}>
+                Δ(1/K₀) residuals vs m/z · linear fit through m/z 622 · 922 · 1221 CCS compendium anchors ·{' '}
+                <span style={{color:'#22d3ee'}}>cyan = Δ=0</span> ·{' '}
+                <span style={{color:'#f97316'}}>orange = ±0.025 warn</span> ·{' '}
+                labelled circles = calibrant ions
+              </div>
+              <MobCalMassDrift runId={selectedRunId}/>
+            </div>
+          )}
+
+          {/* Method config */}
+          {view === 'method' && (
+            <div className="card" style={{padding:'0.75rem', background:'rgba(0,0,0,0.5)'}}>
+              <MobCalMethod runId={selectedRunId}/>
             </div>
           )}
 

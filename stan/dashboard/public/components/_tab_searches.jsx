@@ -66,6 +66,152 @@
       );
     }
 
+    // ── Run comparison button (per-row) ──────────────────────────────────────
+    function RunCompareBtn({ runId, onDone }) {
+      const [state, setState] = React.useState('idle');  // idle | running | ok | err
+
+      const run = async () => {
+        setState('running');
+        try {
+          const r = await fetch(`/api/runs/${runId}/compare`, { method: 'POST' });
+          const d = await r.json();
+          setState(d.ok ? 'ok' : 'err');
+          if (d.ok && onDone) setTimeout(onDone, 3000);
+        } catch {
+          setState('err');
+        }
+      };
+
+      if (state === 'running') return React.createElement('span',{style:{color:'#60a5fa',fontSize:'0.7rem'}},'↻');
+      if (state === 'ok')      return React.createElement('span',{style:{color:'#4ade80',fontSize:'0.7rem'}},'✓');
+      if (state === 'err')     return React.createElement('span',{style:{color:'#ef4444',fontSize:'0.7rem'}},'✗');
+      return React.createElement('button',{
+        onClick: run,
+        title: 'Re-run MSFragger, X!Tandem, MaxQuant comparisons for this run',
+        style:{fontSize:'0.68rem',padding:'1px 5px',cursor:'pointer',borderRadius:3,
+          background:'var(--surface)',color:'var(--muted)',border:'1px solid var(--border)'},
+      },'⚡');
+    }
+
+    // ── Search parameter modal (for missing mods / enzyme / FASTA config) ────
+    function SearchParamModal({ onClose }) {
+      const [cfg, setCfg] = React.useState(null);
+      const [saving, setSaving] = React.useState(false);
+      const [saved, setSaved] = React.useState(false);
+
+      React.useEffect(() => {
+        fetch('/api/search-params').then(r => r.ok ? r.json() : null).then(d => {
+          if (d) setCfg(d);
+          else setCfg({
+            enzyme: 'Trypsin/P', missed_cleavages: 2,
+            var_mods: 'Oxidation (M); Acetyl (Protein N-term)',
+            fixed_mods: 'Carbamidomethyl (C)',
+            min_pep_len: 7, max_pep_len: 30,
+            min_charge: 2, max_charge: 4,
+            ms1_tol_ppm: 20, ms2_tol_ppm: 20,
+            fasta_path: '', spectral_lib: '',
+          });
+        }).catch(() => setCfg({
+          enzyme: 'Trypsin/P', missed_cleavages: 2,
+          var_mods: 'Oxidation (M); Acetyl (Protein N-term)',
+          fixed_mods: 'Carbamidomethyl (C)',
+          min_pep_len: 7, max_pep_len: 30,
+          min_charge: 2, max_charge: 4,
+          ms1_tol_ppm: 20, ms2_tol_ppm: 20,
+          fasta_path: '', spectral_lib: '',
+        }));
+      }, []);
+
+      const save = async () => {
+        setSaving(true);
+        try {
+          const r = await fetch('/api/search-params', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(cfg),
+          });
+          if (r.ok) { setSaved(true); setTimeout(onClose, 800); }
+        } finally { setSaving(false); }
+      };
+
+      const inp = (field, label, type='text', opts={}) => React.createElement('label',{
+        style:{display:'flex',flexDirection:'column',gap:3,fontSize:'0.8rem',color:'var(--muted)'}
+      },
+        label,
+        React.createElement('input',{
+          type, value: cfg?.[field] ?? '',
+          onChange: e => setCfg(c => ({...c, [field]: type==='number' ? +e.target.value : e.target.value})),
+          style:{background:'var(--surface)',color:'var(--text)',border:'1px solid var(--border)',
+                 borderRadius:4,padding:'4px 8px',fontSize:'0.82rem',...(opts.style||{})},
+          ...opts,
+        }),
+      );
+
+      const overlayStyle = {
+        position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',zIndex:9000,
+        display:'flex',alignItems:'center',justifyContent:'center',
+      };
+      const boxStyle = {
+        background:'var(--surface)',border:'1.5px solid var(--border)',borderRadius:10,
+        padding:'1.5rem',width:560,maxWidth:'95vw',maxHeight:'85vh',overflowY:'auto',
+      };
+
+      return React.createElement('div',{style:overlayStyle,onClick:e=>{if(e.target===e.currentTarget)onClose();}},
+        React.createElement('div',{style:boxStyle},
+          React.createElement('div',{style:{display:'flex',alignItems:'center',marginBottom:'1rem'}},
+            React.createElement('span',{style:{fontWeight:700,fontSize:'1rem',color:'var(--accent)',flex:1}},
+              'Search Parameters'),
+            React.createElement('span',{style:{fontSize:'0.75rem',color:'var(--muted)',marginRight:12}},
+              'Used by all comparison engines when not overridden by Config tab'),
+            React.createElement('button',{onClick:onClose,
+              style:{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:'1.2rem'}},
+              '×'),
+          ),
+          !cfg ? React.createElement('div',{style:{color:'var(--muted)'}},'Loading…')
+          : React.createElement('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0.9rem'}},
+            React.createElement('div',{style:{gridColumn:'1/-1'}},
+              React.createElement('div',{style:{fontSize:'0.72rem',color:'var(--muted)',background:'rgba(218,170,0,0.06)',
+                border:'1px solid rgba(218,170,0,0.2)',borderRadius:6,padding:'6px 10px',marginBottom:8}},
+                '⚙ These defaults apply when the Config tab has no instrument-specific FASTA / library assigned. ' +
+                'MSFragger, X!Tandem, and MaxQuant use enzyme + mods from here. ' +
+                'DIA-NN and Sage use community assets unless overridden per instrument.'),
+            ),
+            inp('enzyme', 'Enzyme'),
+            inp('missed_cleavages', 'Missed cleavages', 'number', {min:0,max:4}),
+            React.createElement('div',{style:{gridColumn:'1/-1'}},
+              inp('var_mods', 'Variable modifications', 'text',
+                {style:{width:'100%'}, placeholder:'Oxidation (M); Acetyl (Protein N-term)'})),
+            React.createElement('div',{style:{gridColumn:'1/-1'}},
+              inp('fixed_mods', 'Fixed modifications', 'text',
+                {style:{width:'100%'}, placeholder:'Carbamidomethyl (C)'})),
+            inp('min_pep_len', 'Min peptide length', 'number', {min:4,max:15}),
+            inp('max_pep_len', 'Max peptide length', 'number', {min:15,max:60}),
+            inp('min_charge', 'Min charge', 'number', {min:1,max:3}),
+            inp('max_charge', 'Max charge', 'number', {min:2,max:6}),
+            inp('ms1_tol_ppm', 'MS1 tolerance (ppm)', 'number', {min:1,max:50}),
+            inp('ms2_tol_ppm', 'MS2 tolerance (ppm)', 'number', {min:1,max:50}),
+            React.createElement('div',{style:{gridColumn:'1/-1'}},
+              inp('fasta_path', 'Default FASTA path (optional — overrides community FASTA)',
+                'text', {style:{width:'100%'}, placeholder:'C:/path/to/human.fasta'})),
+            React.createElement('div',{style:{gridColumn:'1/-1'}},
+              inp('spectral_lib', 'Spectral library path (DIA-NN --lib, optional)',
+                'text', {style:{width:'100%'}, placeholder:'C:/path/to/library.parquet'})),
+            React.createElement('div',{style:{gridColumn:'1/-1',display:'flex',gap:8,justifyContent:'flex-end',marginTop:4}},
+              React.createElement('button',{onClick:onClose,
+                style:{padding:'6px 16px',borderRadius:5,cursor:'pointer',fontSize:'0.82rem',
+                  background:'var(--surface)',color:'var(--muted)',border:'1px solid var(--border)'}},
+                'Cancel'),
+              React.createElement('button',{onClick:save,disabled:saving||saved,
+                style:{padding:'6px 20px',borderRadius:5,cursor:'pointer',fontSize:'0.82rem',fontWeight:700,
+                  background:saved?'#4ade80':saving?'var(--surface)':'var(--accent)',
+                  color:saved||saving?'var(--muted)':'var(--bg)',
+                  border:`1px solid ${saved?'#4ade80':'var(--accent)'}`}},
+                saved ? '✓ Saved' : saving ? 'Saving…' : 'Save'),
+            ),
+          ),
+        ),
+      );
+    }
+
     // ── Unsearched panel ─────────────────────────────────────────────────────
     function UnsearchedPanel({ onSearched }) {
       const [data, setData]   = React.useState(null);
@@ -260,6 +406,7 @@
       const [searches, setSearches] = React.useState(null);
       const [loading, setLoading]   = React.useState(true);
       const [localAnnotations, setLocalAnnotations] = React.useState({});  // runId → {sample_type, workflow}
+      const [showParamModal, setShowParamModal] = React.useState(false);
 
       const fetchData = React.useCallback(() => {
         fetch('/api/searches?limit=2000')
@@ -420,6 +567,9 @@
 
       return React.createElement('div',null,
 
+        // ── Search parameter modal ─────────────────────────────────────────
+        showParamModal && React.createElement(SearchParamModal,{onClose:()=>setShowParamModal(false)}),
+
         // ── Unsearched runs panel ──────────────────────────────────────────
         React.createElement(UnsearchedPanel,{onSearched:fetchData}),
 
@@ -440,6 +590,11 @@
             style:{padding:'0.3rem 0.7rem',borderRadius:'0.4rem',fontSize:'0.8rem',cursor:'pointer',
               background:'var(--surface)',color:'var(--muted)',border:'1px solid var(--border)'}},
             '↻'),
+          React.createElement('button',{onClick:()=>setShowParamModal(true),
+            title:'Configure mods, enzyme, FASTA, and library for comparison searches',
+            style:{padding:'0.3rem 0.7rem',borderRadius:'0.4rem',fontSize:'0.8rem',cursor:'pointer',
+              background:'var(--surface)',color:'var(--accent)',border:'1px solid var(--accent)'}},
+            '⚙ Search Params'),
           React.createElement('span',{style:{marginLeft:'auto',fontSize:'0.75rem',color:'var(--muted)'}},
             done>0 && React.createElement('span',{style:{color:'#34d399',marginRight:'0.5rem'}},done+' comparisons done'),
             inFlight>0 && React.createElement('span',{style:{color:'#60a5fa'}},
@@ -492,6 +647,11 @@
                     'MSFragger-DDA',React.createElement('br'),React.createElement('span',{style:{fontSize:'0.65rem',fontWeight:400}},'PSMs · pep · pg')),
                   React.createElement('th',{style:{textAlign:'right',color:'#e879f9',paddingRight:'0.75rem',whiteSpace:'nowrap'}},
                     'X!Tandem',React.createElement('br'),React.createElement('span',{style:{fontSize:'0.65rem',fontWeight:400}},'PSMs · pep · pg')),
+                  React.createElement('th',{style:{textAlign:'right',color:'#4ade80',paddingRight:'0.75rem',whiteSpace:'nowrap'}},
+                    'MaxQuant',React.createElement('br'),React.createElement('span',{style:{fontSize:'0.65rem',fontWeight:400}},'PSMs · pep · pg')),
+                  React.createElement('th',{style:{textAlign:'right',color:'#f0abfc',paddingRight:'0.75rem',whiteSpace:'nowrap'}},
+                    'Comet',React.createElement('br'),React.createElement('span',{style:{fontSize:'0.65rem',fontWeight:400}},'PSMs · pep · pg')),
+                  React.createElement('th',{style:{color:'var(--muted)',paddingRight:'0.5rem',whiteSpace:'nowrap'}},'Compare'),
                   makeTh('gate_result','Gate','QC gate',sortCol,setSortCol,sortDir,setSortDir),
                   makeTh('run_date','Date','Acquisition date',sortCol,setSortCol,sortDir,setSortDir),
                 ),
@@ -541,6 +701,10 @@
                       ) : '—'),
                     React.createElement(CompCell,{entry:comp.msfragger_dda,metric:'psms',color:'#fb923c'}),
                     React.createElement(CompCell,{entry:comp.xtandem,metric:'psms',color:'#e879f9'}),
+                    React.createElement(CompCell,{entry:comp.maxquant,metric:'psms',color:'#4ade80'}),
+                    React.createElement(CompCell,{entry:comp.comet,metric:'psms',color:'#f0abfc'}),
+                    React.createElement('td',{style:{paddingRight:'0.5rem'}},
+                      React.createElement(RunCompareBtn,{runId:s.id,onDone:fetchData})),
                     React.createElement('td',null,React.createElement(GateBadge,{result:s.gate_result})),
                     React.createElement('td',{style:{color:'var(--muted)',fontSize:'0.72rem',whiteSpace:'nowrap'}},
                       new Date(s.run_date).toLocaleString([],{month:'short',day:'numeric',year:'2-digit',hour:'2-digit',minute:'2-digit'})),

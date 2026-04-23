@@ -159,6 +159,73 @@ def get_community_diann_params(vendor: str, cache_dir: str | None = None) -> dic
     return params
 
 
+# ── DIA-NN parameters for immunopeptidomics (diaPASEF, non-specific) ────────
+# Used when a run is identified as MHC-I or MHC-II and acquired in DIA mode.
+# IMPORTANT: DIA-NN immunopeptidomics requires an MHC-specific spectral library
+# (non-tryptic, correct length range).  Running with a tryptic HeLa library
+# will produce tryptic-contamination IDs, not real ligandome data.
+# The community HeLa library is used here as a placeholder until ZIGGY ships
+# or downloads an MHC-specific library.
+
+COMMUNITY_DIANN_MHC1_PARAMS_FROZEN: dict = {
+    # lib and fasta set dynamically
+    "qvalue": 0.01,
+    "min-pep-len": 8,
+    "max-pep-len": 12,
+    "missed-cleavages": 0,
+    "min-pr-charge": 1,
+    "max-pr-charge": 3,
+    "cut": "*",            # Non-specific — proteasomal cleavage, not trypsin
+    "no-prot-inf": "",     # No protein inference for non-tryptic
+    "smart-profiling": "", # Better sensitivity on short peptides
+}
+
+COMMUNITY_DIANN_MHC2_PARAMS_FROZEN: dict = {
+    # lib and fasta set dynamically
+    "qvalue": 0.01,
+    "min-pep-len": 13,
+    "max-pep-len": 25,
+    "missed-cleavages": 0,
+    "min-pr-charge": 1,
+    "max-pr-charge": 4,
+    "cut": "*",
+    "no-prot-inf": "",
+    "smart-profiling": "",
+}
+
+
+def get_community_diann_params_mhc(
+    vendor: str,
+    mhc_class: int = 1,
+    cache_dir: str | None = None,
+) -> dict:
+    """Get DIA-NN parameters for immunopeptidomics DIA search.
+
+    NOTE: For best results use an MHC-specific spectral library.
+    The community HeLa tryptic library is used as a fallback — results will
+    be biased toward tryptic sequences.  Download or build an MHC speclib
+    (e.g. from ImmunoPeptiDB or in-house prediction) and set lib_path in
+    instruments.yml to override.
+
+    Args:
+        vendor:     "bruker" or "thermo"
+        mhc_class:  1 = MHC-I (8–12 aa), 2 = MHC-II (13–25 aa)
+        cache_dir:  Override for community assets cache dir
+    """
+    cache = cache_dir or COMMUNITY_CACHE_DIR
+    base = COMMUNITY_DIANN_MHC1_PARAMS_FROZEN if mhc_class == 1 else COMMUNITY_DIANN_MHC2_PARAMS_FROZEN
+    params = dict(base)
+
+    speclib_info = COMMUNITY_SPECLIB.get(vendor)
+    fasta_filename = COMMUNITY_FASTA_HF_PATH.split("/")[-1]
+    params["fasta"] = f"{cache}/{fasta_filename}"
+    if speclib_info:
+        speclib_filename = speclib_info["hf_path"].split("/")[-1]
+        params["lib"] = f"{cache}/{speclib_filename}"
+
+    return params
+
+
 # ── DIA-NN parameters for Bruker ddaPASEF (DDA mode via fasta-search) ──
 # ddaPASEF files have no DIA windows — DIA-NN's --lib mode bails immediately.
 # --fasta-search makes DIA-NN auto-detect DDA vs DIA from the Precursors table
