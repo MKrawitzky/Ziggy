@@ -4482,6 +4482,176 @@ async def api_hla_atlas_standards(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Monoisotopic residue masses for theoretical m/z / 1/K₀ prediction ──────
+_AA_MASS: dict[str, float] = {
+    "G":57.02146,"A":71.03711,"V":99.06841,"L":113.08406,"I":113.08406,
+    "P":97.05276,"F":147.06841,"W":186.07931,"M":131.04049,"S":87.03203,
+    "T":101.04768,"C":103.00919,"Y":163.06333,"H":137.05891,"D":115.02694,
+    "E":129.04259,"N":114.04293,"Q":128.05858,"K":128.09496,"R":156.10111,
+}
+_WATER = 18.01056
+
+def _seq_mz(seq: str, z: int = 2) -> float:
+    mass = sum(_AA_MASS.get(aa, 111.1) for aa in seq.upper()) + _WATER
+    return (mass + z * 1.00728) / z
+
+def _theoretical_im(mz: float, z: int) -> float:
+    return 0.3 + z * 0.12 + mz * (0.00015 + z * 0.00008)
+
+_DISEASE_VIRAL    = {"HIV","EBV","CMV","SARS","SARS-COV","INFLUENZA","HCV","HBV","DENGUE","HTLV","HSV","VZV"}
+_DISEASE_CANCER   = {"MART","NY-ESO","WT1","PRAME","HER2","CAIX","MUC1","PSA","PSMA","AFP","P53","GP100","CEA",
+                     "SURVIVIN","TYROSINASE","TERT","TELOMERASE","MAGE","BAGE","GAGE","SSX","CTAG"}
+_DISEASE_AUTO     = {"MBP","GAD65","COLLAGEN","CII","GLIADIN","INSULIN","BERYLLIUM","GAD","MOG"}
+
+def _disease_category(protein: str) -> str:
+    p = protein.upper()
+    if any(v in p for v in _DISEASE_VIRAL):    return "viral"
+    if any(c in p for c in _DISEASE_CANCER):   return "cancer"
+    if any(a in p for a in _DISEASE_AUTO):     return "autoimmune"
+    return "control"
+
+
+@app.get("/api/hla-atlas/browse")
+async def api_hla_atlas_browse() -> dict:
+    """Return full atlas peptide set enriched with disease classification and
+    theoretical ion mobility (1/K₀) for TIMS corridor visualisation."""
+    try:
+        from stan.search.hla_atlas import AtlasManager, _ATLAS_PQ
+        am = AtlasManager()
+        if not am.is_available():
+            return {"available": False, "peptides": []}
+        import polars as _pl
+        df = _pl.read_parquet(str(_ATLAS_PQ))
+        rows = df.to_dicts()
+        # Annotate each row
+        for r in rows:
+            r["disease_category"] = _disease_category(r.get("protein", ""))
+            z_typ = 2 if r.get("mhc_class", 1) == 1 else 2
+            r["mz_z2"]  = round(_seq_mz(r["sequence"], z=z_typ), 3)
+            r["im_z2"]  = round(_theoretical_im(r["mz_z2"], z_typ), 4)
+            r["mz_z1"]  = round(_seq_mz(r["sequence"], z=1), 3)
+            r["im_z1"]  = round(_theoretical_im(r["mz_z1"], 1), 4)
+        # Allele × protein observation matrix
+        matrix: dict[str, dict[str, int]] = {}
+        for r in rows:
+            al = r.get("allele", "unknown")
+            pr = r.get("protein", "unknown")
+            matrix.setdefault(al, {}).setdefault(pr, 0)
+            matrix[al][pr] += r.get("total_obs", 1)
+        # Disease summary
+        from collections import defaultdict
+        disease_summary: dict[str, dict] = defaultdict(lambda: {"n": 0, "proteins": set(), "alleles": set()})
+        for r in rows:
+            dc = r["disease_category"]
+            disease_summary[dc]["n"] += 1
+            disease_summary[dc]["proteins"].add(r.get("protein",""))
+            disease_summary[dc]["alleles"].add(r.get("allele",""))
+        for dc, v in disease_summary.items():
+            v["proteins"] = sorted(v["proteins"])
+            v["alleles"]  = sorted(v["alleles"])
+        return {
+            "available": True,
+            "peptides":  rows,
+            "matrix":    matrix,
+            "disease_summary": dict(disease_summary),
+        }
+    except Exception as e:
+        logger.exception("HLA atlas browse failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/hla-atlas/run-match")
+async def api_hla_atlas_run_match(run_id: str, mhc_class: int = 0) -> dict:
+    """Match a run's detected immunopeptides against the atlas.
+    Returns per-peptide hit/miss + aggregated disease/allele coverage stats."""
+    try:
+        from stan.search.hla_atlas import AtlasManager, _ATLAS_PQ
+        am = AtlasManager()
+        if not am.is_available():
+            return {"available": False, "hits": [], "stats": {}}
+
+        import polars as _pl
+        run  = get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        # Load detected peptide sequences from the run
+        report = _resolve_report_path(run)
+        sage   = _resolve_sage_path(run)
+        detected_seqs: set[str] = set()
+        if report:
+            try:
+                df_r = _pl.scan_parquet(str(report))
+                cols = df_r.columns
+                seq_col = next((c for c in ["Modified.Sequence","Stripped.Sequence","peptide","sequence"] if c in cols), None)
+                if seq_col:
+                    seqs = df_r.select(seq_col).collect()[seq_col].to_list()
+                    for s in seqs:
+                        if s:
+                            bare = _re.sub(r"\(.*?\)|\[.*?\]","",str(s)).strip("_").upper()
+                            detected_seqs.add(bare)
+            except Exception:
+                pass
+        if sage and not detected_seqs:
+            try:
+                df_s = _pl.scan_parquet(str(sage))
+                if "peptide" in df_s.columns:
+                    seqs = df_s.select("peptide").collect()["peptide"].to_list()
+                    for s in seqs:
+                        if s:
+                            detected_seqs.add(_re.sub(r"\(.*?\)|\[.*?\]","",str(s)).strip("_").upper())
+            except Exception:
+                pass
+
+        # Match against atlas
+        atlas_df = _pl.read_parquet(str(_ATLAS_PQ))
+        if mhc_class in (1, 2):
+            atlas_df = atlas_df.filter(_pl.col("mhc_class") == mhc_class)
+
+        atlas_rows = atlas_df.to_dicts()
+        hits, misses = [], []
+        for r in atlas_rows:
+            r["disease_category"] = _disease_category(r.get("protein", ""))
+            seq = r["sequence"].upper()
+            z   = 2 if r.get("mhc_class", 1) == 1 else 2
+            r["mz_z2"] = round(_seq_mz(seq, z), 3)
+            r["im_z2"] = round(_theoretical_im(r["mz_z2"], z), 4)
+            r["detected"] = seq in detected_seqs
+            (hits if r["detected"] else misses).append(r)
+
+        # Per-disease stats
+        from collections import defaultdict
+        disease_stats: dict[str, dict] = defaultdict(lambda: {"n_atlas":0,"n_detected":0,"proteins":set(),"alleles":set()})
+        for r in atlas_rows:
+            dc = r["disease_category"]
+            disease_stats[dc]["n_atlas"] += 1
+            disease_stats[dc]["proteins"].add(r.get("protein",""))
+            disease_stats[dc]["alleles"].add(r.get("allele",""))
+            if r["detected"]:
+                disease_stats[dc]["n_detected"] += 1
+        for dc, v in disease_stats.items():
+            v["proteins"] = sorted(v["proteins"])
+            v["alleles"]  = sorted(v["alleles"])
+            v["pct"] = round(100 * v["n_detected"] / max(v["n_atlas"], 1), 1)
+
+        return {
+            "available":   True,
+            "run_name":    run.get("run_name",""),
+            "n_detected_total": len(detected_seqs),
+            "n_atlas":     len(atlas_rows),
+            "n_hits":      len(hits),
+            "pct_overall": round(100 * len(hits) / max(len(atlas_rows), 1), 1),
+            "hits":        hits,
+            "misses":      misses,
+            "disease_stats": dict(disease_stats),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("HLA atlas run-match failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/runs/{run_id}/hla-coverage")
 async def api_hla_coverage(run_id: str, mhc_class: int = 0) -> dict:
     """Match peptides from this run against the HLA atlas, return coverage stats."""

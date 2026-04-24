@@ -31,3 +31,11 @@ tools/casanovo_env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Large binary / generated data — do not commit
+*.speclib
+*.predicted.speclib
+resources/hla_atlas/hla_peptides.parquet
+
+# Sage binary — install separately (see README / tools/sage/README.md)
+tools/sage/
