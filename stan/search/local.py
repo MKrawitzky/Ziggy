@@ -119,49 +119,6 @@ def _build_local_sage_params(
     }
 
 
-def _build_sage_immuno_params(fasta_path: str, mhc_class: int = 1) -> dict:
-    """Build Sage JSON config for immunopeptidomics (non-specific cleavage).
-
-    MHC-I:  8–12 aa, z = 1–3, non-specific enzyme
-    MHC-II: 13–25 aa, z = 1–4, non-specific enzyme
-
-    Sage represents non-specific cleavage as an empty cleave_at string with
-    missed_cleavages = 0 and semi_enzymatic = false.  This allows every
-    contiguous sub-sequence of the FASTA to be a candidate precursor — the
-    correct model for proteasomally-generated HLA peptides.
-    """
-    if mhc_class == 2:
-        min_len, max_len, charges = 13, 25, [1, 4]
-    else:  # MHC-I (default)
-        min_len, max_len, charges = 8, 12, [1, 3]
-
-    return {
-        "database": {
-            "fasta": fasta_path,
-            # Non-specific cleavage: empty cleave_at, 0 missed cleavages.
-            # Sage interprets cleave_at="" + missed_cleavages=0 as fully
-            # non-specific, generating all sub-sequences of min/max length.
-            "enzyme": {"cleave_at": "", "restrict": "", "missed_cleavages": 0},
-            "min_len": min_len,
-            "max_len": max_len,
-            "static_mods": {"C": 57.0215},
-            "variable_mods": {
-                "M": [15.9949],    # Oxidation
-                "N": [0.9840],     # Deamidation
-                "Q": [0.9840],     # Deamidation
-            },
-            "generate_decoys": True,
-        },
-        "precursor_tol": {"ppm": [-10, 10]},
-        "fragment_tol": {"ppm": [-20, 20]},
-        "precursor_charge": charges,
-        "min_peaks": 4,        # HLA peptides are short — fewer fragments
-        "max_peaks": 100,
-        "report_psms": 1,
-        "wide_window": False,
-    }
-
-
 def _sanitize_path_for_diann(raw_path: Path, staging_dir: Path) -> Path:
     """Return a DIA-NN-safe path, creating a junction/symlink if needed.
 
@@ -254,7 +211,6 @@ def run_diann_local(
     fasta_path: str | None = None,
     lib_path: str | None = None,
     search_mode: str = "local",
-    acq_mode: str = "dia",
 ) -> Path | None:
     """Run DIA-NN locally as a subprocess.
 
@@ -267,43 +223,13 @@ def run_diann_local(
         fasta_path: Path to FASTA file (required for local mode).
         lib_path: Path to spectral library (optional — DIA-NN runs library-free if omitted).
         search_mode: "local" (user FASTA) or "community" (frozen HF assets).
-        acq_mode: Acquisition mode routing hint —
-            "dia"       → standard DIA-NN library-based search (diaPASEF, DIA)
-            "dda_pasef" → Bruker ddaPASEF: use --fasta-search (no --lib)
-                          DIA-NN auto-detects DDA from the TDF Precursors table.
-                          Required because --lib mode checks for DIA isolation
-                          windows and aborts on pure DDA acquisitions.
-            "dda_ms2"   → Thermo DDA: convert .raw→mzML, then Sage (not DIA-NN).
-                          This path is handled by run_sage_local — should not be
-                          passed to run_diann_local.
 
     Returns:
         Path to report.parquet, or None on failure.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if acq_mode == "dda_pasef":
-        # Bruker ddaPASEF: --fasta-search mode (no speclib, auto-detects DDA)
-        from stan.search.community_params import (
-            ensure_community_assets,
-            get_community_diann_params_dda,
-        )
-        cache_dir = output_dir.parent / "_community_assets"
-        # Only FASTA is needed for ddaPASEF (no speclib download)
-        fasta_dest = cache_dir / "human_hela_202604.fasta"
-        if not fasta_dest.exists():
-            try:
-                ensure_community_assets(vendor, cache_dir)
-            except Exception:
-                logger.warning("Community assets unavailable; using user fasta if set")
-        if fasta_path and Path(fasta_path).exists():
-            # User-provided FASTA overrides community FASTA for DDA mode
-            from stan.search.community_params import COMMUNITY_DIANN_DDA_PARAMS_FROZEN
-            params = dict(COMMUNITY_DIANN_DDA_PARAMS_FROZEN)
-            params["fasta"] = fasta_path
-        else:
-            params = get_community_diann_params_dda(cache_dir=str(cache_dir))
-    elif search_mode == "community":
+    if search_mode == "community":
         from stan.search.community_params import ensure_community_assets, get_community_diann_params
         cache_dir = output_dir.parent / "_community_assets"
         ensure_community_assets(vendor, cache_dir)  # download FASTA + speclib if missing
@@ -458,7 +384,6 @@ def run_sage_local(
     threads: int = 0,
     fasta_path: str | None = None,
     search_mode: str = "local",
-    immuno_class: int = 0,   # 0 = tryptic, 1 = MHC-I, 2 = MHC-II
 ) -> Path | None:
     """Run Sage locally as a subprocess.
 
@@ -506,10 +431,7 @@ def run_sage_local(
         if not Path(fasta_path).exists():
             logger.error("FASTA file not found: %s", fasta_path)
             return None
-        if immuno_class:
-            params = _build_sage_immuno_params(fasta_path, mhc_class=immuno_class)
-        else:
-            params = _build_local_sage_params(fasta_path)
+        params = _build_local_sage_params(fasta_path)
 
     params["mzml_paths"] = [input_path]
     params["output_directory"] = str(output_dir)

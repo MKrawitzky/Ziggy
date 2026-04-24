@@ -20,6 +20,8 @@ COLUMN_CATALOG: dict[str, list[dict]] = {
         {"model": "Performance 8cm x 150um, 1.9um C18", "id": "EV1137", "length_cm": 8, "id_um": 150, "particle_um": 1.9},
         {"model": "Performance 15cm x 150um, 1.9um C18", "id": "EV1106", "length_cm": 15, "id_um": 150, "particle_um": 1.9},
         {"model": "Performance 15cm x 75um, 1.9um C18", "id": "EV1112", "length_cm": 15, "id_um": 75, "particle_um": 1.9},
+        {"model": "Performance 8cm x 100um, 1.9um C18", "id": "EV1109", "length_cm": 8, "id_um": 100, "particle_um": 1.9},
+        {"model": "Performance OE 15cm x 150um, 1.9um C18", "id": "EV2005", "length_cm": 15, "id_um": 150, "particle_um": 1.9},
         # Whisper columns (low-flow, 20/40 SPD)
         {"model": "Whisper 20cm x 75um, 1.9um C18", "id": "EV1113", "length_cm": 20, "id_um": 75, "particle_um": 1.9},
     ],
@@ -33,15 +35,23 @@ COLUMN_CATALOG: dict[str, list[dict]] = {
         {"model": "Aurora Series 25cm x 75um, 1.6um C18", "id": "AUR-25075C18A", "length_cm": 25, "id_um": 75, "particle_um": 1.6},
     ],
     "PepSep": [
-        # MAX series (shorter, high-throughput)
-        {"model": "PepSep MAX 10cm x 150um, 1.5um C18", "id": "PSP-MAX10150C18", "length_cm": 10, "id_um": 150, "particle_um": 1.5},
-        {"model": "PepSep MAX 10cm x 75um, 1.5um C18", "id": "PSP-MAX1075C18", "length_cm": 10, "id_um": 75, "particle_um": 1.5},
-        # Standard ReproSil series
-        {"model": "PepSep 15cm x 75um, 1.9um ReproSil C18", "id": "PSP-15075C18", "length_cm": 15, "id_um": 75, "particle_um": 1.9},
-        {"model": "PepSep 25cm x 75um, 1.9um ReproSil C18", "id": "PSP-25075C18", "length_cm": 25, "id_um": 75, "particle_um": 1.9},
-        {"model": "PepSep 15cm x 150um, 1.9um ReproSil C18", "id": "PSP-15150C18", "length_cm": 15, "id_um": 150, "particle_um": 1.9},
-        {"model": "PepSep 25cm x 150um, 1.9um ReproSil C18", "id": "PSP-25150C18", "length_cm": 25, "id_um": 150, "particle_um": 1.9},
-        {"model": "PepSep 50cm x 75um, 1.9um ReproSil C18", "id": "PSP-50075C18", "length_cm": 50, "id_um": 75, "particle_um": 1.9},
+        # PepSep Ultra (UHP/nanoConnect, 150µm ID, 1.5µm ReproSil — ordered as PSC-xx-150-15-UHP-nC)
+        # High-throughput wide-bore format for fast loading on nanoElute 2 / proteoElute
+        {"model": "PepSep Ultra 10cm x 150um, 1.5um ReproSil C18", "id": "PSC-10-150-15-UHP-nC", "length_cm": 10, "id_um": 150, "particle_um": 1.5},
+        {"model": "PepSep Ultra 15cm x 150um, 1.5um ReproSil C18", "id": "PSC-15-150-15-UHP-nC", "length_cm": 15, "id_um": 150, "particle_um": 1.5},
+        {"model": "PepSep Ultra 25cm x 150um, 1.5um ReproSil C18", "id": "PSC-25-150-15-UHP-nC", "length_cm": 25, "id_um": 150, "particle_um": 1.5},
+        # Bruker/PepSep OEM — PepSeal connector (for direct timsTOF spray connection)
+        # BRKR[length×10][ID][particle×10]PepSeal e.g. BRKR157515 = 15cm×75µm×1.5µm
+        {"model": "PepSep Advance 15cm x 75um, 1.5um ReproSil C18 (PepSeal)", "id": "BRKR157515PepSeal", "length_cm": 15, "id_um": 75, "particle_um": 1.5},
+        {"model": "PepSep Advance 25cm x 75um, 1.5um ReproSil C18 (PepSeal)", "id": "BRKR257515PepSeal", "length_cm": 25, "id_um": 75, "particle_um": 1.5},
+        {"model": "PepSep Advance 15cm x 50um, 1.5um ReproSil C18 (PepSeal)", "id": "BRKR155015PepSeal", "length_cm": 15, "id_um": 50, "particle_um": 1.5},
+        {"model": "PepSep Advance 25cm x 50um, 1.5um ReproSil C18 (PepSeal)", "id": "BRKR255015PepSeal", "length_cm": 25, "id_um": 50, "particle_um": 1.5},
+        # PepSep Pro — standard nanoLC format, 1.9µm ReproSil C18
+        {"model": "PepSep Pro 15cm x 75um, 1.9um ReproSil C18", "id": "PSP-15075C18", "length_cm": 15, "id_um": 75, "particle_um": 1.9},
+        {"model": "PepSep Pro 25cm x 75um, 1.9um ReproSil C18", "id": "PSP-25075C18", "length_cm": 25, "id_um": 75, "particle_um": 1.9},
+        {"model": "PepSep Pro 15cm x 150um, 1.9um ReproSil C18", "id": "PSP-15150C18", "length_cm": 15, "id_um": 150, "particle_um": 1.9},
+        {"model": "PepSep Pro 25cm x 150um, 1.9um ReproSil C18", "id": "PSP-25150C18", "length_cm": 25, "id_um": 150, "particle_um": 1.9},
+        {"model": "PepSep Pro 50cm x 75um, 1.9um ReproSil C18", "id": "PSP-50075C18", "length_cm": 50, "id_um": 75, "particle_um": 1.9},
     ],
     "Thermo": [
         {"model": "PepMap Neo 15cm x 75um, 2um C18", "id": "TFS-PN15075C18", "length_cm": 15, "id_um": 75, "particle_um": 2.0},

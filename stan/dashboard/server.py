@@ -23,7 +23,13 @@ from stan.config import (
     ConfigWatcher,
     resolve_config_path,
 )
-from stan.db import get_db_path, get_run, get_runs, get_tic_trace, get_tic_traces_for_instrument, get_trends, init_db
+from stan.db import (
+    get_db_path, get_run, get_runs, get_tic_trace, get_tic_traces_for_instrument,
+    get_trends, init_db,
+    get_columns_catalog, upsert_column, delete_column,
+    get_lc_catalog, upsert_lc, delete_lc,
+    update_run_setup,
+)
 from stan.file_detector import detect_format, format_label, format_badge_css
 
 logger = logging.getLogger(__name__)
@@ -1318,11 +1324,17 @@ async def api_phosphoisomer(
         raise HTTPException(status_code=404, detail="Run not found")
 
     report_path = _resolve_report_path(run)
-    if not report_path:
+    sage_path   = _resolve_sage_path(run)
+    is_sage     = False
+    if report_path is None and sage_path is not None:
+        report_path = sage_path
+        is_sage     = True
+    elif report_path is None:
         return {"groups": [], "n_total": 0, "error": "No search results for this run"}
+    else:
+        is_sage = "sage" in str(report_path).lower() or "results.sage" in str(report_path).lower()
 
     seq_upper = sequence.upper().strip()
-    is_sage = "sage" in str(report_path).lower() or "results.sage" in str(report_path).lower()
 
     try:
         schema_cols = set(pl.read_parquet_schema(str(report_path)).keys())
@@ -1372,12 +1384,15 @@ async def api_phosphoisomer(
         df = pl.read_parquet(str(report_path), columns=want)
 
         # build bare sequence from stripped col or strip mods from modified
+        # DIA-NN pads with underscores (_PEPTIDE_) — strip them so matching works
         if str_col:
-            df = df.with_columns(pl.col(str_col).str.to_uppercase().alias("_bare"))
+            df = df.with_columns(
+                pl.col(str_col).str.strip_chars("_").str.to_uppercase().alias("_bare")
+            )
         else:
             df = df.with_columns(
                 pl.col(mod_col).map_elements(
-                    lambda p: _re.sub(r"\(.*?\)|\[.*?\]", "", p or "").upper(),
+                    lambda p: _re.sub(r"\(.*?\)|\[.*?\]", "", p or "").strip("_").upper(),
                     return_dtype=pl.String
                 ).alias("_bare")
             )
@@ -1456,6 +1471,224 @@ async def api_phosphoisomer(
         "resolution": resolution,
         "source":     "sage" if is_sage else "diann",
     }
+
+
+@app.get("/api/runs/{run_id}/phospho-landscape")
+async def api_phospho_landscape(run_id: str) -> dict:
+    """Return all phosphopeptide identifications for scatter plotting.
+
+    Returns compact lists (im, mz, n_isomers, n_psms, bare_seq) suitable for
+    the IM vs m/z landscape scatter. Multi-isomer entries are flagged so the
+    frontend can highlight them.
+    """
+    import math as _math
+    import re as _re
+
+    try:
+        import polars as pl
+    except ImportError:
+        raise HTTPException(status_code=500, detail="polars required")
+
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    report_path = _resolve_report_path(run)
+    sage_path   = _resolve_sage_path(run)
+    is_sage     = False
+    if report_path is None and sage_path is not None:
+        report_path = sage_path
+        is_sage     = True
+    elif report_path is None:
+        return {"peptides": [], "n_phospho": 0, "n_multi_isomer": 0}
+    else:
+        is_sage = "sage" in str(report_path).lower() or "results.sage" in str(report_path).lower()
+
+    try:
+        schema_cols = set(pl.read_parquet_schema(str(report_path)).keys())
+    except Exception as e:
+        return {"peptides": [], "n_phospho": 0, "n_multi_isomer": 0, "error": str(e)}
+
+    # ── Sage path ────────────────────────────────────────────────────────
+    if is_sage or ("peptide" in schema_cols and "ion_mobility" in schema_cols):
+        q_col   = next((c for c in ("spectrum_q", "q_value", "posterior_error") if c in schema_cols), None)
+        chg_col = "charge" if "charge" in schema_cols else None
+        want    = [c for c in ["peptide", "ion_mobility", "charge", "calcmass", q_col] if c]
+        df      = pl.read_parquet(str(report_path), columns=want)
+
+        # keep only phospho peptides
+        df = df.filter(pl.col("peptide").str.contains(r"\["))
+        df = df.filter(pl.col("ion_mobility") > 0)
+        if q_col:
+            df = df.filter(pl.col(q_col) <= 0.01)
+
+        # compute m/z
+        if chg_col and "calcmass" in schema_cols:
+            df = df.with_columns(
+                ((pl.col("calcmass") + pl.col(chg_col) * 1.007276) / pl.col(chg_col)).alias("_mz")
+            )
+        else:
+            df = df.with_columns(pl.lit(0.0).alias("_mz"))
+
+        df = df.with_columns(
+            pl.col("peptide").map_elements(
+                lambda p: _re.sub(r"\[.*?\]", "", p or "").upper(),
+                return_dtype=pl.String
+            ).alias("_bare")
+        )
+        mod_col_l, im_col_l, mz_col_l = "peptide", "ion_mobility", "_mz"
+
+    # ── DIA-NN path ──────────────────────────────────────────────────────
+    else:
+        mod_col_l = next((c for c in ("Modified.Sequence", "Sequence") if c in schema_cols), None)
+        str_col   = next((c for c in ("Stripped.Sequence",) if c in schema_cols), None)
+        im_c      = next((c for c in ("IM", "Precursor.IonMobility", "ion_mobility") if c in schema_cols), None)
+        mz_c      = next((c for c in ("Precursor.Mz",) if c in schema_cols), None)
+        qv_col    = next((c for c in ("Q.Value", "q_value") if c in schema_cols), None)
+
+        if not mod_col_l or not im_c:
+            return {"peptides": [], "n_phospho": 0, "n_multi_isomer": 0,
+                    "error": f"Missing columns (found: {sorted(schema_cols)[:20]})"}
+
+        want = [c for c in [mod_col_l, str_col, im_c, mz_c, qv_col] if c]
+        df   = pl.read_parquet(str(report_path), columns=want)
+
+        # phospho filter — covers UniMod:21, (Phospho), +79.966, (ph)
+        df = df.filter(
+            pl.col(mod_col_l).str.contains(r"(?i)UniMod:21|[Pp]hospho|\+79\.9|\(ph\)")
+        )
+        df = df.filter(pl.col(im_c) > 0)
+        if qv_col:
+            df = df.filter(pl.col(qv_col) <= 0.01)
+
+        if str_col:
+            df = df.with_columns(
+                pl.col(str_col).str.strip_chars("_").str.to_uppercase().alias("_bare")
+            )
+        else:
+            df = df.with_columns(
+                pl.col(mod_col_l).map_elements(
+                    lambda p: _re.sub(r"\(.*?\)|\[.*?\]", "", p or "").strip("_").upper(),
+                    return_dtype=pl.String
+                ).alias("_bare")
+            )
+
+        if mz_c:
+            df = df.rename({mz_c: "_mz"})
+        else:
+            df = df.with_columns(pl.lit(0.0).alias("_mz"))
+
+        mod_col_l, im_col_l, mz_col_l = mod_col_l, im_c, "_mz"
+
+    if df.height == 0:
+        return {"peptides": [], "n_phospho": 0, "n_multi_isomer": 0}
+
+    # ── Group by bare sequence ──────────────────────────────────────────
+    groups: dict[str, dict] = {}
+    for row in df.iter_rows(named=True):
+        bare = str(row["_bare"] or "")
+        mod  = str(row[mod_col_l] or "")
+        im   = float(row[im_col_l])
+        mz   = float(row.get(mz_col_l) or 0)
+        if bare not in groups:
+            groups[bare] = {"mods": set(), "ims": [], "mzs": []}
+        groups[bare]["mods"].add(mod)
+        groups[bare]["ims"].append(im)
+        if mz > 0:
+            groups[bare]["mzs"].append(mz)
+
+    peptides = []
+    for bare, g in groups.items():
+        ims = g["ims"]
+        mzs = g["mzs"]
+        n   = len(ims)
+        med_im = sorted(ims)[n // 2]
+        med_mz = sorted(mzs)[len(mzs) // 2] if mzs else 0
+        peptides.append({
+            "bare_seq":   bare,
+            "n_isomers":  len(g["mods"]),
+            "n_psms":     n,
+            "median_im":  round(med_im, 4),
+            "median_mz":  round(med_mz, 4),
+        })
+
+    peptides.sort(key=lambda x: (-x["n_isomers"], -x["n_psms"]))
+    n_multi = sum(1 for p in peptides if p["n_isomers"] > 1)
+
+    return {
+        "peptides":       peptides[:2000],
+        "n_phospho":      len(peptides),
+        "n_multi_isomer": n_multi,
+    }
+
+
+# ── Catalog: columns ────────────────────────────────────────────────────────
+
+@app.get("/api/catalog/columns")
+async def api_catalog_columns_list() -> list:
+    return get_columns_catalog()
+
+
+@app.post("/api/catalog/columns")
+async def api_catalog_columns_create(data: dict) -> dict:
+    new_id = upsert_column(data)
+    if new_id < 0:
+        raise HTTPException(status_code=500, detail="Failed to insert column")
+    return {"id": new_id}
+
+
+@app.put("/api/catalog/columns/{col_id}")
+async def api_catalog_columns_update(col_id: int, data: dict) -> dict:
+    data["id"] = col_id
+    upsert_column(data)
+    return {"ok": True}
+
+
+@app.delete("/api/catalog/columns/{col_id}")
+async def api_catalog_columns_delete(col_id: int) -> dict:
+    delete_column(col_id)
+    return {"ok": True}
+
+
+# ── Catalog: LC systems ──────────────────────────────────────────────────────
+
+@app.get("/api/catalog/lc")
+async def api_catalog_lc_list() -> list:
+    return get_lc_catalog()
+
+
+@app.post("/api/catalog/lc")
+async def api_catalog_lc_create(data: dict) -> dict:
+    new_id = upsert_lc(data)
+    if new_id < 0:
+        raise HTTPException(status_code=500, detail="Failed to insert LC")
+    return {"id": new_id}
+
+
+@app.put("/api/catalog/lc/{lc_id}")
+async def api_catalog_lc_update(lc_id: int, data: dict) -> dict:
+    data["id"] = lc_id
+    upsert_lc(data)
+    return {"ok": True}
+
+
+@app.delete("/api/catalog/lc/{lc_id}")
+async def api_catalog_lc_delete(lc_id: int) -> dict:
+    delete_lc(lc_id)
+    return {"ok": True}
+
+
+# ── Run instrument setup ─────────────────────────────────────────────────────
+
+@app.patch("/api/runs/{run_id}/setup")
+async def api_run_setup(run_id: str, data: dict) -> dict:
+    """Assign column_id and/or lc_id to a run."""
+    column_id = data.get("column_id")  # None clears the assignment
+    lc_id     = data.get("lc_id")
+    ok = update_run_setup(run_id, column_id, lc_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"ok": True}
 
 
 @app.get("/api/runs/{run_id}/spectrum")

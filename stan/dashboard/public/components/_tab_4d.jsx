@@ -459,32 +459,77 @@
       }, [playing]);
 
       // ── CHART: Chimera Probability Map ────────────────────────────────
+      // Three categories per ion:
+      //   Clean      — no m/z neighbours within ±0.5 Th (never a chimera problem)
+      //   IM-rescued — had m/z neighbours BUT mobility separated them by > MOB threshold
+      //                i.e. would have been chimeric without TIMS, but isn't
+      //   Still chimeric — has BOTH an m/z neighbour AND a mobility neighbour
+      //                    (isolation window still picks up an interfering co-precursor)
       useEffect(() => {
         if (!chimeraRef.current || !window.Plotly) return;
         if (!data3d || !chimeraCounts) { window.Plotly.purge(chimeraRef.current); return; }
-        const { n1D, max1D } = chimeraCounts;
+        const { n1D, n2D } = chimeraCounts;
         const n = data3d.mz.length;
-        // Use a continuous color scale: green (0 neighbors) → yellow → red (many neighbors)
-        const colors = [];
+
+        // Partition into three buckets
+        const cleanIdx    = [], rescuedIdx = [], chimeraIdx = [];
         for (let i = 0; i < n; i++) {
-          const t = max1D > 0 ? Math.min(1, n1D[i] / Math.max(max1D * 0.5, 1)) : 0;
-          // Green → Yellow → Red
-          if (t < 0.5) { const f=t*2; colors.push(`rgb(${Math.round(34+f*(255-34))},${Math.round(197+f*(215-197))},${Math.round(94+f*0)})`); }
-          else { const f=(t-0.5)*2; colors.push(`rgb(255,${Math.round(215-f*215)},0)`); }
+          if      (n1D[i] === 0)                      cleanIdx.push(i);
+          else if (n1D[i] > 0 && n2D[i] === 0)        rescuedIdx.push(i);
+          else                                         chimeraIdx.push(i);
         }
-        window.Plotly.react(chimeraRef.current, [{
-          type:'scatter', mode:'markers',
-          x: data3d.mz, y: data3d.mobility,
-          marker:{ size:2.5, color:colors, opacity:0.65 },
-          hovertemplate:'m/z %{x:.2f}<br>1/K₀ %{y:.4f}<br>%{text}<extra></extra>',
-          text: Array.from(n1D).map(v => v===0?'clean — no m/z neighbors':`${v} neighbor${v>1?'s':''} in 1D isolation window`),
-        }], {
+
+        const pick = (arr, key) => arr.map(i => data3d[key][i]);
+        const hoverText = (arr) => arr.map(i =>
+          n1D[i]===0 ? 'No m/z neighbours — clean precursor'
+          : n2D[i]===0 ? `${n1D[i]} m/z neighbour${n1D[i]>1?'s':''} — resolved by ion mobility`
+          : `${n2D[i]} co-isolated neighbour${n2D[i]>1?'s':''} despite IM (chimeric)`
+        );
+
+        const traces = [
+          {
+            name: `Clean (${cleanIdx.length.toLocaleString()})`,
+            x: pick(cleanIdx,'mz'), y: pick(cleanIdx,'mobility'),
+            mode:'markers', type:'scatter',
+            marker:{ size:2, color:'#22c55e', opacity:0.35 },
+            text: hoverText(cleanIdx),
+            hovertemplate:'m/z %{x:.2f}  1/K₀ %{y:.4f}<br>%{text}<extra>Clean</extra>',
+          },
+          {
+            name: `IM-rescued (${rescuedIdx.length.toLocaleString()})`,
+            x: pick(rescuedIdx,'mz'), y: pick(rescuedIdx,'mobility'),
+            mode:'markers', type:'scatter',
+            marker:{ size:2.5, color:'#DAAA00', opacity:0.75 },
+            text: hoverText(rescuedIdx),
+            hovertemplate:'m/z %{x:.2f}  1/K₀ %{y:.4f}<br>%{text}<extra>IM-rescued</extra>',
+          },
+          {
+            name: `Still chimeric (${chimeraIdx.length.toLocaleString()})`,
+            x: pick(chimeraIdx,'mz'), y: pick(chimeraIdx,'mobility'),
+            mode:'markers', type:'scatter',
+            marker:{ size:2.5, color:'#f87171', opacity:0.75 },
+            text: hoverText(chimeraIdx),
+            hovertemplate:'m/z %{x:.2f}  1/K₀ %{y:.4f}<br>%{text}<extra>Chimeric</extra>',
+          },
+        ].filter(t => t.x.length > 0);
+
+        const resolvedPctDisplay = chimeraCounts.chimeric1D > 0
+          ? Math.round(rescuedIdx.length / chimeraCounts.chimeric1D * 100) : 0;
+
+        window.Plotly.react(chimeraRef.current, traces, {
           paper_bgcolor:'transparent', plot_bgcolor:'transparent',
-          font:{color:'#94a3b8',size:11}, margin:{l:60,r:20,t:15,b:50},
+          font:{color:'#94a3b8',size:11}, margin:{l:60,r:20,t:28,b:50},
           xaxis:{title:{text:'m/z (Th)',font:{size:12}},gridcolor:'#1e3a5f',color:'#a0b4cc'},
           yaxis:{title:{text:'1/K₀ (Vs/cm²)',font:{size:12}},gridcolor:'#1e3a5f',color:'#a0b4cc'},
+          legend:{bgcolor:'rgba(0,0,0,0.35)',bordercolor:'#1e3a5f',borderwidth:1,font:{size:10},
+                  x:0.01,y:0.99,xanchor:'left',yanchor:'top'},
           hoverlabel:{bgcolor:'#0d1e36',font:{size:11}},
-          showlegend:false,
+          annotations:[{
+            xref:'paper',yref:'paper',x:0.99,y:0.99,xanchor:'right',yanchor:'top',
+            text:`<b>${resolvedPctDisplay}%</b> of would-be chimeras rescued by IM`,
+            showarrow:false,font:{color:'#DAAA00',size:11},
+            bgcolor:'rgba(0,0,0,0.4)',bordercolor:'rgba(218,170,0,0.3)',borderwidth:1,borderpad:4,
+          }],
         }, {responsive:true, scrollZoom:true, modeBarButtonsToRemove:['toImage']});
       }, [data3d, chimeraCounts]);
 
@@ -786,20 +831,28 @@ Calibration (mass + IMS) takes under 5 min — vs 45+ min on other platforms. Br
                     <h3 style={{margin:0,fontSize:'1.05rem'}}>
                       {hasWindows ? 'Your Method Coverage — Isolation Windows vs Ion Cloud' : 'Ion Cloud — Charge State Separation'}
                     </h3>
-                    <div style={{color:'var(--muted)',fontSize:'0.78rem',marginTop:'0.3rem'}}>
+                    <div style={{color:'var(--muted)',fontSize:'0.78rem',marginTop:'0.3rem',lineHeight:'1.5'}}>
                       {hasWindows
-                        ? (windowData ? 'diaPASEF windows (blue) overlaid on your actual ion cloud — each box captures only ions within that m/z × 1/K₀ region'
-                                      : 'PASEF events (amber) overlaid on your actual ion cloud — each box = one ddaPASEF precursor isolation event')
-                        : 'Ion cloud colored by charge state — visible separation between charge lanes demonstrates mobility resolving power'
+                        ? (windowData
+                            ? 'diaPASEF windows (blue) overlaid on your actual ion cloud. Each box is an m/z × 1/K₀ acquisition region from one PASEF cycle.'
+                            : 'PASEF events (amber) overlaid on your ion cloud. Each box = one ddaPASEF precursor isolation event in m/z × 1/K₀ space.')
+                        : 'Ion cloud colored by charge state. Even without method windows, the visible charge lanes confirm TIMS is separating by conformation.'
                       }
+                      {hasWindows && (
+                        <span style={{color:'#38bdf8',marginLeft:'0.4rem'}}>
+                          The <b>% within a window</b> counts how many of the loaded 3D features fall inside any window box.
+                          Ions outside boxes are simply features not targeted for MS2 in this run — not a measurement error.
+                          Low-abundance or out-of-range ions typically account for the remainder.
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div ref={coverageRef} style={{height:'440px'}} />
-                  <div style={{padding:'0.6rem 1.2rem',borderTop:'1px solid var(--border)',background:'rgba(1,26,58,0.4)',fontSize:'0.78rem',color:'var(--muted)'}}>
+                  <div style={{padding:'0.6rem 1.2rem',borderTop:'1px solid var(--border)',background:'rgba(1,26,58,0.4)',fontSize:'0.78rem',color:'var(--muted)',lineHeight:'1.6'}}>
                     <span style={{color:'var(--accent)',fontWeight:600}}>Why this matters: </span>
                     {hasWindows
-                      ? 'Each isolation window in m/z × 1/K₀ space captures far fewer co-isolated precursors than a traditional DIA window of the same m/z range alone. The TIMS dimension multiplies the effective resolution of every isolation event.'
-                      : 'Even without method windows, the charge state lanes are clearly separated in mobility — enabling Bruker\'s TIMS-based charge state assignment and making fragment spectra dramatically cleaner by pre-separating charge states.'
+                      ? 'Each window in m/z × 1/K₀ captures far fewer co-eluting precursors than a traditional DIA window of the same m/z width alone — because TIMS adds the vertical (mobility) dimension. A 25 Th × 0.3 Vs/cm² diaPASEF box covers roughly 1/5 the precursor density of a flat 25 Th DIA window.'
+                      : 'Even without method windows, charge lanes are clearly separated in mobility — enabling TIMS-based charge state deconvolution and cleaner MS2 spectra.'
                     }
                   </div>
                 </div>
@@ -811,37 +864,49 @@ Calibration (mass + IMS) takes under 5 min — vs 45+ min on other platforms. Br
                       <div style={{display:'flex',alignItems:'flex-start',gap:'1rem',flexWrap:'wrap'}}>
                         <div style={{flex:1}}>
                           <h3 style={{margin:0,fontSize:'1.05rem'}}>
-                            Chimera Probability Map
+                            Chimera Map — Ion Mobility Rescue
                             <span style={{marginLeft:'0.6rem',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.35)',color:'#f87171',fontSize:'0.7rem',padding:'0.1rem 0.45rem',borderRadius:'0.25rem',verticalAlign:'middle',fontWeight:700}}>NOVEL</span>
                           </h3>
-                          <div style={{color:'var(--muted)',fontSize:'0.78rem',marginTop:'0.3rem'}}>
-                            Every ion colored by how many co-isolation neighbors it would have in a traditional ±0.5 Th window.
-                            <span style={{color:'#22c55e'}}> Green = clean isolation.</span>
-                            <span style={{color:'#f87171'}}> Red = guaranteed chimeric MS2.</span>
+                          <div style={{color:'var(--muted)',fontSize:'0.78rem',marginTop:'0.3rem',lineHeight:'1.5'}}>
+                            Each ion classified by its co-isolation fate. Criterion: ±0.5 Th m/z neighbour = would-be chimera;
+                            if that neighbour is also within ±0.06 Vs/cm² in 1/K₀, TIMS cannot separate them.
+                            <br/>
+                            <span style={{color:'#22c55e'}}>● Green = clean</span>
+                            {'  '}
+                            <span style={{color:'#DAAA00'}}>● Gold = had m/z conflict, IM rescued it</span>
+                            {'  '}
+                            <span style={{color:'#f87171'}}>● Red = still chimeric even with IM</span>
                           </div>
                         </div>
-                        <div style={{display:'flex',gap:'1.5rem',flexShrink:0}}>
-                          <div style={{textAlign:'center'}}>
-                            <div style={{color:'#f87171',fontWeight:800,fontSize:'1.5rem'}}>{Math.round(chimeraCounts.chimeric1D/chimeraCounts.n*100)}%</div>
-                            <div style={{color:'var(--muted)',fontSize:'0.7rem'}}>chimeric in 1D</div>
+                        <div style={{display:'flex',gap:'1.2rem',flexShrink:0,flexWrap:'wrap'}}>
+                          <div style={{textAlign:'center',padding:'0.4rem 0.7rem',background:'rgba(239,68,68,0.08)',borderRadius:'0.4rem',border:'1px solid rgba(239,68,68,0.2)'}}>
+                            <div style={{color:'#f87171',fontWeight:800,fontSize:'1.4rem',lineHeight:1}}>{Math.round(chimeraCounts.chimeric1D/chimeraCounts.n*100)}%</div>
+                            <div style={{color:'var(--muted)',fontSize:'0.68rem',marginTop:'0.15rem'}}>would-be chimeras</div>
+                            <div style={{color:'#64748b',fontSize:'0.62rem'}}>(m/z ±0.5 Th conflict)</div>
                           </div>
-                          <div style={{textAlign:'center',fontSize:'1.5rem',color:'var(--muted)',fontWeight:300,lineHeight:'1.8rem'}}>→</div>
-                          <div style={{textAlign:'center'}}>
-                            <div style={{color:'#22c55e',fontWeight:800,fontSize:'1.5rem'}}>{Math.round(chimeraCounts.chimeric2D/chimeraCounts.n*100)}%</div>
-                            <div style={{color:'var(--muted)',fontSize:'0.7rem'}}>still chimeric with IM</div>
+                          <div style={{display:'flex',alignItems:'center',color:'var(--muted)',fontSize:'1.2rem'}}>→</div>
+                          <div style={{textAlign:'center',padding:'0.4rem 0.7rem',background:'rgba(218,170,0,0.08)',borderRadius:'0.4rem',border:'1px solid rgba(218,170,0,0.2)'}}>
+                            <div style={{color:'#DAAA00',fontWeight:800,fontSize:'1.4rem',lineHeight:1}}>
+                              {chimeraCounts.chimeric1D > 0 ? Math.round((chimeraCounts.chimeric1D-chimeraCounts.chimeric2D)/chimeraCounts.chimeric1D*100) : 0}%
+                            </div>
+                            <div style={{color:'var(--muted)',fontSize:'0.68rem',marginTop:'0.15rem'}}>rescued by IM</div>
+                            <div style={{color:'#64748b',fontSize:'0.62rem'}}>(m/z conflict, Δ1/K₀{'>'} 0.06)</div>
                           </div>
-                          <div style={{textAlign:'center'}}>
-                            <div style={{color:'var(--accent)',fontWeight:800,fontSize:'1.5rem'}}>{chimeraCounts.resolvedPct}%</div>
-                            <div style={{color:'var(--muted)',fontSize:'0.7rem'}}>resolved by mobility</div>
+                          <div style={{textAlign:'center',padding:'0.4rem 0.7rem',background:'rgba(239,68,68,0.05)',borderRadius:'0.4rem',border:'1px solid rgba(239,68,68,0.15)'}}>
+                            <div style={{color:'#f87171',fontWeight:800,fontSize:'1.4rem',lineHeight:1}}>{Math.round(chimeraCounts.chimeric2D/chimeraCounts.n*100)}%</div>
+                            <div style={{color:'var(--muted)',fontSize:'0.68rem',marginTop:'0.15rem'}}>still chimeric</div>
+                            <div style={{color:'#64748b',fontSize:'0.62rem'}}>(both m/z AND IM conflict)</div>
                           </div>
                         </div>
                       </div>
                     </div>
                     <div ref={chimeraRef} style={{height:'420px'}} />
-                    <div style={{padding:'0.6rem 1.2rem',borderTop:'1px solid var(--border)',background:'rgba(1,26,58,0.4)',fontSize:'0.78rem',color:'var(--muted)'}}>
-                      <span style={{color:'var(--accent)',fontWeight:600}}>First-ever per-ion chimera risk map: </span>
-                      Red clusters reveal the "danger zones" in m/z × 1/K₀ space where traditional DIA produces the most contaminated MS2 spectra.
-                      These are the exact regions where diaPASEF and TIMS-based isolation provide the largest benefit — visible directly in your data.
+                    <div style={{padding:'0.6rem 1.2rem',borderTop:'1px solid var(--border)',background:'rgba(1,26,58,0.4)',fontSize:'0.78rem',color:'var(--muted)',lineHeight:'1.6'}}>
+                      <span style={{color:'#DAAA00',fontWeight:600}}>How to read this: </span>
+                      Gold ions are your most informative data point — they prove IM is actively separating co-eluting precursors that mass alone would confuse.
+                      The higher the gold fraction, the more diaPASEF is earning its keep on this sample.
+                      Red ions represent the remaining hard cases where both m/z AND mobility overlap within the thresholds used (±0.5 Th, ±0.06 Vs/cm²).
+                      Hover any dot for its exact chimera status.
                     </div>
                   </div>
                 )}

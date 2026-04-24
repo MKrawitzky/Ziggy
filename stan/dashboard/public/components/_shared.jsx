@@ -820,10 +820,15 @@
 
     function RunHistory({ pinnedRunIds, setPinnedRunIds, navigateTo }) {
       const { data: runs, loading, reload: reloadRuns } = useFetch('/api/runs?limit=1000');
+      const { data: colCatalog } = useFetch('/api/catalog/columns');
+      const { data: lcCatalog  } = useFetch('/api/catalog/lc');
       const [sortKey, setSortKey] = useState('run_date');
       const [sortDir, setSortDir] = useState('desc');
       const [dateFilter, setDateFilter] = useState('all');
       const [searchTerm, setSearchTerm] = useState('');
+      const [filterColumnId,    setFilterColumnId]    = useState('');
+      const [filterLcId,        setFilterLcId]        = useState('');
+      const [filterInstrument,  setFilterInstrument]  = useState('');
       const [selectedRun, setSelectedRun] = useState(null);
       const [mobRun, setMobRun] = useState(null);
       const [rawRun, setRawRun] = useState(null);
@@ -976,6 +981,19 @@
         if (dateFilter === 'past') return d.getFullYear() < now.getFullYear();
         return true;
       };
+      // Build catalog lookup maps
+      const colMap = Object.fromEntries(
+        Array.isArray(colCatalog) ? colCatalog.map(c => [String(c.id), c]) : []
+      );
+      const lcMap = Object.fromEntries(
+        Array.isArray(lcCatalog) ? lcCatalog.map(l => [String(l.id), l]) : []
+      );
+      const hasCatalog = (Array.isArray(colCatalog) && colCatalog.length > 0)
+                      || (Array.isArray(lcCatalog)  && lcCatalog.length  > 0);
+
+      // Distinct instruments for filter
+      const instruments = [...new Set(runsArr.map(r => r.instrument).filter(Boolean))].sort();
+
       let filtered = runsArr.filter(r => filterDate(r.run_date));
       if (searchTerm) {
         const term = searchTerm.toLowerCase();
@@ -984,6 +1002,9 @@
           (r.instrument || '').toLowerCase().includes(term)
         );
       }
+      if (filterColumnId)   filtered = filtered.filter(r => String(r.column_id || '') === filterColumnId);
+      if (filterLcId)       filtered = filtered.filter(r => String(r.lc_id     || '') === filterLcId);
+      if (filterInstrument) filtered = filtered.filter(r => r.instrument === filterInstrument);
       const getSortVal = (r) => {
         if (sortKey === 'primary_ids') return (isDda(r.mode) ? r.n_psms : r.n_precursors) || 0;
         return r[sortKey];
@@ -1221,6 +1242,46 @@
             </button>
             <CleanupMissingBtn onDone={reloadRuns} />
           </div>
+
+          {/* ── Catalog filters (column / LC / instrument) ── */}
+          {hasCatalog && (
+            <div style={{ display:'flex', gap:'.5rem', marginBottom:'.6rem', flexWrap:'wrap', alignItems:'center' }}>
+              <span style={{ fontSize:'.7rem', color:'#64748b', fontWeight:700, textTransform:'uppercase',
+                              letterSpacing:'.06em', flexShrink:0 }}>Filter:</span>
+              {Array.isArray(colCatalog) && colCatalog.length > 0 && (
+                <select value={filterColumnId} onChange={e=>setFilterColumnId(e.target.value)}
+                  style={{ padding:'.3rem .55rem', background:'var(--bg)', color: filterColumnId ? '#22d3ee' : 'var(--muted)',
+                            border: filterColumnId ? '1px solid rgba(34,211,238,0.5)' : '1px solid var(--border)',
+                            borderRadius:'.3rem', fontSize:'.78rem' }}>
+                  <option value="">All columns</option>
+                  {colCatalog.map(c => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
+                </select>
+              )}
+              {Array.isArray(lcCatalog) && lcCatalog.length > 0 && (
+                <select value={filterLcId} onChange={e=>setFilterLcId(e.target.value)}
+                  style={{ padding:'.3rem .55rem', background:'var(--bg)', color: filterLcId ? '#a855f7' : 'var(--muted)',
+                            border: filterLcId ? '1px solid rgba(168,85,247,0.5)' : '1px solid var(--border)',
+                            borderRadius:'.3rem', fontSize:'.78rem' }}>
+                  <option value="">All LC systems</option>
+                  {lcCatalog.map(l => <option key={l.id} value={String(l.id)}>{l.name}</option>)}
+                </select>
+              )}
+              <select value={filterInstrument} onChange={e=>setFilterInstrument(e.target.value)}
+                style={{ padding:'.3rem .55rem', background:'var(--bg)', color: filterInstrument ? '#DAAA00' : 'var(--muted)',
+                          border: filterInstrument ? '1px solid rgba(218,170,0,0.5)' : '1px solid var(--border)',
+                          borderRadius:'.3rem', fontSize:'.78rem' }}>
+                <option value="">All instruments</option>
+                {instruments.map(i => <option key={i} value={i}>{i}</option>)}
+              </select>
+              {(filterColumnId || filterLcId || filterInstrument) && (
+                <button onClick={()=>{ setFilterColumnId(''); setFilterLcId(''); setFilterInstrument(''); }}
+                  style={{ padding:'.28rem .6rem', fontSize:'.76rem', background:'transparent', color:'#64748b',
+                            border:'1px solid rgba(100,116,139,0.3)', borderRadius:'.3rem', cursor:'pointer' }}>
+                  ✕ Clear filters
+                </button>
+              )}
+            </div>
+          )}
 
           {/* ── File path validation panel ── */}
           {showValidation && validationResult && !validationResult.error && (
@@ -1521,6 +1582,27 @@
                               </span>
                             );
                           })()}
+                          {/* Column + LC badges */}
+                          {r.column_id && colMap[String(r.column_id)] && (
+                            <span title={`Column: ${colMap[String(r.column_id)].name}`}
+                              style={{ marginLeft:'0.3rem', padding:'0.1rem 0.3rem', fontSize:'0.6rem',
+                                       background:'rgba(34,211,238,0.12)', color:'#22d3ee',
+                                       border:'1px solid rgba(34,211,238,0.3)', borderRadius:'0.2rem',
+                                       verticalAlign:'middle', fontWeight:700, whiteSpace:'nowrap',
+                                       maxWidth:'80px', overflow:'hidden', textOverflow:'ellipsis',
+                                       display:'inline-block' }}>
+                              {colMap[String(r.column_id)].gradient_name || colMap[String(r.column_id)].name.split(' ').slice(-2).join(' ')}
+                            </span>
+                          )}
+                          {r.lc_id && lcMap[String(r.lc_id)] && (
+                            <span title={`LC: ${lcMap[String(r.lc_id)].name}`}
+                              style={{ marginLeft:'0.2rem', padding:'0.1rem 0.3rem', fontSize:'0.6rem',
+                                       background:'rgba(168,85,247,0.12)', color:'#a855f7',
+                                       border:'1px solid rgba(168,85,247,0.3)', borderRadius:'0.2rem',
+                                       verticalAlign:'middle', fontWeight:700, whiteSpace:'nowrap' }}>
+                              {lcMap[String(r.lc_id)].name}
+                            </span>
+                          )}
                         </td>
                         <td>{r.instrument}</td>
                         <td>{r.mode}</td>

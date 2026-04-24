@@ -12,7 +12,7 @@
 
 ### **The Proteomics Rockstar** ⚡
 
-*"There's a starman waiting in the sky — he'd like to come and meet us, but he thinks he'd blow our minds."*
+*"There's a starman waiting in the sky — he'd like to come and meet us, but he thinks he'd blow our minds."*  
 — David Bowie, 1972
 
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue?style=flat-square)
@@ -71,36 +71,62 @@ WITHOUT Ion Mobility (Orbitrap / Astral)      WITH TIMS (timsTOF 4D)
 | Panel | What it shows |
 |---|---|
 | **Ion Cloud** | Rotatable 3D scatter: m/z × 1/K₀ × RT, coloured by charge state |
-| **Landscape** | Melanie-style 3D surface: m/z × 1/K₀ × intensity — compare 2–3 runs |
+| **Landscape** | Melanie-style 3D surface: m/z × 1/K₀ × intensity — compare 2–3 runs, differential A−B surface |
+| **4D Advantage** | Chimera probability map (Clean / IM-rescued / Still chimeric), Mobility Corridor, Orthogonality Index, Breathing Proteome animation, 4D Run Fingerprint |
 | **CCS Corridors** | Theoretical 1/K₀ bands per charge, Δ1/K₀ deviations, outlier detection |
 | **LC Trace** | Peptide intensity over RT with TIC overlay |
 | **Spectra** | Mirror spectrum viewer with theoretical b/y ions, UniMod PTMs |
 | **Enzyme** | Missed cleavage distribution, PTM frequency table per run |
+| **Mob Calibration** | Per-run Δ1/K₀ scatter, histogram, 30-run trend — catches pressure-induced drift early |
 
-### 🧬 Research Tabs
+### 🧬 Omics Tabs
 
 | Tab | What it does |
 |---|---|
-| **Single Cell** | K562 dilution series (1.6 pg → 125 ng) · Michaelis-Menten coverage model → projects 1-cell depth · live 4D ion cloud · surfaceome atlas in mobility space |
-| **Sneaky Peaky** | Side-by-side run comparison · Joy Division K₀ ridgeline (Unknown Pleasures style) · CCS conformational density · MA plot · shift map · dynamic range |
-| **Immuno** | Immunopeptidomics: z=+1 ion cloud, 8–11mer length filter, MHC-I binding corridor |
-| **De Novo** | Casanovo integration: submit raw, track status, inspect de novo sequences |
-| **Searches** | Auto-search scheduler · DIA-NN / Sage / MSFragger / X!Tandem · unsearched run detection · sample type & workflow annotation |
-| **MIA** | Metabolite/impurity analysis |
+| **Immunopeptidomics** | z=+1 ion cloud, 8–11mer length filter, MHC-I binding corridor, HLA allele annotation |
+| **HLA Discovery** | Allele discovery workflow, Cutler/Ctortecka 2025 single-cell HLA integration |
+| **Histones** | Crosstalk Matrix (14 marks), 4D TIMS Storm, Sequence Aligner, SC Drug Response (Orsburn 2026), Workflow guide |
+| **Phospho** | Phosphoisomer separation showcase — Gaussian isomer profiles, Δ1/K₀ annotation, Resolution Gauge, IM Advantage infographic (Oliinyk 2023: 727 pairs, ~5% Δ1/K₀), phospho landscape scatter |
+| **Chemoproteomics** | Cysteine reactivity landscape, probe enrichment QC, target engagement |
+| **Metaproteomics** | Taxonomic and functional diversity from community proteomics |
+| **Single Cell** | K562 dilution series (1.6 pg → 125 ng), Michaelis-Menten coverage model, live 4D ion cloud, surfaceome atlas in ion mobility space |
+
+### 🔍 Search & Analysis
+
+| Tab | What it does |
+|---|---|
+| **Search Assistant** | DIA-NN / Sage search launcher · live unsearched-run badge counter · auto-detect DDA/DIA, ddaPASEF, diaPASEF |
+| **Searches** | Search history, result browser, re-search queue |
+| **De Novo** | Casanovo integration: submit raw, track status, inspect sequences |
+| **MIA** | Metabolite/impurity analysis with ★ spectrum jump to Spectra viewer |
+| **Sneaky Peaky** | Side-by-side run comparison · Joy Division K₀ ridgeline · CCS conformational density · MA plot · shift map · dynamic range |
 
 ### 📊 QC Engine (STAN)
 
-- Precursor, peptide & protein counts @ 1% FDR
-- Pass / Warn / Fail gating with HOLD flag
-- Longitudinal trend charts (any metric over time)
-- Column lifetime & maintenance log
-- Automated DIA-NN processing with mode detection (diaPASEF / ASTRAL / Orbitrap)
+| Tab | What it does |
+|---|---|
+| **Run History** | All runs with QC flags; filter by **column**, **LC system**, and **instrument** when Lab Setup catalog is populated |
+| **Trends** | Longitudinal trend charts (any metric over time), pinned run comparisons |
+| **Health** | Instrument health dashboard, HOLD flag management |
+
+### ⊛ Lab Setup
+
+A column and LC system catalog seeded on first launch with entries from:
+
+| Vendor | Lines |
+|---|---|
+| **PepSep** | Ultra (UHP/nC, 150µm) · Advance (PepSeal, 75/50µm) · Pro (1.9µm, 75/150µm) |
+| **Evosep** | Endurance · Endurance OE · Performance · Performance OE · Whisper |
+| **IonOpticks** | Aurora Ultimate · Aurora Elite · Aurora Series |
+| **Thermo** | PepMap Neo · Easy-Spray |
+
+Tag any run with the column and LC system used. Run History filter dropdowns appear automatically and let you answer questions like: *"How does the PepSep Ultra 25cm perform on nanoElute 2 vs. the Evosep One at the same gradient length?"*
 
 ### 🌐 Community Benchmark
 
 - HeLa community leaderboard (Track A DDA + Track B DIA)
 - Radar fingerprint when both tracks submitted
-- Powered by Hugging Face dataset, no token required
+- Powered by Hugging Face dataset — no token required
 
 ---
 
@@ -128,6 +154,7 @@ The CCS **value** is portable. The PASEF **architecture** is not.
 | Structural info (CCS) | ✅ Å² per peptide | ❌ | ❌ |
 | Isobaric / chimeric sep. | ✅ IMS splits overlaps | Speed-based only | Partial |
 | PASEF multiplexing | ✅ ~10× DDA boost | ❌ | ❌ |
+| Phosphoisomer separation | ✅ ~5% Δ1/K₀, R ≥ 0.6 baseline | ❌ | ❌ |
 | Single-cell (carrier-free) | ✅ ~1,000–2,000 proteins | Emerging | ❌ |
 | Proteome depth (1hr HeLa) | ~8,000–10,000 | ⭐ ~10,000–12,000 | ~6,000–8,000 |
 | DIA scan speed | ~100 Hz (diaPASEF) | ⭐ ~200 Hz | ~40 Hz |
@@ -135,7 +162,7 @@ The CCS **value** is portable. The PASEF **architecture** is not.
 | Immunopeptidomics z=+1 | ✅ IMS resolves z=+1 | Difficult | Difficult |
 
 > ⭐ The **Astral** wins on raw speed and depth at high input — this table is honest about that.  
-> The timsTOF advantage is **structural**: 1/K₀, CCS, chimera reduction, single-cell depth, and PASEF. No other platform replicates this.
+> The timsTOF advantage is **structural**: 1/K₀, CCS, chimera reduction, phosphoisomer separation, single-cell depth, and PASEF. No other platform replicates this.
 
 ---
 
@@ -145,7 +172,7 @@ The CCS **value** is portable. The PASEF **architecture** is not.
 
 - Python 3.9+ (venv recommended)
 - Node.js 18+ (for JSX build step)
-- Bruker `.d` files processed by DIA-NN (generates `report.parquet`)
+- Bruker `.d` files processed by DIA-NN or Sage (generates `report.parquet` / `results.sage.parquet`)
 - Windows (instrument PC native) or Linux
 
 ### Installation
@@ -173,8 +200,8 @@ python start.py
 
 1. Point ZIGGY at your DIA-NN output directory in **Config** tab
 2. Click **Process New Runs** to ingest results
-3. The **Live** QC view updates immediately
-4. Navigate to **Ion Mobility → Ion Cloud** for your first 4D scatter
+3. Navigate to **Ion Mobility → Ion Cloud** for your first 4D scatter
+4. Open **Lab Setup** to tag your runs with column and LC system — enables cross-instrument filtering in Run History
 
 ---
 
@@ -187,9 +214,10 @@ E:/ziggy/
 ├── requirements.txt
 ├── package.json                ← Node / Babel (JSX build only)
 └── stan/                       ← Python package
-    ├── db.py                   ← SQLite schema + migrations
+    ├── db.py                   ← SQLite schema + migrations + catalog seeding
+    ├── columns.py              ← Column catalog (PepSep, Evosep, IonOpticks, Thermo)
     └── dashboard/
-        ├── server.py           ← FastAPI app (~50 endpoints)
+        ├── server.py           ← FastAPI app (~60 endpoints)
         └── public/
             ├── index.html      ← Super Bowie theme
             ├── favicon.svg     ← Aladdin Sane lightning bolt

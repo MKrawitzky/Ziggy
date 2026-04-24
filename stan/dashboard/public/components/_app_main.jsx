@@ -101,7 +101,6 @@
               <div className="tab-group-label">QC</div>
               <div className="tab-row">
                 {[
-                  ['live',      "Today's Runs"],
                   ['history',   'Run History'],
                   ['trends',    trendLabel],
                   ['health',    healthLabel],
@@ -170,6 +169,7 @@
               <div className="tab-row">
                 {[
                   ['welcome',    'Welcome'],
+                  ['labsetup',   '⊛ Lab Setup'],
                   ['config',     'Config'],
                   ['community',  'Community'],
                   ['about',      'About'],
@@ -180,7 +180,6 @@
             </div>
           </div>
           <ErrorBoundary key={tab}>
-            {tab === 'live' && <LiveRuns />}
             {tab === 'history' && <RunHistory pinnedRunIds={pinnedRunIds} setPinnedRunIds={setPinnedRunIds} navigateTo={setTab} />}
             {tab === 'trends' && <TrendCharts pinnedRunIds={pinnedRunIds} setPinnedRunIds={setPinnedRunIds} />}
             {tab === 'health' && <HealthTab pinnedRunIds={pinnedRunIds} setPinnedRunIds={setPinnedRunIds} />}
@@ -205,6 +204,7 @@
             {tab === 'chemo'      && <ChemoproteomicsTab />}
             {tab === 'phospho'    && <PhosphoTab />}
             {tab === 'welcome'    && <WelcomeTab navigateTo={setTab} />}
+            {tab === 'labsetup'   && <LabSetupTab />}
             {tab === 'config' && <ConfigEditor />}
             {tab === 'community' && <CommunityTab />}
             {tab === 'about' && <AboutTab />}

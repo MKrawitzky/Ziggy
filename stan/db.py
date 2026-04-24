@@ -115,6 +115,33 @@ CREATE TABLE IF NOT EXISTS search_comparisons (
 );
 
 CREATE INDEX IF NOT EXISTS idx_comparisons_run ON search_comparisons(run_id);
+
+-- ── Consumables / instrument setup catalogs ──────────────────────────────
+CREATE TABLE IF NOT EXISTS columns_catalog (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT    NOT NULL,
+    vendor           TEXT    DEFAULT '',
+    chemistry        TEXT    DEFAULT 'C18',
+    particle_um      REAL,
+    pore_a           INTEGER,
+    length_cm        REAL,
+    id_um            REAL,
+    max_pressure_bar INTEGER,
+    compatible_lc    TEXT    DEFAULT '',
+    gradient_name    TEXT    DEFAULT '',
+    notes            TEXT    DEFAULT '',
+    active           INTEGER DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS lc_catalog (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    vendor          TEXT    DEFAULT '',
+    flow_nl_min     REAL,
+    gradient_type   TEXT    DEFAULT '',
+    notes           TEXT    DEFAULT '',
+    active          INTEGER DEFAULT 1
+);
 """
 
 
@@ -132,7 +159,46 @@ def init_db(db_path: Path | None = None) -> None:
     with sqlite3.connect(str(db_path)) as con:
         con.executescript(_SCHEMA)
         _migrate(con)
+        _seed_catalogs(con)
     logger.info("Database initialized: %s", db_path)
+
+
+def _seed_catalogs(con: sqlite3.Connection) -> None:
+    """Seed columns_catalog and lc_catalog on first run if empty."""
+    col_count = con.execute("SELECT COUNT(*) FROM columns_catalog").fetchone()[0]
+    if col_count == 0:
+        try:
+            from stan.columns import COLUMN_CATALOG  # avoid circular at module level
+            for vendor, cols in COLUMN_CATALOG.items():
+                for c in cols:
+                    con.execute(
+                        "INSERT INTO columns_catalog (name, vendor, chemistry, particle_um, length_cm, id_um, active) "
+                        "VALUES (?, ?, 'C18', ?, ?, ?, 1)",
+                        (c["model"], vendor, c.get("particle_um"), c.get("length_cm"), c.get("id_um")),
+                    )
+            logger.info("Seeded columns_catalog with %d entries", con.execute("SELECT COUNT(*) FROM columns_catalog").fetchone()[0])
+        except Exception as e:
+            logger.warning("Could not seed columns_catalog: %s", e)
+
+    lc_count = con.execute("SELECT COUNT(*) FROM lc_catalog").fetchone()[0]
+    if lc_count == 0:
+        _LC_SEEDS = [
+            ("nanoElute 2",     "Bruker",   300,   "nano-gradient"),
+            ("proteoElute",     "Bruker",   300,   "nano-gradient"),
+            ("Evosep One",      "Evosep",   None,  "preset-gradient"),
+            ("Vanquish Neo",    "Thermo",   300,   "nano-gradient"),
+            ("UltiMate 3000",   "Thermo",   300,   "nano-gradient"),
+            ("EASY-nLC 1200",   "Thermo",   300,   "nano-gradient"),
+            ("M-Class",         "Waters",   300,   "nano-gradient"),
+            ("nanoAcquity",     "Waters",   300,   "nano-gradient"),
+            ("1290 Infinity II","Agilent",  300,   "nano-gradient"),
+        ]
+        for name, vendor, flow, gtype in _LC_SEEDS:
+            con.execute(
+                "INSERT INTO lc_catalog (name, vendor, flow_nl_min, gradient_type, active) VALUES (?, ?, ?, ?, 1)",
+                (name, vendor, flow, gtype),
+            )
+        logger.info("Seeded lc_catalog with %d entries", len(_LC_SEEDS))
 
 
 def _migrate(con: sqlite3.Connection) -> None:
@@ -173,30 +239,9 @@ def _migrate(con: sqlite3.Connection) -> None:
         ("missed_cleavage_rate_2plus", "ALTER TABLE runs ADD COLUMN missed_cleavage_rate_2plus REAL"),
         # Charge state 4+ percentage (added 2026-04-16)
         ("pct_charge_4plus", "ALTER TABLE runs ADD COLUMN pct_charge_4plus REAL"),
-        # User-assigned run classification (added 2026-04-17)
-        ("sample_type", "ALTER TABLE runs ADD COLUMN sample_type TEXT DEFAULT ''"),
-        # Workflow hint — affects search parameters (added 2026-04-17)
-        ("workflow", "ALTER TABLE runs ADD COLUMN workflow TEXT DEFAULT ''"),
-        # Notes / free-text annotation (added 2026-04-17)
-        ("run_notes", "ALTER TABLE runs ADD COLUMN run_notes TEXT DEFAULT ''"),
-        # DDA mass accuracy / score metrics (added 2026-04-22)
-        ("pct_delta_mass_lt5ppm", "ALTER TABLE runs ADD COLUMN pct_delta_mass_lt5ppm REAL"),
-        ("pct_hyperscore_gt30", "ALTER TABLE runs ADD COLUMN pct_hyperscore_gt30 REAL"),
-        # Chromatography window metrics (added 2026-04-22)
-        ("peak_width_early_sec", "ALTER TABLE runs ADD COLUMN peak_width_early_sec REAL"),
-        ("peak_width_middle_sec", "ALTER TABLE runs ADD COLUMN peak_width_middle_sec REAL"),
-        ("peak_width_late_sec", "ALTER TABLE runs ADD COLUMN peak_width_late_sec REAL"),
-        # C2A (middle 50% elution band) metrics (added 2026-04-22)
-        ("c2a_rt_start_min", "ALTER TABLE runs ADD COLUMN c2a_rt_start_min REAL"),
-        ("c2a_rt_stop_min", "ALTER TABLE runs ADD COLUMN c2a_rt_stop_min REAL"),
-        ("c2a_width_min", "ALTER TABLE runs ADD COLUMN c2a_width_min REAL"),
-        ("ids_per_minute_in_c2a", "ALTER TABLE runs ADD COLUMN ids_per_minute_in_c2a REAL"),
-        # Precursor intensity (added 2026-04-22)
-        ("median_precursor_intensity", "ALTER TABLE runs ADD COLUMN median_precursor_intensity REAL"),
-        # Raw file vendor/format detection (added 2026-04-22)
-        ("instrument_vendor", "ALTER TABLE runs ADD COLUMN instrument_vendor TEXT DEFAULT ''"),
-        ("file_format", "ALTER TABLE runs ADD COLUMN file_format TEXT DEFAULT ''"),
-        ("file_subformat", "ALTER TABLE runs ADD COLUMN file_subformat TEXT DEFAULT ''"),
+        # Catalog FKs for column and LC setup (added 2026-04-24)
+        ("column_id", "ALTER TABLE runs ADD COLUMN column_id INTEGER DEFAULT NULL"),
+        ("lc_id",     "ALTER TABLE runs ADD COLUMN lc_id     INTEGER DEFAULT NULL"),
     ]
 
     for col, ddl in migrations:
@@ -804,3 +849,152 @@ def time_since_last_qc(instrument: str, db_path: Path | None = None) -> dict:
         "hours_ago": round(hours, 1),
         "status": status,
     }
+
+
+# ── Columns catalog CRUD ─────────────────────────────────────────────────────
+
+_COL_FIELDS = (
+    "name", "vendor", "chemistry", "particle_um", "pore_a",
+    "length_cm", "id_um", "max_pressure_bar", "compatible_lc",
+    "gradient_name", "notes", "active",
+)
+
+
+def get_columns_catalog(db_path: Path | None = None) -> list[dict]:
+    if db_path is None:
+        db_path = get_db_path()
+    if not db_path.exists():
+        return []
+    try:
+        with sqlite3.connect(str(db_path)) as con:
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                "SELECT * FROM columns_catalog ORDER BY vendor, name"
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.OperationalError as e:
+        logger.warning("get_columns_catalog: %s", e)
+        return []
+
+
+def upsert_column(data: dict, db_path: Path | None = None) -> int:
+    """Insert or update a column entry.  If data contains 'id', updates that row."""
+    if db_path is None:
+        db_path = get_db_path()
+    row = {f: data.get(f) for f in _COL_FIELDS}
+    row.setdefault("active", 1)
+    col_id = data.get("id")
+    try:
+        with sqlite3.connect(str(db_path)) as con:
+            if col_id:
+                sets = ", ".join(f"{f} = ?" for f in _COL_FIELDS)
+                con.execute(
+                    f"UPDATE columns_catalog SET {sets} WHERE id = ?",
+                    [*row.values(), col_id],
+                )
+                return int(col_id)
+            else:
+                cur = con.execute(
+                    f"INSERT INTO columns_catalog ({', '.join(_COL_FIELDS)}) "
+                    f"VALUES ({', '.join('?' for _ in _COL_FIELDS)})",
+                    list(row.values()),
+                )
+                return cur.lastrowid
+    except sqlite3.OperationalError as e:
+        logger.error("upsert_column: %s", e)
+        return -1
+
+
+def delete_column(col_id: int, db_path: Path | None = None) -> bool:
+    if db_path is None:
+        db_path = get_db_path()
+    try:
+        with sqlite3.connect(str(db_path)) as con:
+            con.execute("DELETE FROM columns_catalog WHERE id = ?", (col_id,))
+        return True
+    except sqlite3.OperationalError as e:
+        logger.warning("delete_column: %s", e)
+        return False
+
+
+# ── LC catalog CRUD ──────────────────────────────────────────────────────────
+
+_LC_FIELDS = ("name", "vendor", "flow_nl_min", "gradient_type", "notes", "active")
+
+
+def get_lc_catalog(db_path: Path | None = None) -> list[dict]:
+    if db_path is None:
+        db_path = get_db_path()
+    if not db_path.exists():
+        return []
+    try:
+        with sqlite3.connect(str(db_path)) as con:
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                "SELECT * FROM lc_catalog ORDER BY vendor, name"
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.OperationalError as e:
+        logger.warning("get_lc_catalog: %s", e)
+        return []
+
+
+def upsert_lc(data: dict, db_path: Path | None = None) -> int:
+    if db_path is None:
+        db_path = get_db_path()
+    row = {f: data.get(f) for f in _LC_FIELDS}
+    row.setdefault("active", 1)
+    lc_id = data.get("id")
+    try:
+        with sqlite3.connect(str(db_path)) as con:
+            if lc_id:
+                sets = ", ".join(f"{f} = ?" for f in _LC_FIELDS)
+                con.execute(
+                    f"UPDATE lc_catalog SET {sets} WHERE id = ?",
+                    [*row.values(), lc_id],
+                )
+                return int(lc_id)
+            else:
+                cur = con.execute(
+                    f"INSERT INTO lc_catalog ({', '.join(_LC_FIELDS)}) "
+                    f"VALUES ({', '.join('?' for _ in _LC_FIELDS)})",
+                    list(row.values()),
+                )
+                return cur.lastrowid
+    except sqlite3.OperationalError as e:
+        logger.error("upsert_lc: %s", e)
+        return -1
+
+
+def delete_lc(lc_id: int, db_path: Path | None = None) -> bool:
+    if db_path is None:
+        db_path = get_db_path()
+    try:
+        with sqlite3.connect(str(db_path)) as con:
+            con.execute("DELETE FROM lc_catalog WHERE id = ?", (lc_id,))
+        return True
+    except sqlite3.OperationalError as e:
+        logger.warning("delete_lc: %s", e)
+        return False
+
+
+# ── Run instrument setup ─────────────────────────────────────────────────────
+
+def update_run_setup(
+    run_id: str,
+    column_id: int | None,
+    lc_id: int | None,
+    db_path: Path | None = None,
+) -> bool:
+    if db_path is None:
+        db_path = get_db_path()
+    try:
+        with sqlite3.connect(str(db_path)) as con:
+            con.execute(
+                "UPDATE runs SET column_id = ?, lc_id = ? WHERE id = ?",
+                (column_id, lc_id, run_id),
+            )
+        return True
+    except sqlite3.OperationalError as e:
+        logger.warning("update_run_setup: %s", e)
+        return False

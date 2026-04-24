@@ -25,5 +25,6 @@
   "_tab_welcome.jsx",
   "_tab_chemoproteomics.jsx",
   "_tab_phospho.jsx",
+  "_tab_labsetup.jsx",
   "_app_main.jsx"
 ]

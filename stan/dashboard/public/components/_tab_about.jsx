@@ -536,6 +536,10 @@
             <h3>What's New · ZIGGY · April 2026</h3>
             <div style={{display:'flex', flexDirection:'column', gap:'0.5rem', marginTop:'0.4rem'}}>
               {[
+                {tag:'NEW', color:'var(--pass)', text:'⊛ Lab Setup tab: column & LC system catalog with auto-seeded entries for PepSep (Ultra, Advance, Pro), Evosep (Endurance/Performance/Whisper), IonOpticks Aurora, and Thermo PepMap/EasySpray. Tag any run with the column and LC system used — enables cross-column, cross-instrument QC comparisons. Filter Run History by column, LC, or instrument.'},
+                {tag:'NEW', color:'var(--pass)', text:'🧬 Phospho tab: full TIMS advantage showcase for phosphoproteomics — Gaussian isomer profiles with Δ1/K₀ annotation & resolution score R, ResolutionGauge (Unresolved/Partial/Baseline zones), IMAdvantagePanel (Oliinyk 2023: 727 phosphoisomer pairs, 58 IM-only, ~5% Δ1/K₀ shift), phospho landscape scatter (gold=2-isomer, magenta=3+). DIA-NN & Sage search results supported.'},
+                {tag:'UPD', color:'var(--accent)', text:'⬡ Chimera map (4D Advantage): replaced continuous color scale with 3-category discrete — Clean (green), IM-rescued (gold), Still chimeric (red) — with explicit Δ1/K₀ threshold labels. Makes the IM rescue fraction immediately legible.'},
+                {tag:'UPD', color:'var(--accent)', text:'🔽 Run History filters: column, LC system, and instrument dropdowns appear automatically when Lab Setup catalog is populated — filter to exactly "PepSep Ultra 25cm on nanoElute 2 on timsTOF Ultra 2". Column and LC pills shown on each run row.'},
                 {tag:'NEW', color:'var(--pass)', text:'∿ Mobility Calibration QC tab: per-run Δ1/K₀ scatter, histogram, 30-run trend — catches barometric pressure drift before it tanks your IDs. Based on Müller et al. J. Proteome Res. 2025 (15 mbar → 0.025 Vs/cm² shift).'},
                 {tag:'NEW', color:'var(--pass)', text:'🧫 Histones tab: Crosstalk Matrix (14 marks), 4D TIMS Storm, Sequence Aligner, SC Network (17 marks, 4 populations incl. NaBu-treated from Cutler/Ctortecka 2025), Workflow guide'},
                 {tag:'NEW', color:'var(--pass)', text:'★ SC Drug Response panel (Histones): Orsburn 2026 — H4 K9+K13+K17 tri-acetylation as top mocetinostat hit (3.82×, p<0.0001) in single-cell HDAC inhibitor data. Includes non-histone surprise: S100-A9 (1.88×).'},
@@ -543,7 +547,9 @@
                 {tag:'NEW', color:'var(--pass)', text:'🔍 Search Assistant tab: DIA-NN / Sage search launcher with live unsearched-run badge counter in the tab header'},
                 {tag:'UPD', color:'var(--accent)', text:'↺ Fill button in Run History: back-populates null QC fields (MS1/MS2 signal, FWHM, mass accuracy, mobility FWHM, charge fractions) from existing report.parquet — no re-acquisition needed'},
                 {tag:'UPD', color:'var(--accent)', text:'★ Spectrum jump from MIA tab: click ★ on any MIA hit to jump directly into the Spectra viewer pre-loaded with that peptide'},
+                {tag:'FIX', color:'#60a5fa', text:'Phospho query: fixed Sage path fallback (DIA-NN-only path was checked first), fixed DIA-NN underscore stripping (_PEPTIDE_ → PEPTIDE), fixed frontend silent-fail on API 200+error'},
                 {tag:'FIX', color:'#60a5fa', text:'API: fixed sqlite3 connection pattern in recompute-metrics and annotate endpoints; fixed acquisition_mode → mode column in search/unsearched query'},
+                {tag:'REM', color:'#f87171', text:'Removed "Today\'s Runs" tab — not relevant outside an instrument PC context. Run History and the QC group cover the same ground with richer context.'},
                 {tag:'NEW', color:'var(--pass)', text:'🔮 Single Cell Proteomics tab: real K562 dilution series (8pg–125ng), Michaelis-Menten coverage model, live 4D ion cloud, charge-state evolution, surfaceome atlas in ion mobility space'},
                 {tag:'NEW', color:'var(--pass)', text:'⚡ Sneaky Peaky reborn: 4D scatter3d ion cloud, Joy Division K₀ ridgeline, CCS conformational density map, MA plot, shift map, dynamic range — full David Bowie flair'},
                 {tag:'ZIGGY', color:'#a855f7', text:'🗻 Landscape Viewer: compare 2–3 runs as Melanie-style rotatable 3D surfaces (m/z × 1/K₀ × intensity); linked cameras, differential A−B surface with Pearson similarity, peak inspector'},
@@ -555,6 +561,7 @@
                                 background: tag === 'ZIGGY' ? 'rgba(168,85,247,0.15)'
                                           : tag === 'NEW'   ? 'rgba(34,197,94,0.12)'
                                           : tag === 'FIX'   ? 'rgba(96,165,250,0.12)'
+                                          : tag === 'REM'   ? 'rgba(248,113,113,0.12)'
                                           : 'rgba(218,170,0,0.12)',
                                 color, fontWeight:700, fontSize:'0.75rem', marginTop:'0.05rem'}}>{tag}</span>
                   <span style={{color:'var(--muted)'}}>{text}</span>
