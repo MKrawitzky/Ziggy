@@ -195,11 +195,15 @@ COMMUNITY_SAGE_SLURM: dict = {
 }
 
 
-def get_community_sage_params(cache_dir: str | None = None) -> dict:
+def get_community_sage_params(
+    cache_dir: str | None = None,
+    immuno_class: int = 0,
+) -> dict:
     """Get the full frozen Sage parameters with FASTA path resolved.
 
     Args:
         cache_dir: Override for the local cache directory on Hive.
+        immuno_class: 0=tryptic, 1=MHC-I non-specific, 2=MHC-II non-specific.
 
     Returns:
         Complete Sage parameter dict.
@@ -211,6 +215,21 @@ def get_community_sage_params(cache_dir: str | None = None) -> dict:
 
     params = copy.deepcopy(COMMUNITY_SAGE_PARAMS)
     params["database"]["fasta"] = f"{cache}/{fasta_filename}"
+
+    if immuno_class == 1:
+        params["database"]["enzyme"] = {"cleave_at": "", "missed_cleavages": 0}
+        params["database"]["min_len"] = 8
+        params["database"]["max_len"] = 12
+        params["database"]["variable_mods"] = {"M": [15.9949], "N": [0.9840], "Q": [0.9840]}
+        params["precursor_charge"] = [1, 3]
+        params["min_peaks"] = 6
+    elif immuno_class == 2:
+        params["database"]["enzyme"] = {"cleave_at": "", "missed_cleavages": 0}
+        params["database"]["min_len"] = 13
+        params["database"]["max_len"] = 25
+        params["database"]["variable_mods"] = {"M": [15.9949], "N": [0.9840], "Q": [0.9840]}
+        params["precursor_charge"] = [2, 4]
+        params["min_peaks"] = 6
 
     return params
 

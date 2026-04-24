@@ -98,21 +98,50 @@ def _build_local_diann_params(
 
 def _build_local_sage_params(
     fasta_path: str,
+    immuno_class: int = 0,
 ) -> dict:
-    """Build Sage JSON config for local mode with user-provided FASTA."""
+    """Build Sage JSON config for local mode with user-provided FASTA.
+
+    immuno_class:
+        0 = standard tryptic search
+        1 = MHC-I non-specific (8–12 aa, z 1–3, non-specific enzyme)
+        2 = MHC-II non-specific (13–25 aa, z 2–4, non-specific enzyme)
+    """
+    if immuno_class == 1:
+        # MHC-I: 8–12 aa, z=+1 is common, non-specific digestion
+        # Deamidation (N,Q) is a relevant mod in immunopeptidomics
+        enzyme    = {"cleave_at": "", "missed_cleavages": 0}
+        min_len   = 8
+        max_len   = 12
+        charges   = [1, 3]
+        var_mods  = {"M": [15.9949], "N": [0.9840], "Q": [0.9840]}
+    elif immuno_class == 2:
+        # MHC-II: 13–25 aa, z 2–4, non-specific
+        enzyme    = {"cleave_at": "", "missed_cleavages": 0}
+        min_len   = 13
+        max_len   = 25
+        charges   = [2, 4]
+        var_mods  = {"M": [15.9949], "N": [0.9840], "Q": [0.9840]}
+    else:
+        enzyme    = {"cleave_at": "KR", "restrict": "P", "missed_cleavages": 1}
+        min_len   = 7
+        max_len   = 30
+        charges   = [2, 4]
+        var_mods  = {"M": [15.9949]}
+
     return {
         "database": {
             "fasta": fasta_path,
-            "enzyme": {"cleave_at": "KR", "restrict": "P", "missed_cleavages": 1},
-            "min_len": 7,
-            "max_len": 30,
+            "enzyme": enzyme,
+            "min_len": min_len,
+            "max_len": max_len,
             "static_mods": {"C": 57.0215},
-            "variable_mods": {"M": [15.9949]},
+            "variable_mods": var_mods,
         },
-        "precursor_tol": {"ppm": [-10, 10]},
+        "precursor_tol": {"ppm": [-15, 15]},
         "fragment_tol": {"ppm": [-20, 20]},
-        "precursor_charge": [2, 4],
-        "min_peaks": 8,
+        "precursor_charge": charges,
+        "min_peaks": 6 if immuno_class else 8,
         "max_peaks": 150,
         "report_psms": 1,
         "wide_window": False,
@@ -384,6 +413,7 @@ def run_sage_local(
     threads: int = 0,
     fasta_path: str | None = None,
     search_mode: str = "local",
+    immuno_class: int = 0,
 ) -> Path | None:
     """Run Sage locally as a subprocess.
 
@@ -420,7 +450,7 @@ def run_sage_local(
         from stan.search.community_params import ensure_community_assets, get_community_sage_params
         cache_dir = output_dir.parent / "_community_assets"
         ensure_community_assets("bruker" if vendor == "bruker" else "thermo", cache_dir)
-        params = get_community_sage_params(cache_dir=str(cache_dir))
+        params = get_community_sage_params(cache_dir=str(cache_dir), immuno_class=immuno_class)
     else:
         if not fasta_path:
             logger.error(
@@ -431,7 +461,7 @@ def run_sage_local(
         if not Path(fasta_path).exists():
             logger.error("FASTA file not found: %s", fasta_path)
             return None
-        params = _build_local_sage_params(fasta_path)
+        params = _build_local_sage_params(fasta_path, immuno_class=immuno_class)
 
     params["mzml_paths"] = [input_path]
     params["output_directory"] = str(output_dir)
