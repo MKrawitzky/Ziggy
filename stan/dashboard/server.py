@@ -798,13 +798,14 @@ def _resolve_report_path(run: dict) -> Path | None:
     """Return the DIA-NN report.parquet path for a run, or None.
 
     Priority:
-      1. result_path column in DB (stored by watcher after each search)
+      1. result_path column in DB — only if it points to report.parquet
+         (DDA runs store results.sage.parquet there; those are handled by
+         _resolve_sage_path instead)
       2. Disk fallback: <raw_parent>/stan_results/<run_stem>/report.parquet
-         (the layout STAN uses when writing search results locally)
       3. Disk fallback: report.parquet directly next to the .d directory
     """
     stored = run.get("result_path", "")
-    if stored:
+    if stored and Path(stored).name == "report.parquet":
         p = Path(stored)
         if p.exists():
             return p
@@ -823,6 +824,36 @@ def _resolve_report_path(run: dict) -> Path | None:
 
     # Convention 2: report.parquet sitting directly next to the .d directory
     candidate2 = raw.parent / "report.parquet"
+    if candidate2.exists():
+        return candidate2
+
+    return None
+
+
+def _resolve_sage_path(run: dict) -> Path | None:
+    """Return the Sage results.sage.parquet path for a run, or None.
+
+    Used as a fallback for DDA/ddaPASEF runs that went through Sage instead
+    of DIA-NN.  Mirrors the same priority order as _resolve_report_path.
+    """
+    stored = run.get("result_path", "")
+    if stored and Path(stored).name == "results.sage.parquet":
+        p = Path(stored)
+        if p.exists():
+            return p
+
+    raw_path = run.get("raw_path", "")
+    if not raw_path:
+        return None
+
+    raw  = Path(raw_path)
+    stem = raw.stem
+
+    candidate = raw.parent / "stan_results" / stem / "results.sage.parquet"
+    if candidate.exists():
+        return candidate
+
+    candidate2 = raw.parent / "results.sage.parquet"
     if candidate2.exists():
         return candidate2
 
@@ -943,9 +974,10 @@ async def api_lc_traces(run_id: str) -> dict:
 
 @app.get("/api/runs/{run_id}/mobility-map")
 async def api_mobility_map(run_id: str, rt_bins: int = 60, mob_bins: int = 50) -> dict:
-    """2D RT × 1/K0 density grid. Source: 4DFF .features (preferred) or DIA-NN report."""
+    """2D RT × 1/K0 density grid. Source: 4DFF .features > DIA-NN > Sage."""
     from stan.metrics.mobility_viz import get_mobility_map
     from stan.metrics.mobility_diann import get_mobility_map_diann
+    from stan.metrics.mobility_sage import get_mobility_map_sage
 
     run = get_run(run_id)
     if not run:
@@ -958,6 +990,10 @@ async def api_mobility_map(run_id: str, rt_bins: int = 60, mob_bins: int = 50) -
     report_path = _resolve_report_path(run)
     if report_path:
         return get_mobility_map_diann(report_path, run_name=run.get("run_name"), rt_bins=rt_bins, mobility_bins=mob_bins)
+
+    sage_path = _resolve_sage_path(run)
+    if sage_path:
+        return get_mobility_map_sage(sage_path, rt_bins=rt_bins, mobility_bins=mob_bins)
 
     return {}
 
@@ -1047,9 +1083,10 @@ async def api_pasef_windows(run_id: str, max_events: int = 5000) -> dict:
 
 @app.get("/api/runs/{run_id}/mobility-3d")
 async def api_mobility_3d(run_id: str, max_features: int = 5000) -> dict:
-    """3D feature point cloud (RT × m/z × 1/K0). Source: 4DFF or DIA-NN report."""
+    """3D feature point cloud (RT × m/z × 1/K0). Source: 4DFF > DIA-NN > Sage."""
     from stan.metrics.mobility_viz import get_feature_3d_data
     from stan.metrics.mobility_diann import get_feature_3d_data_diann
+    from stan.metrics.mobility_sage import get_feature_3d_data_sage
 
     run = get_run(run_id)
     if not run:
@@ -1064,12 +1101,16 @@ async def api_mobility_3d(run_id: str, max_features: int = 5000) -> dict:
     if report_path:
         return get_feature_3d_data_diann(report_path, run_name=run.get("run_name"), max_features=cap)
 
+    sage_path = _resolve_sage_path(run)
+    if sage_path:
+        return get_feature_3d_data_sage(sage_path, max_features=cap)
+
     return {}
 
 
 @app.get("/api/runs/{run_id}/mobility-stats")
 async def api_mobility_stats(run_id: str) -> dict:
-    """Charge distribution + FWHM + intensity histograms. Source: 4DFF or DIA-NN report."""
+    """Charge distribution + FWHM + intensity histograms. Source: 4DFF > DIA-NN > Sage."""
     from stan.metrics.mobility_viz import (
         get_charge_distribution,
         get_intensity_histogram,
@@ -1080,6 +1121,7 @@ async def api_mobility_stats(run_id: str) -> dict:
         get_fwhm_histogram_diann,
         get_intensity_histogram_diann,
     )
+    from stan.metrics.mobility_sage import get_charge_distribution_sage
 
     run = get_run(run_id)
     if not run:
@@ -1100,6 +1142,15 @@ async def api_mobility_stats(run_id: str) -> dict:
             "charge_dist": get_charge_distribution_diann(report_path, run_name),
             "fwhm_hist":   get_fwhm_histogram_diann(report_path, run_name),
             "intensity_hist": get_intensity_histogram_diann(report_path, run_name),
+        }
+
+    sage_path = _resolve_sage_path(run)
+    if sage_path:
+        # Sage PSMs have no FWHM or quantity — charge dist is what's useful
+        return {
+            "charge_dist":   get_charge_distribution_sage(sage_path),
+            "fwhm_hist":     {},
+            "intensity_hist":{},
         }
 
     return {}
@@ -1206,7 +1257,8 @@ async def api_fix_instrument_names() -> dict:
         with sqlite3.connect(str(db_path)) as con:
             con.row_factory = sqlite3.Row
             rows = con.execute(
-                "SELECT id, raw_path FROM runs WHERE instrument = 'auto'"
+                "SELECT id, raw_path FROM runs WHERE lower(trim(instrument)) IN ('auto', 'unknown', 'instrument', '')"
+                " OR instrument IS NULL"
             ).fetchall()
 
             for row in rows:
@@ -1235,6 +1287,175 @@ async def api_fix_instrument_names() -> dict:
         return {"updated": 0, "skipped": 0, "errors": 1, "detail": str(exc)}
 
     return {"updated": updated, "skipped": skipped, "errors": errors}
+
+
+@app.get("/api/runs/{run_id}/phosphoisomer")
+async def api_phosphoisomer(
+    run_id: str,
+    sequence: str,           # bare AA sequence, e.g. ATAAETASEPAESK
+    charge: int | None = None,
+    mz_tol_ppm: float = 20.0,
+) -> dict:
+    """Return 1/K₀ distributions for all phosphoisomers of a bare peptide sequence.
+
+    Works with both Sage results.sage.parquet (column: peptide, ion_mobility)
+    and DIA-NN report.parquet (columns: Modified.Sequence, IM).
+
+    Returns groups keyed by modified sequence with histogram-ready IM lists,
+    medians, standard deviations, and a pairwise resolution matrix so the
+    frontend can reproduce the Oliinyk et al. 2023 phosphoisomer resolution plot.
+    """
+    import math as _math
+    import re as _re
+
+    try:
+        import polars as pl
+    except ImportError:
+        raise HTTPException(status_code=500, detail="polars required")
+
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    report_path = _resolve_report_path(run)
+    if not report_path:
+        return {"groups": [], "n_total": 0, "error": "No search results for this run"}
+
+    seq_upper = sequence.upper().strip()
+    is_sage = "sage" in str(report_path).lower() or "results.sage" in str(report_path).lower()
+
+    try:
+        schema_cols = set(pl.read_parquet_schema(str(report_path)).keys())
+    except Exception as e:
+        return {"groups": [], "n_total": 0, "error": str(e)}
+
+    # ── Sage path ────────────────────────────────────────────────────────
+    if is_sage or ("peptide" in schema_cols and "ion_mobility" in schema_cols):
+        if "peptide" not in schema_cols or "ion_mobility" not in schema_cols:
+            return {"groups": [], "n_total": 0, "error": "No peptide/ion_mobility columns in Sage output"}
+
+        q_col     = next((c for c in ("spectrum_q","q_value","posterior_error") if c in schema_cols), None)
+        chg_col   = "charge" if "charge" in schema_cols else None
+        want      = [c for c in ["peptide","ion_mobility","charge","retention_time","calcmass",q_col] if c]
+        df        = pl.read_parquet(str(report_path), columns=want)
+
+        # strip bracket mods: PEPTIDE[+79.966]SEQ → PEPTIDESEQ
+        df = df.with_columns(
+            pl.col("peptide").map_elements(
+                lambda p: _re.sub(r"\[.*?\]", "", p or "").upper(),
+                return_dtype=pl.String
+            ).alias("_bare")
+        )
+        df = df.filter(pl.col("_bare") == seq_upper)
+        df = df.filter(pl.col("ion_mobility") > 0)
+        if q_col:
+            df = df.filter(pl.col(q_col) <= 0.01)
+        if charge is not None and chg_col:
+            df = df.filter(pl.col(chg_col) == charge)
+
+        mod_seq_col = "peptide"
+        im_col      = "ion_mobility"
+
+    # ── DIA-NN path ──────────────────────────────────────────────────────
+    else:
+        mod_col  = next((c for c in ("Modified.Sequence","Sequence") if c in schema_cols), None)
+        str_col  = next((c for c in ("Stripped.Sequence",) if c in schema_cols), None)
+        im_c     = next((c for c in ("IM","Precursor.IonMobility","ion_mobility") if c in schema_cols), None)
+        qv_col   = next((c for c in ("Q.Value","q_value") if c in schema_cols), None)
+        chg_col  = next((c for c in ("Precursor.Charge","charge") if c in schema_cols), None)
+
+        if not mod_col or not im_c:
+            return {"groups": [], "n_total": 0,
+                    "error": f"Missing sequence/IM columns (found: {sorted(schema_cols)[:20]})"}
+
+        want = [c for c in [mod_col, str_col, im_c, qv_col, chg_col] if c]
+        df = pl.read_parquet(str(report_path), columns=want)
+
+        # build bare sequence from stripped col or strip mods from modified
+        if str_col:
+            df = df.with_columns(pl.col(str_col).str.to_uppercase().alias("_bare"))
+        else:
+            df = df.with_columns(
+                pl.col(mod_col).map_elements(
+                    lambda p: _re.sub(r"\(.*?\)|\[.*?\]", "", p or "").upper(),
+                    return_dtype=pl.String
+                ).alias("_bare")
+            )
+
+        df = df.filter(pl.col("_bare") == seq_upper)
+        df = df.filter(pl.col(im_c) > 0)
+        if qv_col:
+            df = df.filter(pl.col(qv_col) <= 0.01)
+        if charge is not None and chg_col:
+            df = df.filter(pl.col(chg_col) == charge)
+
+        mod_seq_col = mod_col
+        im_col      = im_c
+
+    if df.height == 0:
+        return {"groups": [], "n_total": 0, "sequence": seq_upper}
+
+    # ── Group by modified sequence ───────────────────────────────────────
+    groups_raw: dict[str, list[float]] = {}
+    for row in df.iter_rows(named=True):
+        key = str(row[mod_seq_col] or "")
+        val = float(row[im_col])
+        groups_raw.setdefault(key, []).append(val)
+
+    def _stats(vals: list[float]) -> dict:
+        n    = len(vals)
+        mu   = sum(vals) / n
+        med  = sorted(vals)[n // 2]
+        std  = (_math.sqrt(sum((v - mu)**2 for v in vals) / n)) if n > 1 else 0.0
+        fwhm = 2.3548 * std
+        return {"n": n, "mean": round(mu, 4), "median": round(med, 4),
+                "std": round(std, 4), "fwhm": round(fwhm, 4)}
+
+    groups = []
+    for mod_seq, ims in sorted(groups_raw.items(), key=lambda x: -len(x[1])):
+        s = _stats(ims)
+        # 50-bin histogram for frontend rendering
+        lo, hi = min(ims), max(ims)
+        span = hi - lo or 0.01
+        bins = 50
+        step = span / bins
+        hist = [0] * bins
+        for v in ims:
+            i = min(int((v - lo) / step), bins - 1)
+            hist[i] += 1
+        bin_centers = [round(lo + (i + 0.5) * step, 4) for i in range(bins)]
+        groups.append({
+            "modified_sequence": mod_seq,
+            **s,
+            "im_values": [round(v, 4) for v in sorted(ims)],
+            "hist_x": bin_centers,
+            "hist_y": hist,
+        })
+
+    # ── Pairwise resolution ──────────────────────────────────────────────
+    resolution = []
+    for i in range(len(groups)):
+        for j in range(i + 1, len(groups)):
+            g1, g2 = groups[i], groups[j]
+            delta  = abs(g1["median"] - g2["median"])
+            fwhm_avg = (g1["fwhm"] + g2["fwhm"]) / 2
+            R = round(delta / fwhm_avg, 3) if fwhm_avg > 0 else 0.0
+            resolution.append({
+                "seq_a": g1["modified_sequence"],
+                "seq_b": g2["modified_sequence"],
+                "delta_im": round(delta, 4),
+                "fwhm_avg": round(fwhm_avg, 4),
+                "resolution": R,
+                "baseline_resolved": R >= 1.0,
+            })
+
+    return {
+        "sequence":   seq_upper,
+        "groups":     groups,
+        "n_total":    sum(g["n"] for g in groups),
+        "resolution": resolution,
+        "source":     "sage" if is_sage else "diann",
+    }
 
 
 @app.get("/api/runs/{run_id}/spectrum")
@@ -1337,9 +1558,221 @@ async def api_spectrum_experimental(run_id: str, sequence: str, charge: int = 2)
         return {"available": False, "message": str(e)}
 
 
+def _immunopeptidomics_from_sage(run: dict, sage_path: "Path") -> dict:
+    """Build the immunopeptidomics response dict from Sage results.sage.parquet.
+
+    Matches the structure returned by the DIA-NN path so the frontend works
+    identically for DDA runs.
+    """
+    import re as _re
+    import math as _math
+    from stan.metrics.mobility_sage import load_immuno_psms_sage
+
+    _KD: dict[str, float] = {
+        "A": 1.8,  "R": -4.5, "N": -3.5, "D": -3.5, "C": 2.5,
+        "Q": -3.5, "E": -3.5, "G": -0.4, "H": -3.2, "I": 4.5,
+        "L": 3.8,  "K": -3.9, "M": 1.9,  "F": 2.8,  "P": -1.6,
+        "S": -0.8, "T": -0.7, "W": -0.9, "Y": -1.3, "V": 4.2,
+    }
+    _AMINO_ACIDS = list("ACDEFGHIKLMNPQRSTVWY")
+    _AA_IDX      = {aa: i for i, aa in enumerate(_AMINO_ACIDS)}
+
+    # Sage mass-shift → human-readable mod name
+    _SAGE_MODS = {
+        "15.9949": "Oxidation",   "+15.9949": "Oxidation",
+        "57.0215": "CAM",         "+57.0215": "CAM",
+        "57.021":  "CAM",         "+57.021":  "CAM",
+        "79.9663": "Phospho",     "+79.9663": "Phospho",
+        "42.0106": "Acetyl",      "+42.0106": "Acetyl",
+        "-17.026": "Deamidation", "17.0265": "Deamidation",
+        "-18.010": "Water loss",
+        "0.9840":  "Deamidated",  "+0.9840": "Deamidated",
+    }
+
+    try:
+        rows = load_immuno_psms_sage(sage_path)
+        if not rows:
+            return {}
+
+        n_total = len(rows)
+        len_counts: dict[int, int] = {}
+        charge_counts: dict[int, int] = {}
+        im_by_len: dict[int, list[float]] = {}
+        gravy_cloud: list[dict] = []
+        motif_seqs: dict[int, list[str]] = {8: [], 9: [], 10: [], 11: []}
+        mod_counts: dict[str, int] = {}
+        top_peptides: list[dict] = []
+
+        for r in rows:
+            seq  = r["seq"]
+            plen = r["pep_len"]
+            im   = r["im"]
+            prot = r["protein"]
+
+            len_counts[plen] = len_counts.get(plen, 0) + 1
+
+            if im and im > 0:
+                im_by_len.setdefault(plen, []).append(im)
+
+            if plen <= 500:
+                top_peptides.append({
+                    "sequence":  seq,
+                    "length":    plen,
+                    "charge":    0,
+                    "mz":        0.0,
+                    "rt":        0.0,
+                    "mobility":  round(im, 4) if im else None,
+                    "intensity": round(r["intensity"], 1),
+                })
+
+            if plen in motif_seqs:
+                motif_seqs[plen].append(seq)
+
+            # GRAVY
+            if im and im > 0 and len(gravy_cloud) < 600:
+                vals = [_KD[aa] for aa in seq if aa in _KD]
+                if vals:
+                    g = round(sum(vals) / len(vals), 3)
+                    gravy_cloud.append({"gravy": g, "im": round(im, 4), "length": plen, "charge": 0, "seq": seq[:16]})
+
+        # Charge dist — Sage has charge per PSM
+        try:
+            import polars as pl
+            schema = pl.read_parquet_schema(str(sage_path))
+            if "charge" in schema:
+                q_col = next((c for c in ("spectrum_q", "q_value") if c in schema), None)
+                if q_col:
+                    ch_df = pl.read_parquet(str(sage_path), columns=[q_col, "charge"])
+                    ch_df = ch_df.filter(pl.col(q_col) <= 0.01)
+                    for row in ch_df.group_by("charge").agg(pl.len().alias("n")).iter_rows(named=True):
+                        charge_counts[int(row["charge"])] = int(row["n"])
+        except Exception:
+            pass
+
+        # Mod frequencies from Sage notation
+        try:
+            import polars as pl
+            schema = pl.read_parquet_schema(str(sage_path))
+            pep_col = next((c for c in ("peptide", "sequence") if c in schema), None)
+            q_col   = next((c for c in ("spectrum_q", "q_value") if c in schema), None)
+            if pep_col and q_col:
+                mod_pat = _re.compile(r"\[([\+\-][\d\.]+)\]")
+                raw_df  = pl.read_parquet(str(sage_path), columns=[q_col, pep_col])
+                raw_df  = raw_df.filter(pl.col(q_col) <= 0.01)
+                for seq_raw in raw_df[pep_col].drop_nulls().to_list():
+                    for shift in mod_pat.findall(seq_raw):
+                        lbl = _SAGE_MODS.get(shift, f"[{shift}]")
+                        mod_counts[lbl] = mod_counts.get(lbl, 0) + 1
+        except Exception:
+            pass
+
+        mhc1  = sum(v for k, v in len_counts.items() if 8  <= k <= 14)
+        mhc2  = sum(v for k, v in len_counts.items() if 13 <= k <= 25)
+        short = sum(v for k, v in len_counts.items() if k < 8)
+        long_ = sum(v for k, v in len_counts.items() if k > 25)
+
+        lens = [k for k, v in len_counts.items() for _ in range(v)]
+        lens.sort()
+        length_stats = {
+            "min":    min(lens),
+            "max":    max(lens),
+            "median": float(lens[len(lens)//2]),
+            "mean":   round(sum(lens)/len(lens), 1),
+        } if lens else {}
+
+        # length × mobility aggregation
+        length_mobility_agg: dict = {}
+        for plen, ims in im_by_len.items():
+            ims_s = sorted(ims)
+            n = len(ims_s)
+            mean_im = sum(ims_s) / n
+            var     = sum((v - mean_im)**2 for v in ims_s) / max(n - 1, 1)
+            std_im  = var ** 0.5
+            q1      = ims_s[n // 4]
+            q3      = ims_s[3 * n // 4]
+            med     = ims_s[n // 2]
+            length_mobility_agg[plen] = {
+                "mean_im":   round(mean_im, 4), "std_im":    round(std_im, 4),
+                "median_im": round(med,     4), "q25_im":    round(q1, 4),
+                "q75_im":    round(q3,      4), "n":         n,
+            }
+
+        # motif matrix
+        motif_matrix: dict = {}
+        for ml, seqs in motif_seqs.items():
+            if len(seqs) < 10:
+                continue
+            pos_counts = [[0] * 20 for _ in range(ml)]
+            for seq in seqs:
+                if len(seq) != ml:
+                    continue
+                for pos, aa in enumerate(seq):
+                    ai = _AA_IDX.get(aa)
+                    if ai is not None:
+                        pos_counts[pos][ai] += 1
+            freq: list[list[float]] = []
+            for ai in range(20):
+                row_f: list[float] = []
+                for pos in range(ml):
+                    tot = sum(pos_counts[pos])
+                    row_f.append(round(pos_counts[pos][ai] / max(1, tot), 4))
+                freq.append(row_f)
+            motif_matrix[str(ml)] = {"n": len(seqs), "aas": _AMINO_ACIDS, "freq": freq}
+
+        sorted_mods  = sorted(mod_counts.items(), key=lambda x: x[1], reverse=True)[:12]
+        mods_out     = [{"name": n, "count": c, "pct": round(c / n_total * 100, 2)} for n, c in sorted_mods]
+
+        top_peptides_out = sorted(top_peptides, key=lambda r: r["intensity"], reverse=True)[:500]
+
+        acq_mode = run.get("mode", "")
+        pct_z1 = round(charge_counts.get(1, 0) / max(n_total, 1) * 100, 1)
+        mhc1_n = sum(v for k, v in len_counts.items() if 8 <= k <= 14)
+        mhc1_9 = len_counts.get(9, 0)
+        all_ims = [im for ims in im_by_len.values() for im in ims]
+        mob_cv: float | None = None
+        if len(all_ims) > 1:
+            mean_im = sum(all_ims) / len(all_ims)
+            mob_cv  = round((_math.sqrt(sum((v - mean_im)**2 for v in all_ims) / max(len(all_ims)-1, 1)) / max(mean_im, 1e-6)) * 100, 2)
+
+        radar = {
+            "pct_mhc1":      round(mhc1 / n_total * 100, 1) if n_total else 0.0,
+            "pct_z1":        pct_z1,
+            "pct_9mer_mhc1": round(mhc1_9 / max(mhc1_n, 1) * 100, 1),
+            "mobility_cv":   mob_cv,
+            "dyn_range_db":  None,
+        }
+
+        return {
+            "n_total":             n_total,
+            "n_mhc1":              mhc1,
+            "n_mhc2":              mhc2,
+            "n_short":             short,
+            "n_long":              long_,
+            "pct_mhc1":            round(mhc1 / n_total * 100, 1) if n_total else 0,
+            "pct_mhc2":            round(mhc2 / n_total * 100, 1) if n_total else 0,
+            "length_dist":         len_counts,
+            "charge_dist":         charge_counts,
+            "length_stats":        length_stats,
+            "top_peptides":        top_peptides_out,
+            "modifications":       mods_out,
+            "length_mobility_agg": length_mobility_agg,
+            "gravy_cloud":         gravy_cloud,
+            "radar":               radar,
+            "motif_matrix":        motif_matrix,
+            "top_source_proteins": [],
+            "acq_mode":            acq_mode,
+            "is_dia_immuno":       False,
+            "is_dda_immuno":       True,
+            "source":              "sage",
+        }
+    except Exception:
+        logger.exception("_immunopeptidomics_from_sage failed")
+        return {}
+
+
 @app.get("/api/runs/{run_id}/immunopeptidomics")
 async def api_immunopeptidomics(run_id: str) -> dict:
-    """Immunopeptidomics analysis from DIA-NN report.parquet.
+    """Immunopeptidomics analysis from DIA-NN report.parquet or Sage results.
 
     Computes peptide length distribution, MHC Class I (8-14aa) and
     Class II (13-25aa) counts, charge distribution, top peptides,
@@ -1350,6 +1783,11 @@ async def api_immunopeptidomics(run_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Run not found")
 
     report_path = _resolve_report_path(run)
+    sage_path   = _resolve_sage_path(run) if not report_path else None
+
+    if not report_path and sage_path:
+        return _immunopeptidomics_from_sage(run, sage_path)
+
     if not report_path:
         return {}
 
@@ -1639,102 +2077,135 @@ async def api_immunopeptidomics(run_id: str) -> dict:
 @app.get("/api/immuno/compare")
 async def api_immuno_compare(
     run_a: str,
-    run_b: str,
+    run_b: str = "",
     mhc_class: int = 0,   # 0=all, 1=MHC-I, 2=MHC-II
 ) -> dict:
-    """Compare immunopeptidomics from two runs.
+    """Compare immunopeptidomics from two runs (run_b optional for single-run mode).
 
-    Returns per-peptide fold change (log2), novelty classification (atlas-known
-    vs novel), and summary stats. Uses median-normalization across shared peptides.
+    When run_b is omitted, returns single-run atlas novelty analysis — no fold
+    change, all peptides are classified as novel_A or atlas_known.
+
+    Supports both DIA-NN report.parquet and Sage results.sage.parquet.
 
     Response:
         {
           "peptides": [{ seq, log2fc, intensity_a, intensity_b, status, protein, length, im_a, im_b }],
-          "stats": { n_a, n_b, n_shared, n_novel_a, n_novel_b, n_atlas_known }
+          "stats":    { n_a, n_b, n_shared, n_novel_a, n_novel_b, n_atlas_known, single_run }
         }
     """
     import math
     import re as _re2
 
     run_a_rec = get_run(run_a)
-    run_b_rec = get_run(run_b)
-    if not run_a_rec or not run_b_rec:
-        raise HTTPException(status_code=404, detail="One or both run IDs not found")
+    if not run_a_rec:
+        raise HTTPException(status_code=404, detail="Run A not found")
 
-    path_a = _resolve_report_path(run_a_rec)
-    path_b = _resolve_report_path(run_b_rec)
-    if not path_a or not path_b:
-        raise HTTPException(status_code=422, detail="One or both runs have no search results")
+    run_b_rec = get_run(run_b) if run_b else None
+    single_run = run_b_rec is None
+
+    def _resolve_any_path(rec: dict) -> "Path | None":
+        """Return first available search result path (DIA-NN or Sage)."""
+        p = _resolve_report_path(rec)
+        if p:
+            return p
+        return _resolve_sage_path(rec)
+
+    def _is_sage(path: "Path") -> bool:
+        return path.name == "results.sage.parquet"
+
+    def _load_immuno_diann(path: "Path", mhc_cls: int) -> list[dict]:
+        """Load DIA-NN precursors as {seq, pep_len, intensity, im, protein_group}."""
+        import polars as pl
+        schema = pl.read_parquet_schema(str(path))
+        avail  = set(schema.keys())
+        want   = [c for c in [
+            "Stripped.Sequence", "Modified.Sequence",
+            "Precursor.Quantity", "Q.Value",
+            "IM", "Protein.Group", "Protein.Names",
+        ] if c in avail]
+        df = pl.read_parquet(str(path), columns=want)
+        df = df.filter(pl.col("Q.Value") <= 0.01)
+        seq_col = "Stripped.Sequence" if "Stripped.Sequence" in df.columns else "Modified.Sequence"
+        df = df.with_columns(
+            pl.col(seq_col).str.replace_all(r"\(UniMod:\d+\)", "").alias("seq"),
+            pl.col(seq_col).str.replace_all(r"\(UniMod:\d+\)", "").str.len_chars().alias("pep_len"),
+        )
+        df = df.filter(pl.col("pep_len").is_between(8, 25))
+        if mhc_cls == 1:
+            df = df.filter(pl.col("pep_len").is_between(8, 14))
+        elif mhc_cls == 2:
+            df = df.filter(pl.col("pep_len").is_between(13, 25))
+
+        grp = ["seq"]
+        agg = [pl.col("pep_len").first().alias("pep_len")]
+        if "Precursor.Quantity" in df.columns:
+            agg.append(pl.col("Precursor.Quantity").max().alias("intensity"))
+        else:
+            agg.append(pl.lit(0.0).alias("intensity"))
+        agg.append(pl.col("IM").median().alias("im") if "IM" in df.columns else pl.lit(None).alias("im"))
+        if "Protein.Group" in df.columns:
+            agg.append(pl.col("Protein.Group").first().alias("protein_group"))
+        else:
+            agg.append(pl.lit("").alias("protein_group"))
+
+        rows = df.group_by(grp).agg(agg).iter_rows(named=True)
+        return [{"seq": r["seq"], "pep_len": r["pep_len"], "intensity": r["intensity"] or 0.0,
+                 "im": r["im"], "protein_group": r["protein_group"] or ""} for r in rows]
+
+    def _load_immuno_sage_compare(path: "Path", mhc_cls: int) -> list[dict]:
+        """Load Sage PSMs as {seq, pep_len, intensity, im, protein_group}."""
+        from stan.metrics.mobility_sage import load_immuno_psms_sage
+        rows = load_immuno_psms_sage(path, mhc_class=mhc_cls)
+        # Aggregate to unique sequences
+        agg: dict[str, dict] = {}
+        for r in rows:
+            seq = r["seq"]
+            if seq not in agg:
+                agg[seq] = {"seq": seq, "pep_len": r["pep_len"], "intensity": r["intensity"],
+                            "im": r["im"], "protein_group": r["protein"]}
+            else:
+                if (r["intensity"] or 0) > (agg[seq]["intensity"] or 0):
+                    agg[seq]["intensity"] = r["intensity"]
+                if r["im"] and not agg[seq]["im"]:
+                    agg[seq]["im"] = r["im"]
+        return list(agg.values())
+
+    def _load_for_compare(path: "Path", mhc_cls: int) -> list[dict]:
+        if _is_sage(path):
+            return _load_immuno_sage_compare(path, mhc_cls)
+        return _load_immuno_diann(path, mhc_cls)
 
     try:
-        import polars as pl
+        path_a = _resolve_any_path(run_a_rec)
+        if not path_a:
+            raise HTTPException(status_code=422, detail="Run A has no search results")
 
-        def _load_immuno(path: Path, mhc_cls: int) -> pl.DataFrame:
-            schema = pl.read_parquet_schema(str(path))
-            avail = set(schema.keys())
-            want = [c for c in [
-                "Stripped.Sequence", "Modified.Sequence",
-                "Precursor.Quantity", "Q.Value",
-                "IM", "Protein.Group", "Protein.Names",
-            ] if c in avail]
-            df = pl.read_parquet(str(path), columns=want)
-            df = df.filter(pl.col("Q.Value") <= 0.01)
-            seq_col = "Stripped.Sequence" if "Stripped.Sequence" in df.columns else "Modified.Sequence"
-            df = df.with_columns(
-                pl.col(seq_col).str.replace_all(r"\(UniMod:\d+\)", "").alias("seq"),
-                pl.col(seq_col).str.replace_all(r"\(UniMod:\d+\)", "").str.len_chars().alias("pep_len"),
-            )
-            df = df.filter(pl.col("pep_len").is_between(8, 25))
-            if mhc_cls == 1:
-                df = df.filter(pl.col("pep_len").is_between(8, 14))
-            elif mhc_cls == 2:
-                df = df.filter(pl.col("pep_len").is_between(13, 25))
+        rows_a = _load_for_compare(path_a, mhc_class)
+        rows_b = _load_for_compare(_resolve_any_path(run_b_rec), mhc_class) if run_b_rec else []
 
-            # Aggregate to unique sequences (take max intensity)
-            agg_cols = ["seq", "pep_len"]
-            if "Protein.Group" in df.columns:
-                agg_cols.append("Protein.Group")
-            if "Protein.Names" in df.columns:
-                agg_cols.append("Protein.Names")
+        path_b = _resolve_any_path(run_b_rec) if run_b_rec else None
+        if run_b_rec and not path_b:
+            raise HTTPException(status_code=422, detail="Run B has no search results")
 
-            grp = ["seq"]
-            agg = [pl.col("pep_len").first().alias("pep_len")]
-            if "Precursor.Quantity" in df.columns:
-                agg.append(pl.col("Precursor.Quantity").max().alias("intensity"))
-            else:
-                agg.append(pl.lit(0.0).alias("intensity"))
-            if "IM" in df.columns:
-                agg.append(pl.col("IM").median().alias("im"))
-            else:
-                agg.append(pl.lit(None).alias("im"))
-            if "Protein.Group" in df.columns:
-                agg.append(pl.col("Protein.Group").first().alias("protein_group"))
-            else:
-                agg.append(pl.lit("").alias("protein_group"))
+        import math as _math
 
-            return df.group_by(grp).agg(agg)
+        seqs_a = set(r["seq"] for r in rows_a)
+        seqs_b = set(r["seq"] for r in rows_b)
 
-        df_a = _load_immuno(path_a, mhc_class)
-        df_b = _load_immuno(path_b, mhc_class)
-
-        seqs_a = set(df_a["seq"].to_list())
-        seqs_b = set(df_b["seq"].to_list())
-
-        # Build intensity dicts
-        int_a = {r["seq"]: r["intensity"] for r in df_a.iter_rows(named=True)}
-        int_b = {r["seq"]: r["intensity"] for r in df_b.iter_rows(named=True)}
-        im_a  = {r["seq"]: r["im"] for r in df_a.iter_rows(named=True)}
-        im_b  = {r["seq"]: r["im"] for r in df_b.iter_rows(named=True)}
-        len_d = {r["seq"]: r["pep_len"] for r in df_a.iter_rows(named=True)}
-        len_d.update({r["seq"]: r["pep_len"] for r in df_b.iter_rows(named=True)})
-        prot_d = {r["seq"]: r["protein_group"] for r in df_a.iter_rows(named=True)}
-        prot_d.update({r["seq"]: r["protein_group"] for r in df_b.iter_rows(named=True)})
+        int_a  = {r["seq"]: r["intensity"]     for r in rows_a}
+        int_b  = {r["seq"]: r["intensity"]     for r in rows_b}
+        im_a   = {r["seq"]: r["im"]            for r in rows_a}
+        im_b   = {r["seq"]: r["im"]            for r in rows_b}
+        len_d  = {r["seq"]: r["pep_len"]       for r in rows_a}
+        len_d.update({r["seq"]: r["pep_len"]   for r in rows_b})
+        prot_d = {r["seq"]: r["protein_group"] for r in rows_a}
+        prot_d.update({r["seq"]: r["protein_group"] for r in rows_b})
 
         all_seqs = seqs_a | seqs_b
         shared   = seqs_a & seqs_b
 
-        # Median normalization using shared peptides
-        if len(shared) > 5:
+        # Median normalization using shared peptides (two-run mode only)
+        if not single_run and len(shared) > 5:
             shared_list = list(shared)
             ratios = [int_a[s] / int_b[s] for s in shared_list
                       if int_a.get(s, 0) > 0 and int_b.get(s, 0) > 0]
@@ -1756,9 +2227,9 @@ async def api_immuno_compare(
             pass
 
         # Build output
-        _LOG2_MIN = math.log2(0.01)   # cap for unique-to-A
-        _LOG2_MAX = -_LOG2_MIN        # cap for unique-to-B
-        MAX_PEPS = 2000
+        _LOG2_MIN = _math.log2(0.01)
+        _LOG2_MAX = -_LOG2_MIN
+        MAX_PEPS  = 2000
 
         peptides = []
         for seq in all_seqs:
@@ -1766,20 +2237,21 @@ async def api_immuno_compare(
             ib = int_b.get(seq, 0.0) or 0.0
             ib_norm = ib * median_ratio
 
-            if seq in shared:
-                if ia > 0 and ib_norm > 0:
-                    log2fc = math.log2(ia / ib_norm)
-                else:
-                    log2fc = 0.0
+            if single_run:
+                # Single-run: all peptides are "in A", no fold change
+                log2fc = 0.0
+                status = "known" if seq in atlas_known else "novel_A"
+            elif seq in shared:
+                log2fc = _math.log2(ia / ib_norm) if ia > 0 and ib_norm > 0 else 0.0
                 status = "known" if seq in atlas_known else "novel_shared"
             elif seq in seqs_a:
-                log2fc = _LOG2_MAX       # high = only in A
-                status = "known" if seq in atlas_known else "novel_A"
-                ib_norm = ia * 0.01      # pseudo-count for visualization
+                log2fc  = _LOG2_MAX
+                status  = "known" if seq in atlas_known else "novel_A"
+                ib_norm = ia * 0.01
             else:
-                log2fc = _LOG2_MIN       # low = only in B
+                log2fc = _LOG2_MIN
                 status = "known" if seq in atlas_known else "novel_B"
-                ia = ib_norm * 0.01
+                ia     = ib_norm * 0.01
 
             peptides.append({
                 "seq":         seq,
@@ -1794,28 +2266,31 @@ async def api_immuno_compare(
                 "in_atlas":    seq in atlas_known,
             })
 
-        # Sort by abs(log2fc), keep top MAX_PEPS
-        peptides.sort(key=lambda p: abs(p["log2fc"]), reverse=True)
+        if single_run:
+            peptides.sort(key=lambda p: p["intensity_a"], reverse=True)
+        else:
+            peptides.sort(key=lambda p: abs(p["log2fc"]), reverse=True)
         peptides_out = peptides[:MAX_PEPS]
 
-        n_novel_a = sum(1 for p in peptides if p["status"] == "novel_A")
-        n_novel_b = sum(1 for p in peptides if p["status"] == "novel_B")
+        n_novel_a      = sum(1 for p in peptides if p["status"] == "novel_A")
+        n_novel_b      = sum(1 for p in peptides if p["status"] == "novel_B")
         n_novel_shared = sum(1 for p in peptides if p["status"] == "novel_shared")
-        n_known  = sum(1 for p in peptides if p["in_atlas"])
+        n_known        = sum(1 for p in peptides if p["in_atlas"])
 
         return {
             "peptides": peptides_out,
             "stats": {
-                "n_a":             len(seqs_a),
-                "n_b":             len(seqs_b),
-                "n_shared":        len(shared),
-                "n_total":         len(all_seqs),
-                "n_novel_a":       n_novel_a,
-                "n_novel_b":       n_novel_b,
-                "n_novel_shared":  n_novel_shared,
-                "n_atlas_known":   n_known,
+                "n_a":              len(seqs_a),
+                "n_b":              len(seqs_b),
+                "n_shared":         len(shared),
+                "n_total":          len(all_seqs),
+                "n_novel_a":        n_novel_a,
+                "n_novel_b":        n_novel_b,
+                "n_novel_shared":   n_novel_shared,
+                "n_atlas_known":    n_known,
                 "median_norm_ratio": round(median_ratio, 4),
-                "atlas_available": len(atlas_known) > 0,
+                "atlas_available":  len(atlas_known) > 0,
+                "single_run":       single_run,
             },
         }
 
@@ -2017,11 +2492,10 @@ async def api_immuno_landscape(run_id: str) -> dict:
 
 @app.get("/api/runs/{run_id}/enzyme-stats")
 async def api_enzyme_stats(run_id: str, enzyme: str = "trypsin") -> dict:
-    """Enzyme efficiency and PTM statistics from DIA-NN report.parquet.
+    """Enzyme efficiency and PTM statistics.
 
     Returns missed cleavage distribution, oxidation %, and other modification
-    frequencies at 1% FDR.  Requires result_path to be set in the DB (set
-    automatically by the watcher after each search).
+    frequencies at 1% FDR.  Source: DIA-NN report.parquet > Sage results.sage.parquet.
 
     Args:
         enzyme: One of trypsin, trypsin_lysc, lysc, argc, chymotrypsin,
@@ -2029,16 +2503,21 @@ async def api_enzyme_stats(run_id: str, enzyme: str = "trypsin") -> dict:
                 nonspecific.  Determines which residues count as missed cleavages.
     """
     from stan.metrics.mobility_diann import get_enzyme_stats_diann
+    from stan.metrics.mobility_sage import get_enzyme_stats_sage
 
     run = get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
     report_path = _resolve_report_path(run)
-    if not report_path:
-        return {}
+    if report_path:
+        return get_enzyme_stats_diann(report_path, run_name=run.get("run_name"), enzyme=enzyme)
 
-    return get_enzyme_stats_diann(report_path, run_name=run.get("run_name"), enzyme=enzyme)
+    sage_path = _resolve_sage_path(run)
+    if sage_path:
+        return get_enzyme_stats_sage(sage_path, enzyme=enzyme)
+
+    return {}
 
 
 @app.get("/api/runs/{run_id}/ion-detail")
@@ -2122,20 +2601,25 @@ async def api_frame_spectrum(run_id: str, rt: float) -> dict:
 async def api_ccs(run_id: str) -> dict:
     """CCS vs m/z scatter and per-charge CCS distribution histograms.
 
-    Converts 1/K₀ → CCS (Å²) via the Bruker timsdata DLL.  Returns an empty
-    dict for non-timsTOF runs or when the DLL is unavailable.
+    Converts 1/K₀ → CCS (Å²) via the Bruker timsdata DLL.  Falls back to
+    raw 1/K₀ if the DLL is unavailable.  Source: DIA-NN report > Sage PSMs.
     """
     from stan.metrics.mobility_diann import get_ccs_data_diann
+    from stan.metrics.mobility_sage import get_ccs_data_sage
 
     run = get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
     report_path = _resolve_report_path(run)
-    if not report_path:
-        return {}
+    if report_path:
+        return get_ccs_data_diann(report_path, run_name=run.get("run_name"))
 
-    return get_ccs_data_diann(report_path, run_name=run.get("run_name"))
+    sage_path = _resolve_sage_path(run)
+    if sage_path:
+        return get_ccs_data_sage(sage_path)
+
+    return {}
 
 
 @app.get("/api/instruments/{instrument}/tic")
@@ -2413,9 +2897,23 @@ async def api_scan_import(body: ScanImportRequest) -> dict:
     elif "Sciex" in vendor or "AB Sciex" in vendor:
         mode = "AB Sciex"
 
+    # Auto-resolve instrument name from Bruker .m method file when caller
+    # passes a placeholder value (e.g. "auto", "Auto", "unknown", "").
+    resolved_instrument = body.instrument
+    _placeholder = {"auto", "unknown", "instrument", ""}
+    if resolved_instrument.lower().strip() in _placeholder and is_bruker_tdf:
+        try:
+            from stan.watcher.instrument_name import read_instrument_name_from_d
+            _name = read_instrument_name_from_d(raw_path)
+            if _name:
+                resolved_instrument = _name
+                logger.info("Auto-resolved instrument name for %s: %s", run_name, _name)
+        except Exception:
+            logger.warning("Could not auto-resolve instrument name for %s", run_name, exc_info=True)
+
     from stan.db import insert_run
     run_id = insert_run(
-        instrument=body.instrument,
+        instrument=resolved_instrument,
         run_name=run_name,
         raw_path=str(raw_path),
         mode=mode,
@@ -2795,6 +3293,7 @@ async def api_process_all_new() -> dict:
 
 _VALID_SAMPLE_TYPES = {"", "QC", "Sample", "Blank", "Standard", "Pool"}
 _VALID_WORKFLOWS    = {"", "Standard", "Immunopeptidomics", "Single Cell", "Training", "Phospho", "Glyco", "Crosslink"}
+_VALID_MODES        = {"", "diaPASEF", "ddaPASEF", "DIA", "DDA", "ddaMS2", "ddaMRM", "PRM", "MS1only"}
 
 @app.get("/api/runs/{run_id}/mobility-calibration")
 async def api_mobility_calibration(run_id: str, max_points: int = 4000) -> dict:
@@ -2982,7 +3481,7 @@ async def api_recompute_metrics(run_id: str) -> dict:
 
 @app.patch("/api/runs/{run_id}/annotate")
 async def api_annotate_run(run_id: str, body: dict) -> dict:
-    """Set sample_type, workflow, and/or run_notes for a run."""
+    """Set sample_type, workflow, mode, and/or run_notes for a run."""
     updates: dict[str, str] = {}
     if "sample_type" in body:
         val = str(body["sample_type"]).strip()
@@ -2996,6 +3495,12 @@ async def api_annotate_run(run_id: str, body: dict) -> dict:
             from fastapi import HTTPException
             raise HTTPException(400, f"Invalid workflow '{val}'")
         updates["workflow"] = val
+    if "mode" in body:
+        val = str(body["mode"]).strip()
+        if val not in _VALID_MODES:
+            from fastapi import HTTPException
+            raise HTTPException(400, f"Invalid mode '{val}'. Valid: {sorted(_VALID_MODES - {''})}")
+        updates["mode"] = val
     if "run_notes" in body:
         updates["run_notes"] = str(body["run_notes"])[:500]
 
@@ -3008,6 +3513,58 @@ async def api_annotate_run(run_id: str, body: dict) -> dict:
     with _sqlite3_sa.connect(str(db_path)) as con:
         con.execute(f"UPDATE runs SET {cols} WHERE id = ?", vals)
     return {"ok": True, "updated": list(updates.keys())}
+
+
+@app.post("/api/runs/{run_id}/clear-result")
+async def api_clear_result(run_id: str) -> dict:
+    """Clear search result from a run so it appears as unsearched again.
+
+    Sets result_path, n_proteins, n_peptides, ms1_signal, fwhm_rt_min,
+    median_mass_acc_ms1_ppm, median_mass_acc_ms2_ppm, median_mobility_fwhm
+    to NULL in the runs table.
+    """
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    db_path = get_db_path()
+    with _sqlite3_sa.connect(str(db_path)) as con:
+        con.execute(
+            """UPDATE runs SET
+                result_path = NULL,
+                n_proteins = NULL,
+                n_peptides = NULL,
+                ms1_signal = NULL,
+                fwhm_rt_min = NULL,
+                median_mass_acc_ms1_ppm = NULL,
+                median_mass_acc_ms2_ppm = NULL,
+                median_mobility_fwhm = NULL
+            WHERE id = ?""",
+            [run_id],
+        )
+    return {"ok": True, "run_id": run_id}
+
+
+@app.post("/api/runs/{run_id}/redetect-mode")
+async def api_redetect_mode(run_id: str) -> dict:
+    """Re-read MsmsType from analysis.tdf and update the mode in the DB.
+
+    Useful when auto-detection set the wrong mode on import, e.g. a ddaPASEF
+    file that has 'DIA' in its name or was imported before detection was added.
+    """
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    raw_path = run.get("raw_path", "")
+    if not raw_path or not raw_path.endswith(".d"):
+        raise HTTPException(status_code=400, detail="Re-detect only supported for Bruker .d files")
+
+    detected = _detect_mode_from_tdf(Path(raw_path))
+    db_path  = get_db_path()
+    with _sqlite3_sa.connect(str(db_path)) as con:
+        con.execute("UPDATE runs SET mode = ? WHERE id = ?", (detected, run_id))
+    return {"ok": True, "mode": detected, "previous": run.get("mode", "")}
 
 
 # ── Auto-search scheduler ─────────────────────────────────────────────
@@ -3810,28 +4367,29 @@ SEARCH_PRESETS = {
     "mhc_class_i_dda": {
         "label": "MHC-I Immunopeptidomics (DDA / PASEF)",
         "description": (
-            "HLA Class I — ddaPASEF or DDA. Non-specific cleavage, 8–12 aa, charge 1–3. "
-            "Engine: Sage (MSFragger if installed). Variable: OxM, Deamid NQ."
+            "HLA-A/B/C — ddaPASEF or DDA. Non-specific, 8–12 aa, z 1–3, ±15 ppm. "
+            "Engine: Sage. Mods: OxM (var), DeamNQ (var), CarbamiC (fixed), N-term Ac (var). "
+            "Literature: Bassani-Sternberg 2015, Klaeger 2018, Stopfer 2020."
         ),
         "icon": "🛡",
         "color": "#f472b6",
-        "engines": ["sage", "msfragger"],
+        "engines": ["sage"],
         "acq_modes": ["ddaPASEF", "DDA", "ddaMS2"],
         "immuno_class": 1,
-        # Sage params (built dynamically in run_sage_local with immuno_class=1)
         "sage_enzyme": "nonspecific",
         "sage_min_len": 8,
         "sage_max_len": 12,
     },
     "mhc_class_ii_dda": {
-        "label": "MHC-II Immunopeptidomics (DDA / PASEF)",
+        "label": "MHC-II Immunopeptidomics (DDA / ddaPASEF)",
         "description": (
-            "HLA Class II — ddaPASEF or DDA. Non-specific cleavage, 13–25 aa, charge 1–4. "
-            "Engine: Sage (MSFragger if installed). Variable: OxM, Deamid NQ."
+            "HLA-DR/DP/DQ — ddaPASEF or DDA. Non-specific, 13–25 aa, z 2–4, ±15 ppm. "
+            "Engine: Sage. Mods: OxM (var), DeamNQ (var), CarbamiC (fixed), N-term Ac (var). "
+            "Literature: Racle 2019, Lund 2013, Caron 2019."
         ),
         "icon": "🛡",
         "color": "#a78bfa",
-        "engines": ["sage", "msfragger"],
+        "engines": ["sage"],
         "acq_modes": ["ddaPASEF", "DDA", "ddaMS2"],
         "immuno_class": 2,
         "sage_enzyme": "nonspecific",
@@ -3840,14 +4398,13 @@ SEARCH_PRESETS = {
     },
 
     # ── Immunopeptidomics — DIA (DIA-NN, non-specific) ──────────────────────
-    # DIA immunopeptidomics requires a non-tryptic MHC spectral library for
-    # correct results. The HeLa community library is used as a fallback but
-    # will produce tryptic-biased IDs. A warning is shown in the UI.
+    # DIA immunopeptidomics requires a non-tryptic MHC spectral library.
     "mhc_class_i_dia": {
         "label": "MHC-I Immunopeptidomics (DIA / diaPASEF)",
         "description": (
-            "HLA Class I — diaPASEF. DIA-NN, non-specific, 8–12 aa, charge 1–3. "
-            "⚠ Best results require an MHC-I spectral library (not tryptic)."
+            "HLA-A/B/C — diaPASEF. DIA-NN, non-specific, 8–12 aa, z 1–3. "
+            "⚠ Best results require an MHC-I spectral library (not a tryptic library). "
+            "Literature: Stopfer 2021, Kacen 2023."
         ),
         "icon": "🛡",
         "color": "#f472b6",
@@ -3856,9 +4413,12 @@ SEARCH_PRESETS = {
         "immuno_class": 1,
         "diann_args": [
             "--qvalue", "0.01",
-            "--min-pep-len", "8", "--max-pep-len", "12",
+            "--min-pep-len", "8",  "--max-pep-len", "12",
             "--missed-cleavages", "0",
             "--min-pr-charge", "1", "--max-pr-charge", "3",
+            "--min-pr-mz", "350",  "--max-pr-mz", "1100",
+            "--var-mod", "UniMod:35,15.9949,M",
+            "--var-mod", "UniMod:7,0.9840,NQ",
             "--cut", "*",
             "--no-prot-inf",
             "--smart-profiling",
@@ -3868,8 +4428,9 @@ SEARCH_PRESETS = {
     "mhc_class_ii_dia": {
         "label": "MHC-II Immunopeptidomics (DIA / diaPASEF)",
         "description": (
-            "HLA Class II — diaPASEF. DIA-NN, non-specific, 13–25 aa, charge 1–4. "
-            "⚠ Best results require an MHC-II spectral library (not tryptic)."
+            "HLA-DR/DP/DQ — diaPASEF. DIA-NN, non-specific, 13–25 aa, z 2–4. "
+            "⚠ Best results require an MHC-II spectral library (not a tryptic library). "
+            "Literature: Racle 2019, Bankert 2022."
         ),
         "icon": "🛡",
         "color": "#a78bfa",
@@ -3880,12 +4441,33 @@ SEARCH_PRESETS = {
             "--qvalue", "0.01",
             "--min-pep-len", "13", "--max-pep-len", "25",
             "--missed-cleavages", "0",
-            "--min-pr-charge", "1", "--max-pr-charge", "4",
+            "--min-pr-charge", "2", "--max-pr-charge", "4",
+            "--min-pr-mz", "450",  "--max-pr-mz", "1400",
+            "--var-mod", "UniMod:35,15.9949,M",
+            "--var-mod", "UniMod:7,0.9840,NQ",
             "--cut", "*",
             "--no-prot-inf",
             "--smart-profiling",
             "--threads", "8",
         ],
+    },
+
+    # ── Custom script ────────────────────────────────────────────────────────
+    # Runs an arbitrary user-supplied shell command. The token {raw} is
+    # replaced with the absolute path to the raw file, {out} with the
+    # output directory, and {fasta} with the configured FASTA path.
+    "custom_script": {
+        "label": "Custom Script",
+        "description": (
+            "Run your own search engine or workflow script. "
+            "Use {raw}, {out}, {fasta} tokens in the command. "
+            "Must write results.sage.parquet or report.parquet to {out}."
+        ),
+        "icon": "⚙",
+        "color": "#94a3b8",
+        "engines": ["custom"],
+        "acq_modes": [],
+        "_custom": True,
     },
 
     # ── Legacy keys — kept for backwards compat with saved jobs ────────────
@@ -3927,6 +4509,159 @@ async def api_search_presets() -> dict:
     return SEARCH_PRESETS
 
 
+# ── Preset → family mapping ───────────────────────────────────────────────────
+# Multiple presets share the same FASTA/library defaults (e.g. mhc_class_i_dda
+# and mhc_class_i_dia both use the same human proteome FASTA).
+PRESET_FAMILY: dict[str, str] = {
+    "hela_digest":      "tryptic",
+    "single_cell":      "single_cell",
+    "phospho":          "phospho",
+    "tmt":              "tmt",
+    "mhc_class_i_dda":  "immuno_class_i",
+    "mhc_class_i_dia":  "immuno_class_i",
+    "mhc_class_ii_dda": "immuno_class_ii",
+    "mhc_class_ii_dia": "immuno_class_ii",
+}
+_PRESET_FAMILY_LABELS: dict[str, str] = {
+    "tryptic":        "Standard tryptic (HeLa, tissue, etc.)",
+    "single_cell":    "Single-cell / low-input tryptic",
+    "phospho":        "Phosphoproteomics",
+    "tmt":            "TMT / iTRAQ (DIA-NN)",
+    "immuno_class_i": "Immunopeptidomics MHC-I (8–12 aa)",
+    "immuno_class_ii":"Immunopeptidomics MHC-II (13–25 aa)",
+}
+
+
+def _get_search_defaults() -> dict[str, dict]:
+    """Load per-family defaults from the DB. Returns {family: {fasta_path, library_path, extra_args}}."""
+    import sqlite3 as _sq
+    try:
+        with _sq.connect(str(get_db_path())) as con:
+            rows = con.execute(
+                "SELECT preset_family, fasta_path, library_path, extra_args FROM search_defaults"
+            ).fetchall()
+        return {r[0]: {"fasta_path": r[1], "library_path": r[2], "extra_args": r[3]} for r in rows}
+    except Exception:
+        return {}
+
+
+@app.get("/api/search/defaults")
+async def api_search_defaults_get() -> dict:
+    """Return saved default FASTA/library paths per preset family."""
+    defaults = _get_search_defaults()
+    # Return all families (empty strings for unconfigured ones)
+    return {
+        fam: defaults.get(fam, {"fasta_path": "", "library_path": "", "extra_args": ""})
+        for fam in _PRESET_FAMILY_LABELS
+    }
+
+
+class SearchDefaultsBody(BaseModel):
+    preset_family: str
+    fasta_path: str = ""
+    library_path: str = ""
+    extra_args: str = ""
+
+
+@app.put("/api/search/defaults")
+async def api_search_defaults_put(body: SearchDefaultsBody) -> dict:
+    """Save default FASTA/library for a preset family."""
+    import sqlite3 as _sq
+    if body.preset_family not in _PRESET_FAMILY_LABELS:
+        raise HTTPException(status_code=400, detail=f"Unknown family: {body.preset_family}. Valid: {list(_PRESET_FAMILY_LABELS)}")
+    with _sq.connect(str(get_db_path())) as con:
+        con.execute(
+            "INSERT OR REPLACE INTO search_defaults (preset_family, fasta_path, library_path, extra_args) "
+            "VALUES (?, ?, ?, ?)",
+            (body.preset_family, body.fasta_path.strip(), body.library_path.strip(), body.extra_args.strip()),
+        )
+    return {"status": "saved", "family": body.preset_family}
+
+
+@app.get("/api/search/auto-ready")
+async def api_search_auto_ready() -> list[dict]:
+    """Return unsearched runs that have a complete auto-search configuration.
+
+    A run is 'ready' when:
+      - Its acquisition mode is known (not empty / 'auto')
+      - _suggest_preset() returns a valid preset key
+      - The preset family has a configured default FASTA that exists on disk
+    """
+    defaults = _get_search_defaults()
+    unsearched = await api_search_unsearched()
+
+    ready = []
+    for run in unsearched:
+        mode = run.get("mode", "")
+        if not mode or mode in ("auto", "MS1only"):
+            continue
+        preset = run.get("suggested_preset") or _suggest_preset(run)
+        family = PRESET_FAMILY.get(preset)
+        if not family:
+            continue
+        default = defaults.get(family, {})
+        fasta = default.get("fasta_path", "")
+        if not fasta or not Path(fasta).exists():
+            continue
+        ready.append({
+            **run,
+            "resolved_preset":    preset,
+            "resolved_family":    family,
+            "resolved_fasta":     fasta,
+            "resolved_library":   default.get("library_path", ""),
+            "resolved_extra_args": default.get("extra_args", ""),
+        })
+    return ready
+
+
+class AutoSubmitRequest(BaseModel):
+    run_ids: list[str] = []   # empty = all auto-ready runs
+
+
+@app.post("/api/search/auto-submit")
+async def api_search_auto_submit(body: AutoSubmitRequest) -> dict:
+    """Submit search jobs for auto-ready runs using configured defaults.
+
+    Groups runs by (preset, fasta, library) so each unique configuration
+    is submitted as a single batch job. Returns list of created job IDs.
+    """
+    ready_runs = await api_search_auto_ready()
+
+    if body.run_ids:
+        id_set = {str(x) for x in body.run_ids}
+        ready_runs = [r for r in ready_runs if str(r["id"]) in id_set]
+
+    if not ready_runs:
+        return {"status": "nothing_to_submit", "jobs": [], "n_runs": 0}
+
+    # Group by (preset, fasta, library, extra_args)
+    from collections import defaultdict
+    groups: dict[tuple, list] = defaultdict(list)
+    for run in ready_runs:
+        key = (
+            run["resolved_preset"],
+            run["resolved_fasta"],
+            run["resolved_library"],
+            run["resolved_extra_args"],
+        )
+        groups[key].append(run)
+
+    job_ids = []
+    for (preset, fasta, library, extra_args), runs in groups.items():
+        req = SearchSubmitRequest(
+            run_ids=[str(r["id"]) for r in runs],
+            preset=preset,
+            fasta_path=fasta,
+            library_path=library,
+            extra_args=extra_args,
+            label=f"Auto · {preset} · {len(runs)} run{'s' if len(runs) != 1 else ''}",
+        )
+        result = await api_search_submit(req)
+        job_ids.append(result["job_id"])
+
+    return {"status": "submitted", "jobs": job_ids, "n_runs": len(ready_runs)}
+
+
 @app.get("/api/search/jobs")
 async def api_search_jobs() -> list[dict]:
     """Return all active and recent search jobs."""
@@ -3961,6 +4696,16 @@ async def api_search_job_detail(job_id: str) -> dict:
         "started_at": j["started_at"],
         "log": j["log"][-200:],  # last 200 lines
     }
+
+
+@app.delete("/api/search/jobs")
+async def api_search_jobs_clear(status: str = "done") -> dict:
+    """Remove completed (or all) jobs from the in-memory store."""
+    to_del = [jid for jid, j in _search_jobs.items()
+              if status == "all" or j.get("status") == status]
+    for jid in to_del:
+        del _search_jobs[jid]
+    return {"cleared": len(to_del)}
 
 
 class SearchSubmitRequest(BaseModel):
@@ -4081,13 +4826,48 @@ async def api_search_submit(body: SearchSubmitRequest) -> dict:
                     proc.wait()
                     result_file = out_parquet if out_parquet.exists() else None
 
+                elif preset_info.get("_custom"):
+                    # ── Custom script path ────────────────────────────────────
+                    cmd_template = body.extra_args.strip()
+                    if not cmd_template:
+                        job["log"].append("  ✗ Custom preset requires a command in Extra Args.")
+                        job["log"].append("    Use tokens: {raw} {out} {fasta}")
+                        job["n_failed"] += 1
+                        continue
+                    cmd_str = (cmd_template
+                               .replace("{raw}", str(raw))
+                               .replace("{out}", str(out_dir))
+                               .replace("{fasta}", fasta_path_str or ""))
+                    job["log"].append(f"  engine: custom script")
+                    job["log"].append(f"  cmd: {cmd_str}")
+                    log_file = out_dir / "custom.log"
+                    try:
+                        with open(log_file, "w") as lf:
+                            proc = _subprocess.run(
+                                cmd_str, shell=True, stdout=lf, stderr=_subprocess.STDOUT,
+                                text=True, timeout=14400,
+                            )
+                        for line in log_file.read_text().splitlines()[-30:]:
+                            if line.strip():
+                                job["log"].append(f"  {line}")
+                        # Find any parquet output
+                        parquet_files = list(out_dir.glob("*.parquet"))
+                        result_file = parquet_files[0] if parquet_files else None
+                    except Exception as e:
+                        job["log"].append(f"  ✗ Script error: {e}")
+                        job["n_failed"] += 1
+                        continue
+
                 else:
                     # ── Sage path (DDA / ddaPASEF / immuno) ─────────────────
                     from stan.search.local import run_sage_local
                     vendor = "bruker" if raw.suffix.lower() == ".d" else "thermo"
-                    sage_exe = shutil.which("sage") or "sage"
-                    engine_label = f"Sage {'MHC-' + 'I'*run_immuno + ' (non-specific)' if run_immuno else 'DDA'}"
-                    job["log"].append(f"  engine: {engine_label}")
+                    # Prefer system PATH, then bundled binary shipped with ZIGGY
+                    _bundled_sage = Path(__file__).parent.parent.parent / "tools" / "sage"
+                    _bundled_exe = next(_bundled_sage.rglob("sage.exe"), None) if _bundled_sage.exists() else None
+                    sage_exe = shutil.which("sage") or (str(_bundled_exe) if _bundled_exe else "sage")
+                    engine_label = f"Sage {'MHC-' + 'I'*(run_immuno==1) + 'II'*(run_immuno==2) + (' (non-specific)' if run_immuno else 'DDA')}"
+                    job["log"].append(f"  engine: {engine_label} · {sage_exe}")
 
                     # community mode uses bundled FASTA; local mode requires user FASTA
                     s_mode = "community" if not fasta_ok else "local"
@@ -4100,6 +4880,13 @@ async def api_search_submit(body: SearchSubmitRequest) -> dict:
                         search_mode=s_mode,
                         immuno_class=run_immuno,
                     )
+                    # Surface sage.log in job log so failures are visible
+                    sage_log = out_dir / "sage.log"
+                    if sage_log.exists():
+                        lines = sage_log.read_text(errors="replace").splitlines()
+                        for ln in lines[-40:]:  # last 40 lines
+                            if ln.strip():
+                                job["log"].append(f"    {ln}")
 
                 if result_file and result_file.exists():
                     # Parse result and update DB

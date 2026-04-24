@@ -407,6 +407,7 @@
       const [loading, setLoading]   = React.useState(true);
       const [localAnnotations, setLocalAnnotations] = React.useState({});  // runId → {sample_type, workflow}
       const [showParamModal, setShowParamModal] = React.useState(false);
+      const [fixNamesState, setFixNamesState] = React.useState('idle');  // idle | running | done | err
 
       const fetchData = React.useCallback(() => {
         fetch('/api/searches?limit=2000')
@@ -545,6 +546,20 @@
           border:`1px solid ${showCols[k]?'var(--accent)':'var(--border)'}`},
       }, label);
 
+      const fixInstrumentNames = async () => {
+        setFixNamesState('running');
+        try {
+          const r = await fetch('/api/fix-instrument-names', { method: 'POST' });
+          const d = await r.json();
+          setFixNamesState('done');
+          if (d.updated > 0) { setTimeout(fetchData, 400); }
+          setTimeout(() => setFixNamesState('idle'), 4000);
+        } catch {
+          setFixNamesState('err');
+          setTimeout(() => setFixNamesState('idle'), 3000);
+        }
+      };
+
       if (loading) return React.createElement('div',{className:'empty'},'Loading searches…');
       if (!searches?.length) return React.createElement('div',{className:'empty'},'No search results in database yet');
 
@@ -595,6 +610,19 @@
             style:{padding:'0.3rem 0.7rem',borderRadius:'0.4rem',fontSize:'0.8rem',cursor:'pointer',
               background:'var(--surface)',color:'var(--accent)',border:'1px solid var(--accent)'}},
             '⚙ Search Params'),
+          React.createElement('button',{
+            onClick: fixInstrumentNames,
+            disabled: fixNamesState === 'running',
+            title: 'Resolve "Auto"/"unknown" instrument names by reading the Bruker .m method file from each .d directory',
+            style:{padding:'0.3rem 0.7rem',borderRadius:'0.4rem',fontSize:'0.8rem',cursor:'pointer',
+              background:'var(--surface)',
+              color: fixNamesState==='done' ? '#4ade80' : fixNamesState==='err' ? '#ef4444' : 'var(--muted)',
+              border:`1px solid ${fixNamesState==='done'?'#4ade80':fixNamesState==='err'?'#ef4444':'var(--border)'}`},
+          },
+            fixNamesState==='running' ? React.createElement('span',{style:{display:'inline-block',animation:'spin 1.2s linear infinite'}},'↻')
+            : fixNamesState==='done'  ? '✓ Names fixed'
+            : fixNamesState==='err'   ? '✗ Error'
+            : '🔬 Fix Instruments'),
           React.createElement('span',{style:{marginLeft:'auto',fontSize:'0.75rem',color:'var(--muted)'}},
             done>0 && React.createElement('span',{style:{color:'#34d399',marginRight:'0.5rem'}},done+' comparisons done'),
             inFlight>0 && React.createElement('span',{style:{color:'#60a5fa'}},

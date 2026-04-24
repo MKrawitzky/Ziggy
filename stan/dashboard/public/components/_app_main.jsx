@@ -30,7 +30,7 @@
     ];
 
     function App() {
-      const [tab, setTab] = useState('live');
+      const [tab, setTab] = useState('welcome');
       const { data: ver } = useFetch('/api/version');
       // Pinned run IDs — persists across tab switches, shared between RunHistory/Trends/Health
       const [pinnedRunIds, setPinnedRunIds] = useState(new Set());
@@ -130,21 +130,34 @@
               </div>
             </div>
 
-            {/* Row 3 — Advanced research & search workflows */}
+            {/* Row 3a — Biology / omics sample types */}
             <div className="tab-group">
-              <div className="tab-group-label">Research</div>
+              <div className="tab-group-label">Omics</div>
               <div className="tab-row">
                 {[
-                  ['immuno',    'Immunopeptidomics'],
-                  ['discovery', 'HLA Discovery'],
-                  ['histone',   'Histones'],
-                  ['meta',      'Metaproteomics'],
-                  ['denovo',    'De Novo'],
-                  ['searches',  'Searches'],
-                  ['search',    searchLabel],
-                  ['sneaky',    'Sneaky Peaky'],
-                  ['mia',       'MIA'],
-                  ['singlecell','Single Cell'],
+                  ['immuno',     'Immunopeptidomics'],
+                  ['discovery',  'HLA Discovery'],
+                  ['histone',    'Histones'],
+                  ['phospho',    'Phospho'],
+                  ['chemo',      'Chemoproteomics'],
+                  ['meta',       'Metaproteomics'],
+                  ['singlecell', 'Single Cell'],
+                ].map(([k, label]) =>
+                  <div key={k} className={`tab ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)}>{label}</div>
+                )}
+              </div>
+            </div>
+
+            {/* Row 3b — Search & analysis workflows */}
+            <div className="tab-group">
+              <div className="tab-group-label">Search</div>
+              <div className="tab-row">
+                {[
+                  ['search',  searchLabel],
+                  ['searches','Searches'],
+                  ['denovo',  'De Novo'],
+                  ['mia',     'MIA'],
+                  ['sneaky',  'Sneaky Peaky'],
                 ].map(([k, label]) =>
                   <div key={k} className={`tab ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)}>{label}</div>
                 )}
@@ -156,6 +169,7 @@
               <div className="tab-group-label">System</div>
               <div className="tab-row">
                 {[
+                  ['welcome',    'Welcome'],
                   ['config',     'Config'],
                   ['community',  'Community'],
                   ['about',      'About'],
@@ -188,6 +202,9 @@
             {tab === 'sneaky' && <SneakyPeakyTab />}
             {tab === 'mia'        && <MiaTab onSpectrumJump={handleSpectrumJump} navigateTo={setTab} />}
             {tab === 'singlecell' && <SingleCellTab />}
+            {tab === 'chemo'      && <ChemoproteomicsTab />}
+            {tab === 'phospho'    && <PhosphoTab />}
+            {tab === 'welcome'    && <WelcomeTab navigateTo={setTab} />}
             {tab === 'config' && <ConfigEditor />}
             {tab === 'community' && <CommunityTab />}
             {tab === 'about' && <AboutTab />}
