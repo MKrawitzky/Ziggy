@@ -443,14 +443,31 @@ def run_sage_local(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine input path — convert Thermo .raw to mzML if needed
+    # Determine input path.
+    # Thermo .raw → mzML via ThermoRawFileParser (required).
+    # Bruker .d → mzML via msconvert when available.
+    #   Sage 0.14.x reads .d natively via timsrust, but crashes with
+    #   STATUS_STACK_BUFFER_OVERRUN on files with large tdf_bin (≥ ~3 GB).
+    #   msconvert at C:/ProteoWizard/msconvert.exe is more robust and avoids
+    #   this Sage/timsrust bug entirely.  Fall back to direct .d if msconvert
+    #   is not available (e.g., instrument PC without ProteoWizard).
     if vendor == "thermo":
         mzml_path = _convert_raw_to_mzml(raw_path, output_dir, trfp_exe)
         if mzml_path is None:
             return None
         input_path = str(mzml_path)
     else:
-        input_path = str(raw_path)
+        mzml_path = _convert_bruker_to_mzml(raw_path, output_dir)
+        if mzml_path is not None:
+            input_path = str(mzml_path)
+            logger.info("Using msconvert mzML output for Sage: %s", mzml_path.name)
+        else:
+            # msconvert not available — pass .d directly (works for smaller files)
+            logger.info(
+                "msconvert not found — passing .d directly to Sage. "
+                "Install ProteoWizard at C:/ProteoWizard to improve reliability on large files."
+            )
+            input_path = str(raw_path)
 
     # Build Sage JSON config
     if search_mode == "community":
@@ -618,4 +635,92 @@ def _convert_raw_to_mzml(
         return mzml_path
 
     logger.error("mzML not found after conversion: %s", mzml_path)
+    return None
+
+
+def _find_msconvert() -> str | None:
+    """Find ProteoWizard msconvert.exe — checks PATH and common install dirs."""
+    import shutil
+    if exe := shutil.which("msconvert"):
+        return exe
+    candidates = [
+        r"C:\ProteoWizard\msconvert.exe",
+        r"C:\Program Files\ProteoWizard\msconvert.exe",
+        r"C:\Program Files (x86)\ProteoWizard\msconvert.exe",
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return None
+
+
+def _convert_bruker_to_mzml(raw_path: Path, output_dir: Path) -> Path | None:
+    """Convert a Bruker .d directory to mzML using ProteoWizard msconvert.
+
+    This avoids the Sage timsrust stack-buffer-overrun crash that occurs when
+    reading large (.d files with tdf_bin ≥ ~3 GB) files directly.
+
+    Returns Path to the generated .mzML file, or None if msconvert is not
+    available or conversion fails (caller falls back to direct .d input).
+    """
+    msconvert = _find_msconvert()
+    if msconvert is None:
+        return None
+
+    stem = raw_path.stem  # e.g. "run_name.d" stem = "run_name.d" but Path.stem strips last ext
+    # raw_path is a directory like "foo.d", so Path("foo.d").stem = "foo"
+    mzml_path = output_dir / f"{raw_path.name}.mzML"  # e.g. run.d.mzML
+
+    if mzml_path.exists():
+        logger.info("Re-using existing mzML: %s", mzml_path.name)
+        return mzml_path
+
+    logger.info("Converting %s → mzML via msconvert…", raw_path.name)
+
+    cmd = [
+        msconvert,
+        str(raw_path),
+        "--mzML",
+        "--ddaProcessing",                 # CRITICAL for Bruker ddaPASEF: combines all
+                                           # ion-mobility sub-scans for the same precursor
+                                           # into a single MS2 spectrum.  Without this flag
+                                           # every TIMS step becomes its own spectrum and
+                                           # a 1 GB .d file expands to 30–50 GB mzML.
+        "--filter", "msLevel 2",           # MS2 only — Sage doesn't use MS1
+        "--filter", "zeroSamples removeExtra",
+        "--outdir", str(output_dir),
+        "--outfile", mzml_path.name,
+        "--64",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3600,  # 1 hour — large files can be slow
+        )
+        logger.debug("msconvert stdout: %s", result.stdout[-500:])
+    except FileNotFoundError:
+        logger.warning("msconvert not found at: %s", msconvert)
+        return None
+    except subprocess.CalledProcessError as e:
+        logger.error("msconvert failed for %s: %s", raw_path.name, e.stderr[-500:])
+        return None
+    except subprocess.TimeoutExpired:
+        logger.error("msconvert timed out after 1 hour for %s", raw_path.name)
+        return None
+
+    if mzml_path.exists():
+        logger.info("Converted: %s → %s (%.1f MB)",
+                    raw_path.name, mzml_path.name, mzml_path.stat().st_size / 1e6)
+        return mzml_path
+
+    # msconvert sometimes names the output differently — search for any .mzML in output_dir
+    for candidate in output_dir.glob("*.mzML"):
+        logger.info("Found mzML output: %s", candidate.name)
+        return candidate
+
+    logger.error("mzML not found after msconvert for: %s", raw_path.name)
     return None
