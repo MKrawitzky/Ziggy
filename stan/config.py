@@ -17,7 +17,7 @@ _PACKAGE_CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 # User config directory — visible location on Windows, hidden on Unix
 import platform as _plat
 if _plat.system() == "Windows":
-    _USER_CONFIG_DIR = Path.home() / "STAN"
+    _USER_CONFIG_DIR = Path("E:/STAN")
 else:
     _USER_CONFIG_DIR = Path.home() / ".stan"
 

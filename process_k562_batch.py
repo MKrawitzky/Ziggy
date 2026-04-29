@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
-DB_PATH = Path("C:/Users/Admin/STAN/stan.db")
+DB_PATH = Path("E:/STAN/stan.db")
 DIANN = Path("C:/DIA-NN/2.3.2/diann.exe")
 RESULTS_DIR = Path("E:/timsTOF/stan_results")
 LIB = RESULTS_DIR / "_community_assets/hela_timstof_202604.parquet"
