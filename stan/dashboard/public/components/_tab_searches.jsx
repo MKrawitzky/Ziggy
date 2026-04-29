@@ -20,6 +20,62 @@
       }},text);
     }
 
+    // ── Inline instrument name editor ─────────────────────────────────────────
+    function InstrumentCell({ runId, value, onSaved }) {
+      const [editing, setEditing] = React.useState(false);
+      const [draft,   setDraft]   = React.useState(value || '');
+      const [saving,  setSaving]  = React.useState(false);
+      const inputRef = React.useRef(null);
+
+      React.useEffect(() => { if (editing && inputRef.current) inputRef.current.focus(); }, [editing]);
+
+      const isAuto = !value || ['auto','unknown','instrument','none',''].includes((value||'').toLowerCase().trim());
+
+      const save = async () => {
+        const name = draft.trim();
+        if (!name || name === value) { setEditing(false); return; }
+        setSaving(true);
+        try {
+          await fetch(`/api/runs/${runId}/instrument`, {
+            method: 'PATCH',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({instrument: name}),
+          });
+          setEditing(false);
+          if (onSaved) onSaved();
+        } catch(e) { console.error(e); }
+        setSaving(false);
+      };
+
+      if (editing) {
+        return React.createElement('span', {style:{display:'inline-flex',gap:'0.2rem',alignItems:'center'}},
+          React.createElement('input', {
+            ref: inputRef, value: draft,
+            onChange: e => setDraft(e.target.value),
+            onKeyDown: e => { if (e.key==='Enter') save(); if (e.key==='Escape') setEditing(false); },
+            style:{width:'130px',fontSize:'0.72rem',padding:'0.15rem 0.35rem',
+              background:'var(--bg)',color:'var(--text)',border:'1px solid var(--accent)',
+              borderRadius:'0.25rem',outline:'none'},
+          }),
+          React.createElement('button', {onClick:save, disabled:saving,
+            style:{fontSize:'0.65rem',padding:'0.1rem 0.3rem',background:'var(--accent)',
+              color:'#000',border:'none',borderRadius:'0.2rem',cursor:'pointer'}}, '✓'),
+          React.createElement('button', {onClick:()=>setEditing(false),
+            style:{fontSize:'0.65rem',padding:'0.1rem 0.3rem',background:'transparent',
+              color:'var(--muted)',border:'1px solid var(--border)',borderRadius:'0.2rem',cursor:'pointer'}}, '✕'),
+        );
+      }
+
+      return React.createElement('span', {
+        onClick: () => { setDraft(value||''); setEditing(true); },
+        title: 'Click to edit instrument name',
+        style:{cursor:'pointer', color: isAuto ? '#f59e0b' : 'var(--muted)',
+          fontSize:'0.72rem', whiteSpace:'nowrap',
+          borderBottom: isAuto ? '1px dashed #f59e0b' : '1px dashed transparent',
+          padding:'0.1rem 0'},
+      }, isAuto ? '⚠ ' + (value||'auto') : value);
+    }
+
     // ── Inline annotation dropdown ────────────────────────────────────────────
     function AnnotateCell({ runId, field, value, options, colors, onSaved }) {
       const [editing, setEditing] = React.useState(false);
@@ -546,14 +602,22 @@
           border:`1px solid ${showCols[k]?'var(--accent)':'var(--border)'}`},
       }, label);
 
+      const [fixNamesDetail, setFixNamesDetail] = React.useState(null);
       const fixInstrumentNames = async () => {
         setFixNamesState('running');
+        setFixNamesDetail(null);
         try {
           const r = await fetch('/api/fix-instrument-names', { method: 'POST' });
           const d = await r.json();
-          setFixNamesState('done');
-          if (d.updated > 0) { setTimeout(fetchData, 400); }
-          setTimeout(() => setFixNamesState('idle'), 4000);
+          setFixNamesDetail(d);
+          if (d.runs?.length) {
+            console.group('[ZIGGY] Fix Instrument Names');
+            d.runs.forEach(x => console.log(`  ${x.result.toUpperCase()} [${x.id}] ${x.run}: ${x.name || x.reason || ''}`));
+            console.groupEnd();
+          }
+          setFixNamesState(d.updated > 0 ? 'done' : d.errors > 0 ? 'err' : 'none');
+          if (d.updated > 0) setTimeout(fetchData, 400);
+          setTimeout(() => { setFixNamesState('idle'); setFixNamesDetail(null); }, 12000);
         } catch {
           setFixNamesState('err');
           setTimeout(() => setFixNamesState('idle'), 3000);
@@ -610,19 +674,34 @@
             style:{padding:'0.3rem 0.7rem',borderRadius:'0.4rem',fontSize:'0.8rem',cursor:'pointer',
               background:'var(--surface)',color:'var(--accent)',border:'1px solid var(--accent)'}},
             '⚙ Search Params'),
+          React.createElement('div',{style:{position:'relative'}},
           React.createElement('button',{
             onClick: fixInstrumentNames,
             disabled: fixNamesState === 'running',
-            title: 'Resolve "Auto"/"unknown" instrument names by reading the Bruker .m method file from each .d directory',
+            title: 'Resolve "Auto"/"unknown" instrument names by reading analysis.tdf GlobalMetadata from each .d directory',
             style:{padding:'0.3rem 0.7rem',borderRadius:'0.4rem',fontSize:'0.8rem',cursor:'pointer',
               background:'var(--surface)',
-              color: fixNamesState==='done' ? '#4ade80' : fixNamesState==='err' ? '#ef4444' : 'var(--muted)',
-              border:`1px solid ${fixNamesState==='done'?'#4ade80':fixNamesState==='err'?'#ef4444':'var(--border)'}`},
+              color: fixNamesState==='done' ? '#4ade80' : fixNamesState==='err' ? '#ef4444' : fixNamesState==='none' ? '#f59e0b' : 'var(--muted)',
+              border:`1px solid ${fixNamesState==='done'?'#4ade80':fixNamesState==='err'?'#ef4444':fixNamesState==='none'?'#f59e0b':'var(--border)'}`},
           },
             fixNamesState==='running' ? React.createElement('span',{style:{display:'inline-block',animation:'spin 1.2s linear infinite'}},'↻')
-            : fixNamesState==='done'  ? '✓ Names fixed'
+            : fixNamesState==='done'  ? `✓ Fixed ${fixNamesDetail?.updated||''}`
             : fixNamesState==='err'   ? '✗ Error'
+            : fixNamesState==='none'  ? `⚠ 0 fixed (${fixNamesDetail?.skipped||0} skipped)`
             : '🔬 Fix Instruments'),
+          fixNamesDetail && fixNamesDetail.runs?.length > 0 && React.createElement('div',{
+            style:{position:'absolute',top:'calc(100% + 4px)',left:0,minWidth:'420px',zIndex:50,
+              background:'#0e0018',border:'1px solid var(--border)',borderRadius:'0.4rem',
+              padding:'0.5rem 0.7rem',fontSize:'0.72rem',maxHeight:'220px',overflowY:'auto'}},
+            fixNamesDetail.runs.map((x,i)=>React.createElement('div',{key:i,
+              style:{display:'flex',gap:'0.6rem',padding:'0.15rem 0',
+                color:x.result==='updated'?'#4ade80':x.result==='error'?'#ef4444':'#94a3b8'}},
+              React.createElement('span',{style:{fontWeight:700,minWidth:'55px'}},x.result.toUpperCase()),
+              React.createElement('span',{style:{color:'#60a5fa',minWidth:'130px',fontFamily:'monospace',fontSize:'0.68rem',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},x.run),
+              React.createElement('span',{style:{color:'#94a3b8',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, x.name || x.reason || '')
+            ))
+          )
+          ),  // end relative wrapper
           React.createElement('span',{style:{marginLeft:'auto',fontSize:'0.75rem',color:'var(--muted)'}},
             done>0 && React.createElement('span',{style:{color:'#34d399',marginRight:'0.5rem'}},done+' comparisons done'),
             inFlight>0 && React.createElement('span',{style:{color:'#60a5fa'}},
@@ -694,7 +773,8 @@
                   const wflow = s.workflow || '';
                   return React.createElement('tr',{key:s.id,style:{borderBottom:'1px solid var(--border)'}},
                     React.createElement('td',{style:{maxWidth:'200px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',paddingRight:'0.75rem'},title:s.run_name},s.run_name),
-                    React.createElement('td',{style:{color:'var(--muted)',fontSize:'0.72rem',whiteSpace:'nowrap',paddingRight:'0.5rem'}},s.instrument),
+                    React.createElement('td',{style:{paddingRight:'0.5rem'}},
+                      React.createElement(InstrumentCell,{runId:s.id,value:s.instrument,onSaved:fetchData})),
                     React.createElement('td',{style:{whiteSpace:'nowrap',paddingRight:'0.5rem'}},
                       _sBadge(s.mode, MODE_COLOR[s.mode]||'#a0b4cc')),
                     // Sample type — inline editable
@@ -795,7 +875,8 @@
                   const wflow  = s.workflow || '';
                   return React.createElement('tr',{key:s.id,style:{borderBottom:'1px solid var(--border)'}},
                     React.createElement('td',{style:{maxWidth:'220px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',paddingRight:'1rem'},title:s.run_name},s.run_name),
-                    React.createElement('td',{style:{color:'var(--muted)',fontSize:'0.75rem',whiteSpace:'nowrap',paddingRight:'0.75rem'}},s.instrument),
+                    React.createElement('td',{style:{paddingRight:'0.75rem'}},
+                      React.createElement(InstrumentCell,{runId:s.id,value:s.instrument,onSaved:fetchData})),
                     showCols.engine && React.createElement('td',{style:{whiteSpace:'nowrap'}},
                       _sBadge((s.search_engine||'?').toUpperCase(), ENGINE_COLOR[s.search_engine]||'#a0b4cc'),
                       s.mode&&React.createElement('span',{style:{marginLeft:3}},_sBadge(s.mode,MODE_COLOR[s.mode]||'#a0b4cc')),

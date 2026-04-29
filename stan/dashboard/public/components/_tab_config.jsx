@@ -11,6 +11,294 @@
              ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
     }
 
+    // ── Search Engine Config card ──────────────────────────────────────────
+    function SearchEngineConfig({ instruments, onChanged }) {
+      const instList = instruments?.instruments || [];
+      const [cfg, setCfg] = useState({});
+      const [saving, setSaving] = useState(false);
+      const [msg, setMsg] = useState('');
+
+      const DIA_ENGINES = [
+        { key:'diann',         label:'DIA-NN',        pathKey:'diann_path',         note:'Primary diaPASEF / Slice-PASEF engine — DIA-only' },
+        { key:'msfragger_dia', label:'MSFragger-DIA',  pathKey:'msfragger_dia_path', note:'FragPipe DIA mode — alternative to DIA-NN' },
+        { key:'dia_umpire',    label:'DIA-Umpire',    pathKey:'dia_umpire_path',     note:'Java-based DIA deconvolution — broad vendor support' },
+      ];
+      const DDA_ENGINES = [
+        { key:'sage',       label:'Sage',       pathKey:'sage_path',       note:'Fast Rust native ddaPASEF — recommended for timsTOF' },
+        { key:'msfragger',  label:'MSFragger',  pathKey:'msfragger_path',  note:'FragPipe — MSBooster + Philosopher quantification' },
+        { key:'xtandem',    label:'X! Tandem',  pathKey:'xtandem_path',    note:'Classic XML-based — broad spectrum type support' },
+        { key:'maxquant',   label:'MaxQuant',   pathKey:'maxquant_path',   note:'Full LFQ pipeline — .raw files only (Thermo)' },
+        { key:'comet',      label:'Comet',      pathKey:'comet_path',      note:'ISB Comet — simple, fast, open source' },
+      ];
+
+      useEffect(() => {
+        if (instList.length) {
+          const i = instList[0];
+          setCfg({
+            preferred_dia_engine: i.preferred_dia_engine || 'diann',
+            preferred_dda_engine: i.preferred_dda_engine || 'sage',
+            diann_path:         i.diann_path         || '',
+            msfragger_dia_path: i.msfragger_dia_path || '',
+            dia_umpire_path:    i.dia_umpire_path    || '',
+            sage_path:          i.sage_path          || '',
+            msfragger_path:     i.msfragger_path     || '',
+            xtandem_path:       i.xtandem_path       || '',
+            maxquant_path:      i.maxquant_path      || '',
+            comet_path:         i.comet_path         || '',
+          });
+        }
+      }, [instruments]);
+
+      async function save() {
+        setSaving(true); setMsg('');
+        const updated = { ...instruments };
+        updated.instruments = (instruments.instruments || []).map((inst, idx) =>
+          idx === 0 ? { ...inst, ...cfg } : inst
+        );
+        const r = await fetch(API + '/api/instruments', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ yaml_content: JSON.stringify(updated, null, 2) })
+        });
+        setSaving(false);
+        setMsg(r.ok ? 'Search engines saved.' : 'Error saving config.');
+        if (r.ok && onChanged) onChanged();
+      }
+
+      const EngineRow = ({ eng, groupKey }) => {
+        const preferred = cfg[groupKey] === eng.key;
+        const color = groupKey === 'preferred_dia_engine' ? 'var(--cyan)' : 'var(--violet)';
+        const tint  = groupKey === 'preferred_dia_engine' ? 'rgba(34,211,238,0.06)' : 'rgba(217,70,239,0.06)';
+        const border= groupKey === 'preferred_dia_engine' ? 'rgba(34,211,238,0.28)' : 'rgba(217,70,239,0.28)';
+        const hasPath = !!cfg[eng.pathKey];
+        return (
+          <div style={{marginBottom:'0.6rem', padding:'0.55rem 0.65rem',
+                background: preferred ? tint : 'var(--bg)',
+                border:`1px solid ${preferred ? border : 'var(--border)'}`,
+                borderRadius:'0.5rem', transition:'all 0.15s'}}>
+            <label style={{display:'flex', alignItems:'center', gap:'0.5rem', cursor:'pointer', marginBottom:'0.3rem'}}>
+              <input type="radio" name={groupKey} value={eng.key}
+                checked={preferred}
+                onChange={() => setCfg({...cfg, [groupKey]: eng.key})}
+                style={{accentColor: color}}
+              />
+              <span style={{fontWeight:700, color: preferred ? color : 'var(--text)', fontSize:'0.88rem'}}>{eng.label}</span>
+              <span style={{fontSize:'0.70rem', color: hasPath ? 'var(--pass)' : 'var(--muted)', marginLeft:'auto'}}>
+                {hasPath ? '✓ path set' : 'auto / PATH'}
+              </span>
+            </label>
+            <div style={{fontSize:'0.71rem', color:'var(--muted)', marginBottom:'0.35rem'}}>{eng.note}</div>
+            <input type="text" value={cfg[eng.pathKey] || ''}
+              onChange={e => setCfg({...cfg, [eng.pathKey]: e.target.value})}
+              placeholder={`Path to ${eng.label} executable (leave blank for PATH auto-detect)`}
+              style={{width:'100%', boxSizing:'border-box', background:'rgba(255,255,255,0.03)',
+                      color:'var(--text)', border:'1px solid var(--border)',
+                      borderRadius:'0.3rem', padding:'0.28rem 0.5rem', fontSize:'0.76rem', fontFamily:'monospace'}}
+            />
+          </div>
+        );
+      };
+
+      if (!instList.length) return null;
+      return (
+        <div className="card" style={{marginBottom:'1rem'}}>
+          <h3>Search Engines</h3>
+          <p style={{color:'var(--muted)', fontSize:'0.84rem', marginBottom:'1rem'}}>
+            DIA data (diaPASEF, Slice-PASEF) uses a <strong style={{color:'var(--cyan)'}}>DIA engine</strong>.{' '}
+            DDA data (ddaPASEF, generic DDA) uses a <strong style={{color:'var(--violet)'}}>DDA engine</strong>.{' '}
+            Select the preferred engine for each mode and set executable paths if not on system PATH.
+          </p>
+          <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'1rem', marginBottom:'0.75rem'}}>
+            <div>
+              <div style={{fontWeight:700, color:'var(--cyan)', fontSize:'0.82rem', marginBottom:'0.55rem',
+                           letterSpacing:'0.08em', textTransform:'uppercase',
+                           borderBottom:'1px solid rgba(34,211,238,0.2)', paddingBottom:'0.3rem'}}>
+                DIA Engines
+              </div>
+              {DIA_ENGINES.map(e => <EngineRow key={e.key} eng={e} groupKey="preferred_dia_engine" />)}
+            </div>
+            <div>
+              <div style={{fontWeight:700, color:'var(--violet)', fontSize:'0.82rem', marginBottom:'0.55rem',
+                           letterSpacing:'0.08em', textTransform:'uppercase',
+                           borderBottom:'1px solid rgba(217,70,239,0.2)', paddingBottom:'0.3rem'}}>
+                DDA Engines
+              </div>
+              {DDA_ENGINES.map(e => <EngineRow key={e.key} eng={e} groupKey="preferred_dda_engine" />)}
+            </div>
+          </div>
+          <div style={{display:'flex', alignItems:'center', gap:'1rem', marginTop:'0.5rem'}}>
+            <button onClick={save} disabled={saving}
+              style={{background:'var(--accent)', color:'#000', border:'none', borderRadius:'0.4rem',
+                      padding:'0.38rem 1rem', fontWeight:800, cursor:'pointer', fontSize:'0.84rem',
+                      opacity: saving ? 0.6 : 1}}>
+              {saving ? 'Saving…' : 'Save Engine Config'}
+            </button>
+            {msg && <span style={{fontSize:'0.81rem', color: msg.includes('Error') ? 'var(--fail)' : 'var(--pass)'}}>{msg}</span>}
+          </div>
+          <div style={{marginTop:'0.75rem', padding:'0.55rem 0.7rem',
+                       background:'rgba(218,170,0,0.04)', border:'1px solid rgba(218,170,0,0.15)',
+                       borderRadius:'0.5rem', fontSize:'0.76rem', color:'var(--muted)'}}>
+            <strong style={{color:'var(--accent)'}}>Multi-engine compare:</strong>{' '}
+            Run each .d file through multiple engines simultaneously — peptide counts, FDR, missed cleavages,
+            and ID overlap shown side-by-side. Engines run in parallel per-file.
+            Each result stored separately so you can compare DIA-NN vs MSFragger-DIA or Sage vs MSFragger on the same run.
+          </div>
+        </div>
+      );
+    }
+
+    // ── CHIMERYS / MSAID Platform connector ───────────────────────────────
+    function ChimerysConnect() {
+      const [status,      setStatus]      = useState(null);
+      const [experiments, setExperiments] = useState([]);
+      const [loading,     setLoading]     = useState(false);
+      const [msg,         setMsg]         = useState('');
+      const [expanded,    setExpanded]    = useState(false);
+
+      const checkStatus = async () => {
+        try {
+          const r = await fetch(API + '/api/msaid/status');
+          const d = await r.json();
+          setStatus(d);
+        } catch { setStatus(null); }
+      };
+
+      const login = async () => {
+        setMsg('Opening browser for MSAID login…');
+        await fetch(API + '/api/msaid/login');
+        // Poll for auth completion
+        let polls = 0;
+        const iv = setInterval(async () => {
+          polls++;
+          await checkStatus();
+          setStatus(s => {
+            if (s?.authenticated) { clearInterval(iv); setMsg('Logged in to MSAID Platform.'); }
+            return s;
+          });
+          if (polls > 24) clearInterval(iv);  // 2-min timeout
+        }, 5000);
+      };
+
+      const logout = async () => {
+        await fetch(API + '/api/msaid/logout');
+        setStatus(s => ({...s, authenticated: false}));
+        setExperiments([]);
+        setMsg('Logged out.');
+      };
+
+      const loadExperiments = async () => {
+        setLoading(true); setMsg('');
+        try {
+          const r = await fetch(API + '/api/msaid/experiments');
+          if (!r.ok) { setMsg('Not authenticated — login first.'); setLoading(false); return; }
+          const d = await r.json();
+          setExperiments(d);
+          setMsg(`${d.length} experiment${d.length !== 1 ? 's' : ''} found.`);
+        } catch(e) { setMsg('Error: ' + e.message); }
+        setLoading(false);
+      };
+
+      useEffect(() => { checkStatus(); }, []);
+
+      const auth = status?.authenticated;
+      const pill = { display:'inline-flex', alignItems:'center', gap:'0.3rem',
+                     padding:'0.2rem 0.6rem', borderRadius:'1rem', fontSize:'0.72rem', fontWeight:700 };
+
+      return (
+        <div className="card" style={{marginBottom:'1rem'}}>
+          <div style={{display:'flex', alignItems:'center', gap:'0.75rem', cursor:'pointer'}}
+               onClick={() => setExpanded(!expanded)}>
+            <h3 style={{margin:0}}>CHIMERYS — MSAID Platform</h3>
+            <span style={{...pill,
+                           background: auth ? 'rgba(34,197,94,0.12)' : 'rgba(100,116,139,0.12)',
+                           color: auth ? 'var(--pass)' : 'var(--muted)'}}>
+              {auth ? '● connected' : '○ not connected'}
+            </span>
+            <span style={{marginLeft:'auto', color:'var(--muted)', fontSize:'0.8rem'}}>{expanded ? '▼' : '▶'}</span>
+          </div>
+
+          {expanded && (
+            <div style={{marginTop:'0.85rem'}}>
+              <p style={{color:'var(--muted)', fontSize:'0.83rem', marginBottom:'0.9rem'}}>
+                <strong style={{color:'var(--text)'}}>CHIMERYS</strong> (MSAID) deconvolutes chimeric MS2 spectra
+                using deep learning — identifying multiple co-fragmented peptides per spectrum.
+                Supports timsTOF (ddaPASEF + diaPASEF) via the cloud platform.{' '}
+                <em>Submit your .d files via the MSAID Platform web interface, then link results here.</em>
+              </p>
+
+              <div style={{display:'flex', gap:'0.5rem', flexWrap:'wrap', marginBottom:'0.75rem'}}>
+                {!auth ? (
+                  <button onClick={login}
+                    style={{background:'var(--accent)', color:'#000', border:'none',
+                            borderRadius:'0.4rem', padding:'0.38rem 0.9rem',
+                            fontWeight:800, cursor:'pointer', fontSize:'0.84rem'}}>
+                    Login to MSAID Platform
+                  </button>
+                ) : (
+                  <>
+                    <button onClick={loadExperiments} disabled={loading}
+                      style={{background:'rgba(34,211,238,0.1)', color:'var(--cyan)',
+                              border:'1px solid rgba(34,211,238,0.3)',
+                              borderRadius:'0.4rem', padding:'0.35rem 0.8rem',
+                              fontWeight:700, cursor:'pointer', fontSize:'0.82rem'}}>
+                      {loading ? 'Loading…' : 'Fetch Experiments'}
+                    </button>
+                    <button onClick={logout}
+                      style={{background:'transparent', color:'var(--muted)',
+                              border:'1px solid var(--border)',
+                              borderRadius:'0.4rem', padding:'0.35rem 0.7rem',
+                              cursor:'pointer', fontSize:'0.78rem'}}>
+                      Logout
+                    </button>
+                  </>
+                )}
+              </div>
+
+              {msg && <div style={{fontSize:'0.8rem', color:'var(--muted)', marginBottom:'0.5rem'}}>{msg}</div>}
+
+              {experiments.length > 0 && (
+                <div>
+                  <div style={{fontWeight:700, color:'var(--text)', fontSize:'0.82rem', marginBottom:'0.4rem'}}>
+                    Completed Experiments
+                  </div>
+                  <div style={{maxHeight:'240px', overflowY:'auto'}}>
+                    {experiments.map(exp => (
+                      <div key={exp.uuid} style={{display:'flex', alignItems:'center', gap:'0.6rem',
+                                                   padding:'0.45rem 0.6rem', marginBottom:'0.25rem',
+                                                   background:'var(--bg)', borderRadius:'0.4rem',
+                                                   border:'1px solid var(--border)', fontSize:'0.80rem'}}>
+                        <div style={{flex:1, minWidth:0}}>
+                          <div style={{fontWeight:600, color:'var(--text)', overflow:'hidden',
+                                       textOverflow:'ellipsis', whiteSpace:'nowrap'}}>{exp.name}</div>
+                          <div style={{color:'var(--muted)', fontSize:'0.70rem'}}>
+                            {exp.uuid.slice(0,12)}… · {exp.createdAt ? new Date(exp.createdAt).toLocaleDateString() : ''}
+                          </div>
+                        </div>
+                        <span style={{fontSize:'0.70rem', color:'var(--pass)', flexShrink:0}}>✓ {exp.status}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <p style={{color:'var(--muted)', fontSize:'0.74rem', marginTop:'0.5rem'}}>
+                    To link a result to a run: go to the run in the Searches tab and use the Chimerys panel to select an experiment UUID.
+                  </p>
+                </div>
+              )}
+
+              <div style={{marginTop:'0.75rem', padding:'0.5rem 0.7rem',
+                           background:'rgba(218,170,0,0.04)', border:'1px solid rgba(218,170,0,0.15)',
+                           borderRadius:'0.5rem', fontSize:'0.75rem', color:'var(--muted)'}}>
+                <strong style={{color:'var(--accent)'}}>timsTOF workflow:</strong>{' '}
+                Upload your <strong>.d folder directly</strong> to platform.msaid.io (no conversion needed — CHIMERYS reads Bruker native format, preserving all ion mobility data) →
+                run CHIMERYS 5 →
+                click "Fetch Experiments" above → link UUID to your run.
+                Results feed directly into ion mobility, CCS, landscape, and 4D advantage panels.
+                {' '}<span style={{color:'var(--fail)'}}>Do not use MSconvert — converting to mzML discards ion mobility and costs 10–15% of IDs.</span>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // ── FASTA + Library Manager card ───────────────────────────────────────
     function LibraryManager({ instruments, onAssigned }) {
       const [fastas,       setFastas]       = useState([]);
@@ -457,6 +745,10 @@
           </div>
 
           <LibraryManager instruments={instruments} onAssigned={reloadInst} />
+
+          <SearchEngineConfig instruments={instruments} onChanged={reloadInst} />
+
+          <ChimerysConnect />
 
           <div className="card" style={{marginBottom:'1rem'}}>
             <h3>Quick Actions</h3>

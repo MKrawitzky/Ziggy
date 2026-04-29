@@ -29,6 +29,15 @@
       const [data3d2, setData3d2]           = useState(null);
       const [loadingCompare, setLoadingCompare] = useState(false);
 
+      // ── 4D Novel Features ───────────────────────────────────────────
+      const [feat4d, setFeat4d]           = useState(null);
+      const [feat4dLoading, setFeat4dLoading] = useState(false);
+      const lcImRef      = useRef(null);
+      const imDevRef     = useRef(null);
+      const imFwhmRef    = useRef(null);
+      const imLadderRef  = useRef(null);
+      const seqImRef     = useRef(null);
+
       const Z_COLORS = {0:'#eab308',1:'#2dd4bf',2:'#60a5fa',3:'#22c55e',4:'#f97316',5:'#a855f7',6:'#ef4444'};
 
       // ── Only .d runs have ion mobility ──────────────────────────────
@@ -73,6 +82,18 @@
           setPasefData(pasef?.events?.length ? pasef : null);
           setLoading(false);
         }).catch(e => { if (e.name !== 'AbortError') setLoading(false); });
+        return () => ac.abort();
+      }, [selectedRun?.id]);
+
+      // ── Fetch 4D novel features when run changes ────────────────────
+      useEffect(() => {
+        if (!selectedRun) return;
+        const ac = new AbortController();
+        setFeat4d(null); setFeat4dLoading(true);
+        fetch(API + `/api/runs/${selectedRun.id}/4d-features`, {signal:ac.signal})
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { setFeat4d(d && !d.error ? d : null); setFeat4dLoading(false); })
+          .catch(e => { if (e.name !== 'AbortError') setFeat4dLoading(false); });
         return () => ac.abort();
       }, [selectedRun?.id]);
 
@@ -637,6 +658,145 @@
         }, {responsive:true, displayModeBar:false});
       }, [densityA, densityB]);
 
+      // ── CHART: LC-IM Map (RT × 1/K₀ density) ────────────────────────
+      useEffect(() => {
+        if (!lcImRef.current || !window.Plotly) return;
+        const d = feat4d?.lc_im_map;
+        if (!d?.grid?.length) { window.Plotly.purge(lcImRef.current); return; }
+        const rt_centers = d.rt_edges.slice(0,-1).map((v,i)=>+((v+d.rt_edges[i+1])/2).toFixed(2));
+        const im_centers = d.im_edges.slice(0,-1).map((v,i)=>+((v+d.im_edges[i+1])/2).toFixed(4));
+        window.Plotly.react(lcImRef.current, [{
+          type:'heatmap', x:rt_centers, y:im_centers, z:d.grid,
+          colorscale:[['0','#0e0018'],['0.3','#3d1060'],['0.6','#8b5cf6'],['0.85','#DAAA00'],['1','#ffffff']],
+          showscale:true, colorbar:{title:{text:'log₁₀ intensity',font:{size:10}}, tickfont:{size:9}, len:0.7},
+          hovertemplate:'RT %{x:.2f} min<br>1/K₀ %{y:.4f}<br>density %{z:.3f}<extra></extra>',
+          transpose:true,
+        }], {
+          paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+          font:{color:'#94a3b8',size:11}, margin:{l:65,r:55,t:30,b:50},
+          xaxis:{title:{text:'RT (min)',font:{size:12}},color:'#a0b4cc',gridcolor:'#1e3a5f'},
+          yaxis:{title:{text:'1/K₀ (Vs/cm²)',font:{size:12}},color:'#a0b4cc',gridcolor:'#1e3a5f'},
+          annotations:[{xref:'paper',yref:'paper',x:0.01,y:0.99,xanchor:'left',yanchor:'top',
+            text:`${(d.n_features||0).toLocaleString()} precursors`,
+            showarrow:false,font:{color:'#DAAA00',size:10},bgcolor:'rgba(0,0,0,0.4)',borderpad:3}],
+        }, {responsive:true, scrollZoom:true, modeBarButtonsToRemove:['toImage']});
+      }, [feat4d]);
+
+      // ── CHART: Δ1/K₀ by Peptide Length ──────────────────────────────
+      useEffect(() => {
+        if (!imDevRef.current || !window.Plotly) return;
+        const d = feat4d?.im_deviation;
+        if (!d?.lengths?.length || !d.has_predicted) { window.Plotly.purge(imDevRef.current); return; }
+        window.Plotly.react(imDevRef.current, [
+          {
+            type:'scatter', mode:'lines+markers',
+            name:'Median Δ1/K₀',
+            x:d.lengths, y:d.median_delta,
+            line:{color:'#22d3ee',width:2}, marker:{size:6,color:'#22d3ee'},
+            error_y:{type:'data', array:d.iqr_delta.map(v=>v/2), color:'rgba(34,211,238,0.3)', width:2},
+            hovertemplate:'Length %{x}<br>Δ1/K₀ %{y:.5f}<extra></extra>',
+          },
+          {
+            type:'scatter', mode:'lines', name:'Zero',
+            x:[d.lengths[0],d.lengths[d.lengths.length-1]], y:[0,0],
+            line:{color:'#64748b',width:1,dash:'dot'}, showlegend:false, hoverinfo:'skip',
+          },
+        ], {
+          paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+          font:{color:'#94a3b8',size:11}, margin:{l:65,r:20,t:30,b:50},
+          xaxis:{title:{text:'Peptide Length (aa)',font:{size:12}},color:'#a0b4cc',gridcolor:'#1e3a5f',dtick:2},
+          yaxis:{title:{text:'Δ1/K₀ (Vs/cm²)',font:{size:12}},color:'#a0b4cc',gridcolor:'#1e3a5f',zeroline:true,zerolinecolor:'#3d1060'},
+          legend:{bgcolor:'rgba(0,0,0,0.35)',font:{size:10}},
+          annotations:[{xref:'paper',yref:'paper',x:0.99,y:0.99,xanchor:'right',yanchor:'top',
+            text:`median Δ ${d.global_median>=0?'+':''}${d.global_median?.toFixed(4)} ± ${d.global_std?.toFixed(4)}`,
+            showarrow:false,font:{color:'#DAAA00',size:10},bgcolor:'rgba(0,0,0,0.4)',borderpad:3}],
+        }, {responsive:true, displayModeBar:false});
+      }, [feat4d]);
+
+      // ── CHART: IM FWHM scatter ────────────────────────────────────────
+      useEffect(() => {
+        if (!imFwhmRef.current || !window.Plotly) return;
+        const d = feat4d?.im_fwhm;
+        if (!d?.mz?.length) { window.Plotly.purge(imFwhmRef.current); return; }
+        const charges = [...new Set(d.charge)].sort((a,b)=>a-b);
+        const traces = charges.map(z => {
+          const idx = d.charge.map((_,i)=>d.charge[i]===z?i:-1).filter(i=>i>=0);
+          return {
+            type:'scatter', mode:'markers',
+            name: z===0?'Unassigned':'z=+'+z,
+            x: idx.map(i=>d.mz[i]),
+            y: idx.map(i=>d.fwhm[i]),
+            marker:{
+              size: idx.map(i=>3+d.log_int[i]*0.6),
+              color: idx.map(i=>d.mobility[i]),
+              colorscale:'Viridis', showscale:false,
+              opacity:0.65,
+            },
+            hovertemplate:`m/z %{x:.2f}<br>FWHM %{y:.4f} min<br>${z===0?'?':'z=+'+z}<extra></extra>`,
+          };
+        });
+        window.Plotly.react(imFwhmRef.current, traces, {
+          paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+          font:{color:'#94a3b8',size:11}, margin:{l:65,r:20,t:30,b:50},
+          xaxis:{title:{text:'m/z (Th)',font:{size:12}},color:'#a0b4cc',gridcolor:'#1e3a5f'},
+          yaxis:{title:{text:'Chromatographic FWHM (min)',font:{size:12}},color:'#a0b4cc',gridcolor:'#1e3a5f'},
+          legend:{bgcolor:'rgba(0,0,0,0.35)',font:{size:10},x:0.99,y:0.99,xanchor:'right',yanchor:'top'},
+        }, {responsive:true, scrollZoom:true, modeBarButtonsToRemove:['toImage']});
+      }, [feat4d]);
+
+      // ── CHART: CCS Charge Ladder ──────────────────────────────────────
+      useEffect(() => {
+        if (!imLadderRef.current || !window.Plotly) return;
+        const d = feat4d?.im_dispersion;
+        if (!d?.ladder?.length) { window.Plotly.purge(imLadderRef.current); return; }
+        const ladder = d.ladder;
+        const traces = [{
+          type:'box', boxmean:false,
+          name:'1/K₀ per charge',
+          x: ladder.map(l=>l.charge),
+          lowerfence: ladder.map(l=>l.min),
+          q1:         ladder.map(l=>l.q1),
+          median:     ladder.map(l=>l.median),
+          q3:         ladder.map(l=>l.q3),
+          upperfence: ladder.map(l=>l.max),
+          marker:{color:'#DAAA00',size:4},
+          line:{color:'#DAAA00'},
+          fillcolor:'rgba(218,170,0,0.15)',
+          hovertemplate:'z=+%{x}<br>median 1/K₀: %{median:.4f}<br>IQR: %{q1:.4f}–%{q3:.4f}<extra></extra>',
+        }];
+        window.Plotly.react(imLadderRef.current, traces, {
+          paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+          font:{color:'#94a3b8',size:11}, margin:{l:65,r:20,t:30,b:50},
+          xaxis:{title:{text:'Charge State',font:{size:12}},color:'#a0b4cc',gridcolor:'#1e3a5f',tickmode:'array',tickvals:ladder.map(l=>l.charge)},
+          yaxis:{title:{text:'1/K₀ (Vs/cm²)',font:{size:12}},color:'#a0b4cc',gridcolor:'#1e3a5f'},
+          showlegend:false,
+        }, {responsive:true, displayModeBar:false});
+      }, [feat4d]);
+
+      // ── CHART: Sequence Length vs 1/K₀ ───────────────────────────────
+      useEffect(() => {
+        if (!seqImRef.current || !window.Plotly) return;
+        const d = feat4d?.seq_length_im;
+        if (!d?.lengths?.length) { window.Plotly.purge(seqImRef.current); return; }
+        window.Plotly.react(seqImRef.current, [{
+          type:'scatter', mode:'lines+markers',
+          name:'Median 1/K₀',
+          x:d.lengths, y:d.medians,
+          line:{color:'#a855f7',width:2.5},
+          marker:{size:d.counts.map(c=>Math.min(12,4+Math.log2(c+1)*1.5)), color:'#a855f7'},
+          text:d.counts.map(c=>`n=${c}`),
+          hovertemplate:'Length %{x}<br>Median 1/K₀ %{y:.4f}<br>%{text}<extra></extra>',
+        }], {
+          paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+          font:{color:'#94a3b8',size:11}, margin:{l:65,r:20,t:30,b:50},
+          xaxis:{title:{text:'Peptide Length (aa)',font:{size:12}},color:'#a0b4cc',gridcolor:'#1e3a5f',dtick:3},
+          yaxis:{title:{text:'Median 1/K₀ (Vs/cm²)',font:{size:12}},color:'#a0b4cc',gridcolor:'#1e3a5f'},
+          annotations:[{xref:'paper',yref:'paper',x:0.99,y:0.01,xanchor:'right',yanchor:'bottom',
+            text:`Pearson r = ${d.pearson_r?.toFixed(3)}`,
+            showarrow:false,font:{color:'#a855f7',size:11},bgcolor:'rgba(0,0,0,0.4)',borderpad:3}],
+        }, {responsive:true, displayModeBar:false});
+      }, [feat4d]);
+
       // ── Render ─────────────────────────────────────────────────────────
       const hasData = data3d && data3d.mz?.length;
       const hasWindows = windowData?.windows?.length || pasefData?.events?.length;
@@ -1076,6 +1236,189 @@ Calibration (mass + IMS) takes under 5 min — vs 45+ min on other platforms. Br
                     Red regions = ions gained. A similarity score near 100% indicates identical proteome composition and instrument state.
                   </div>
                 </div>
+
+                {/* ═══════════ SECTION: 4D NOVEL FEATURES ══════════════════ */}
+                {feat4d && (() => {
+                  const conf = feat4d.conformers;
+                  return (
+                    <>
+                      {/* ── LC-IM Map ── */}
+                      {feat4d.lc_im_map?.grid?.length > 0 && (
+                        <div className="card" style={{marginBottom:'1rem'}}>
+                          <div style={{padding:'0.9rem 1.2rem 0.5rem',borderBottom:'1px solid var(--border)'}}>
+                            <h3 style={{margin:0,fontSize:'1.05rem'}}>
+                              The Peptide Diagonal — LC × Ion Mobility Density
+                              <span style={{marginLeft:'0.6rem',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.35)',color:'#f87171',fontSize:'0.7rem',padding:'0.1rem 0.45rem',borderRadius:'0.25rem',verticalAlign:'middle',fontWeight:700}}>NOVEL</span>
+                            </h3>
+                            <div style={{color:'var(--muted)',fontSize:'0.78rem',marginTop:'0.3rem'}}>
+                              Every tryptic peptide traces a diagonal ridge in RT × 1/K₀ space — early-eluting peptides are small and compact (lower 1/K₀), late-eluting are large and hydrophobic (higher 1/K₀).
+                              Off-diagonal clouds reveal non-tryptic peptides, missed cleavages, or column bleed. Impossible to visualise on Orbitrap — requires per-scan 1/K₀ readout.
+                            </div>
+                          </div>
+                          <div ref={lcImRef} style={{height:'420px'}} />
+                          <div style={{padding:'0.6rem 1.2rem',borderTop:'1px solid var(--border)',background:'rgba(1,26,58,0.4)',fontSize:'0.78rem',color:'var(--muted)'}}>
+                            <span style={{color:'#DAAA00',fontWeight:600}}>What to look for: </span>
+                            The ridge should be a clean diagonal band. A bifurcated ridge = two co-eluting peptide populations (sample complexity or missed-cleavage enrichment).
+                            Dense off-diagonal clouds in early RT = contaminants. Sparse late-RT high-1/K₀ region = insufficient gradient length for large peptides.
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ── Two-column: Δ1/K₀ by Length + Seq Length CCS trend ── */}
+                      {(feat4d.im_deviation?.lengths?.length > 0 || feat4d.seq_length_im?.lengths?.length > 0) && (
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'1rem',marginBottom:'1rem'}}>
+                          {feat4d.im_deviation?.has_predicted && feat4d.im_deviation?.lengths?.length > 0 && (
+                            <div className="card">
+                              <div style={{padding:'0.9rem 1.2rem 0.5rem',borderBottom:'1px solid var(--border)'}}>
+                                <h3 style={{margin:0,fontSize:'1.0rem'}}>
+                                  Δ1/K₀ vs Peptide Length
+                                  <span style={{marginLeft:'0.5rem',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.35)',color:'#f87171',fontSize:'0.65rem',padding:'0.1rem 0.4rem',borderRadius:'0.25rem',verticalAlign:'middle',fontWeight:700}}>NOVEL</span>
+                                </h3>
+                                <div style={{color:'var(--muted)',fontSize:'0.75rem',marginTop:'0.25rem'}}>
+                                  Measured 1/K₀ minus DIA-NN's library-predicted 1/K₀, grouped by peptide length. Error bars = IQR. Systematic deviation = gas-phase calibration drift.
+                                </div>
+                              </div>
+                              <div ref={imDevRef} style={{height:'300px'}} />
+                              <div style={{padding:'0.5rem 1rem',borderTop:'1px solid var(--border)',background:'rgba(1,26,58,0.4)',fontSize:'0.73rem',color:'var(--muted)'}}>
+                                Systematic offset &gt; ±0.025 = recalibrate TIMS. Length-dependent slope = ion heating effect.
+                              </div>
+                            </div>
+                          )}
+                          {feat4d.seq_length_im?.lengths?.length > 0 && (
+                            <div className="card">
+                              <div style={{padding:'0.9rem 1.2rem 0.5rem',borderBottom:'1px solid var(--border)'}}>
+                                <h3 style={{margin:0,fontSize:'1.0rem'}}>
+                                  Empirical CCS–Mass Law
+                                  <span style={{marginLeft:'0.5rem',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.35)',color:'#f87171',fontSize:'0.65rem',padding:'0.1rem 0.4rem',borderRadius:'0.25rem',verticalAlign:'middle',fontWeight:700}}>NOVEL</span>
+                                </h3>
+                                <div style={{color:'var(--muted)',fontSize:'0.75rem',marginTop:'0.25rem'}}>
+                                  Median 1/K₀ per peptide length — derived entirely from <em>this run's own data</em>. Marker size = number of peptides. Pearson r quantifies CCS–mass correlation.
+                                </div>
+                              </div>
+                              <div ref={seqImRef} style={{height:'300px'}} />
+                              <div style={{padding:'0.5rem 1rem',borderTop:'1px solid var(--border)',background:'rgba(1,26,58,0.4)',fontSize:'0.73rem',color:'var(--muted)'}}>
+                                r &gt; 0.90 = clean tryptic digest following CCS–mass law. Low r = sample complexity (non-tryptic, PTMs, co-eluters).
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* ── Two-column: FWHM scatter + Charge Ladder ── */}
+                      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'1rem',marginBottom:'1rem'}}>
+                        {feat4d.im_fwhm?.mz?.length > 0 && (
+                          <div className="card">
+                            <div style={{padding:'0.9rem 1.2rem 0.5rem',borderBottom:'1px solid var(--border)'}}>
+                              <h3 style={{margin:0,fontSize:'1.0rem'}}>
+                                LC Peak FWHM × m/z × 1/K₀
+                                <span style={{marginLeft:'0.5rem',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.35)',color:'#f87171',fontSize:'0.65rem',padding:'0.1rem 0.4rem',borderRadius:'0.25rem',verticalAlign:'middle',fontWeight:700}}>NOVEL</span>
+                              </h3>
+                              <div style={{color:'var(--muted)',fontSize:'0.75rem',marginTop:'0.25rem'}}>
+                                Each dot = one precursor. X = m/z, Y = chromatographic peak width, colour = 1/K₀. Coloured by charge. Reveals LC broadening vs ion size — unique to 4D datasets.
+                              </div>
+                            </div>
+                            <div ref={imFwhmRef} style={{height:'300px'}} />
+                            {feat4d.im_fwhm.charge_summary && (
+                              <div style={{padding:'0.5rem 1rem',borderTop:'1px solid var(--border)',background:'rgba(1,26,58,0.4)',fontSize:'0.73rem',color:'var(--muted)',display:'flex',gap:'1.2rem',flexWrap:'wrap'}}>
+                                {Object.entries(feat4d.im_fwhm.charge_summary).map(([z,s])=>(
+                                  <span key={z}><span style={{color:Z_COLORS[+z]||'#94a3b8',fontWeight:700}}>z=+{z}</span> med {s.median} / p90 {s.p90} min</span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        {feat4d.im_dispersion?.ladder?.length > 0 && (
+                          <div className="card">
+                            <div style={{padding:'0.9rem 1.2rem 0.5rem',borderBottom:'1px solid var(--border)'}}>
+                              <h3 style={{margin:0,fontSize:'1.0rem'}}>
+                                CCS Charge Ladder
+                                <span style={{marginLeft:'0.5rem',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.35)',color:'#f87171',fontSize:'0.65rem',padding:'0.1rem 0.4rem',borderRadius:'0.25rem',verticalAlign:'middle',fontWeight:700}}>NOVEL</span>
+                              </h3>
+                              <div style={{color:'var(--muted)',fontSize:'0.75rem',marginTop:'0.25rem'}}>
+                                1/K₀ distribution per charge state — box = IQR, whiskers = min/max.
+                                Higher charge = more open/extended conformations → higher 1/K₀ and broader spread. This is the gas-phase structural fingerprint of your sample.
+                              </div>
+                            </div>
+                            <div ref={imLadderRef} style={{height:'300px'}} />
+                            <div style={{padding:'0.5rem 1rem',borderTop:'1px solid var(--border)',background:'rgba(1,26,58,0.4)',fontSize:'0.73rem',color:'var(--muted)'}}>
+                              IQR widens with charge = expected (conformational freedom). Unexpectedly wide IQR at z=+2 = co-eluting non-tryptic peptides contaminating the 1/K₀ distribution.
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* ── Conformer scan summary ── */}
+                      {conf && conf.n_groups > 0 && (
+                        <div className="card" style={{marginBottom:'1rem'}}>
+                          <div style={{padding:'0.9rem 1.2rem 0.5rem',borderBottom:'1px solid var(--border)'}}>
+                            <div style={{display:'flex',alignItems:'flex-start',gap:'1rem',flexWrap:'wrap'}}>
+                              <div style={{flex:1}}>
+                                <h3 style={{margin:0,fontSize:'1.05rem'}}>
+                                  Structural Conformer Detection
+                                  <span style={{marginLeft:'0.6rem',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.35)',color:'#f87171',fontSize:'0.7rem',padding:'0.1rem 0.45rem',borderRadius:'0.25rem',verticalAlign:'middle',fontWeight:700}}>NOVEL</span>
+                                </h3>
+                                <div style={{color:'var(--muted)',fontSize:'0.78rem',marginTop:'0.3rem'}}>
+                                  Peptides detected at multiple distinct 1/K₀ positions (Δ ≥ {conf.threshold} Vs/cm²) may represent structural conformers, charge-site isomers, or PTM variants unresolved by sequence alone.
+                                  Only measurable with timsTOF — requires per-scan 1/K₀.
+                                </div>
+                              </div>
+                              <div style={{display:'flex',gap:'1.5rem',alignItems:'center',flexShrink:0}}>
+                                <div style={{textAlign:'center'}}>
+                                  <div style={{fontSize:'2.2rem',fontWeight:900,
+                                    background:'linear-gradient(135deg,#f59e0b,#ef4444)',
+                                    WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',backgroundClip:'text'}}>
+                                    {conf.conformer_pct}%
+                                  </div>
+                                  <div style={{color:'var(--muted)',fontSize:'0.72rem'}}>multi-conformer<br/>peptides</div>
+                                </div>
+                                <div style={{textAlign:'center'}}>
+                                  <div style={{color:'var(--accent)',fontWeight:700,fontSize:'1.3rem'}}>{conf.n_conformers.toLocaleString()}</div>
+                                  <div style={{color:'var(--muted)',fontSize:'0.72rem'}}>of {conf.n_groups.toLocaleString()}<br/>sequences</div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                          {conf.top_conformers?.length > 0 && (
+                            <div style={{padding:'0.75rem 1.2rem',overflowX:'auto'}}>
+                              <div style={{fontSize:'0.72rem',color:'var(--muted)',marginBottom:'0.4rem',fontWeight:600,textTransform:'uppercase',letterSpacing:'0.05em'}}>Top Conformer Candidates — widest 1/K₀ spread</div>
+                              <table style={{width:'100%',borderCollapse:'collapse',fontSize:'0.77rem'}}>
+                                <thead>
+                                  <tr style={{color:'var(--muted)',borderBottom:'1px solid var(--border)'}}>
+                                    {['Sequence','Charge','1/K₀ range','Δ1/K₀','Obs'].map(h=>(
+                                      <th key={h} style={{padding:'0.2rem 0.5rem',textAlign:h==='Obs'?'right':'left',fontWeight:600}}>{h}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {conf.top_conformers.slice(0,12).map((c,i)=>(
+                                    <tr key={i} style={{borderBottom:'1px solid rgba(255,255,255,0.04)',color:i%2===0?'var(--text)':'#c4c4d4'}}>
+                                      <td style={{padding:'0.18rem 0.5rem',fontFamily:'monospace',color:'#60a5fa'}}>{c.sequence}</td>
+                                      <td style={{padding:'0.18rem 0.5rem',color:Z_COLORS[c.charge]||'#94a3b8'}}>z=+{c.charge}</td>
+                                      <td style={{padding:'0.18rem 0.5rem',color:'#94a3b8'}}>{c.im_min}–{c.im_max}</td>
+                                      <td style={{padding:'0.18rem 0.5rem',fontWeight:700,color:'#f59e0b'}}>Δ{c.im_range}</td>
+                                      <td style={{padding:'0.18rem 0.5rem',textAlign:'right',color:'var(--muted)'}}>{c.n_obs}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                          <div style={{padding:'0.6rem 1.2rem',borderTop:'1px solid var(--border)',background:'rgba(1,26,58,0.4)',fontSize:'0.78rem',color:'var(--muted)'}}>
+                            <span style={{color:'var(--accent)',fontWeight:600}}>Biological significance: </span>
+                            Phosphopeptides and glycopeptides show the largest conformer spread — the PTM alters the ion's gas-phase shape.
+                            Proline-rich sequences are also prone to multiple conformers due to cis/trans isomerisation.
+                            This list is a hypothesis generator for structural follow-up.
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+                {feat4dLoading && (
+                  <div style={{textAlign:'center',padding:'1.5rem',color:'var(--muted)',fontSize:'0.85rem'}}>
+                    Computing novel 4D features…
+                  </div>
+                )}
 
               </>
             );

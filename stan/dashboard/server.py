@@ -803,13 +803,21 @@ def _resolve_features_path(run: dict):
 def _resolve_report_path(run: dict) -> Path | None:
     """Return the DIA-NN report.parquet path for a run, or None.
 
-    Priority:
+    Returns None immediately for DDA runs — DIA-NN cannot search DDA/ddaPASEF
+    data and its output will be empty.  Callers should use _resolve_sage_path
+    for DDA modes instead.
+
+    Priority (DIA runs only):
       1. result_path column in DB — only if it points to report.parquet
          (DDA runs store results.sage.parquet there; those are handled by
          _resolve_sage_path instead)
       2. Disk fallback: <raw_parent>/stan_results/<run_stem>/report.parquet
       3. Disk fallback: report.parquet directly next to the .d directory
     """
+    mode = run.get("mode", "")
+    if mode in ("DDA", "ddaPASEF", "ddaMS2", "ddaMRM"):
+        return None  # DDA: skip DIA-NN entirely — use _resolve_sage_path
+
     stored = run.get("result_path", "")
     if stored and Path(stored).name == "report.parquet":
         p = Path(stored)
@@ -862,6 +870,42 @@ def _resolve_sage_path(run: dict) -> Path | None:
     candidate2 = raw.parent / "results.sage.parquet"
     if candidate2.exists():
         return candidate2
+
+    return None
+
+
+def _resolve_chimerys_path(run: dict) -> Path | None:
+    """Return path to a locally-cached Chimerys PSM parquet for this run, or None.
+
+    Chimerys results are downloaded from the MSAID Platform and cached at
+    ~/.stan/chimerys_cache/<experiment_uuid>_PSMS.parquet.
+    The run record may store the experiment UUID in the 'chimerys_experiment_uuid'
+    column, or a direct parquet path in 'chimerys_path'.
+
+    Disk fallback: <stan_results>/<stem>/chimerys_psms.parquet
+    """
+    # 1. Direct path stored on run record
+    stored = run.get("chimerys_path", "")
+    if stored:
+        p = Path(stored)
+        if p.exists():
+            return p
+
+    # 2. Cached download via experiment UUID
+    exp_uuid = run.get("chimerys_experiment_uuid", "")
+    if exp_uuid:
+        cache = Path.home() / ".stan" / "chimerys_cache" / f"{exp_uuid}_PSMS.parquet"
+        if cache.exists():
+            return cache
+
+    # 3. Disk fallback next to stan_results output
+    raw_path = run.get("raw_path", "")
+    if raw_path:
+        raw = Path(raw_path)
+        for name in ("chimerys_psms.parquet", "chimerys_PSMS.parquet"):
+            candidate = raw.parent / "stan_results" / raw.stem / name
+            if candidate.exists():
+                return candidate
 
     return None
 
@@ -993,13 +1037,20 @@ async def api_mobility_map(run_id: str, rt_bins: int = 60, mob_bins: int = 50) -
     if features_path:
         return get_mobility_map(features_path, rt_bins=rt_bins, mobility_bins=mob_bins)
 
-    report_path = _resolve_report_path(run)
+    report_path = _resolve_report_path(run)  # returns None for DDA runs
     if report_path:
-        return get_mobility_map_diann(report_path, run_name=run.get("run_name"), rt_bins=rt_bins, mobility_bins=mob_bins)
+        result = get_mobility_map_diann(report_path, run_name=run.get("run_name"), rt_bins=rt_bins, mobility_bins=mob_bins)
+        if result:
+            return result
 
     sage_path = _resolve_sage_path(run)
     if sage_path:
         return get_mobility_map_sage(sage_path, rt_bins=rt_bins, mobility_bins=mob_bins)
+
+    chimerys_path = _resolve_chimerys_path(run)
+    if chimerys_path:
+        from stan.metrics.mobility_chimerys import get_mobility_map_chimerys
+        return get_mobility_map_chimerys(chimerys_path, rt_bins=rt_bins, mobility_bins=mob_bins)
 
     return {}
 
@@ -1103,13 +1154,20 @@ async def api_mobility_3d(run_id: str, max_features: int = 5000) -> dict:
     if features_path:
         return get_feature_3d_data(features_path, max_features=cap)
 
-    report_path = _resolve_report_path(run)
+    report_path = _resolve_report_path(run)  # returns None for DDA runs
     if report_path:
-        return get_feature_3d_data_diann(report_path, run_name=run.get("run_name"), max_features=cap)
+        result = get_feature_3d_data_diann(report_path, run_name=run.get("run_name"), max_features=cap)
+        if result:
+            return result
 
     sage_path = _resolve_sage_path(run)
     if sage_path:
         return get_feature_3d_data_sage(sage_path, max_features=cap)
+
+    chimerys_path = _resolve_chimerys_path(run)
+    if chimerys_path:
+        from stan.metrics.mobility_chimerys import get_feature_3d_data_chimerys
+        return get_feature_3d_data_chimerys(chimerys_path, max_features=cap)
 
     return {}
 
@@ -1141,14 +1199,16 @@ async def api_mobility_stats(run_id: str) -> dict:
             "intensity_hist": get_intensity_histogram(features_path),
         }
 
-    report_path = _resolve_report_path(run)
+    report_path = _resolve_report_path(run)  # returns None for DDA runs
     if report_path:
         run_name = run.get("run_name")
-        return {
+        result = {
             "charge_dist": get_charge_distribution_diann(report_path, run_name),
             "fwhm_hist":   get_fwhm_histogram_diann(report_path, run_name),
             "intensity_hist": get_intensity_histogram_diann(report_path, run_name),
         }
+        if any(result.values()):
+            return result
 
     sage_path = _resolve_sage_path(run)
     if sage_path:
@@ -1240,13 +1300,14 @@ async def api_mia_compare(
 
 @app.post("/api/fix-instrument-names")
 async def api_fix_instrument_names() -> dict:
-    """Retroactively resolve 'auto' instrument names from Bruker .d method files.
+    """Retroactively resolve 'auto' instrument names from Bruker .d directories.
 
-    Scans all runs in the database whose instrument field is 'auto' and whose
-    raw_path points to a .d directory. For each, reads the model name from
-    the .m subfolder and updates the database row.
+    Scans all runs in the database whose instrument field is a placeholder value
+    ('auto', 'unknown', '', None) and tries to read the real model name from:
+      1. analysis.tdf GlobalMetadata.InstrumentName
+      2. .m/microTOFQImpacTemAcquisition.method (legacy fallback)
 
-    Returns a summary: {updated: int, skipped: int, errors: int}
+    Returns a summary with per-run details for debugging.
     """
     from stan.db import get_db_path
     from stan.watcher.instrument_name import read_instrument_name_from_d
@@ -1258,41 +1319,122 @@ async def api_fix_instrument_names() -> dict:
         return {"updated": 0, "skipped": 0, "errors": 0, "detail": "No database found"}
 
     updated = skipped = errors = 0
+    details: list[dict] = []
+
+    _PLACEHOLDERS = {'auto', 'unknown', 'instrument', '', 'none'}
 
     try:
         with sqlite3.connect(str(db_path)) as con:
             con.row_factory = sqlite3.Row
+            # Fetch all runs — we'll filter in Python to catch edge cases
             rows = con.execute(
-                "SELECT id, raw_path FROM runs WHERE lower(trim(instrument)) IN ('auto', 'unknown', 'instrument', '')"
-                " OR instrument IS NULL"
+                "SELECT id, run_name, raw_path, instrument FROM runs"
             ).fetchall()
 
             for row in rows:
-                raw_path = row["raw_path"]
-                if not raw_path or not raw_path.endswith(".d"):
+                inst = (row["instrument"] or "").strip().lower()
+                if inst not in _PLACEHOLDERS:
+                    continue  # already has a real name
+
+                raw_path = (row["raw_path"] or "").strip()
+                # Accept .d and .D (case-insensitive on Windows)
+                if not raw_path or not raw_path.lower().endswith(".d"):
                     skipped += 1
+                    details.append({"id": row["id"], "run": row["run_name"],
+                                    "result": "skipped", "reason": f"raw_path not .d: {raw_path!r}"})
                     continue
+
+                d_path = Path(raw_path)
+                if not d_path.exists():
+                    skipped += 1
+                    details.append({"id": row["id"], "run": row["run_name"],
+                                    "result": "skipped", "reason": f"path not found: {raw_path}"})
+                    continue
+
                 try:
-                    name = read_instrument_name_from_d(Path(raw_path))
+                    name = read_instrument_name_from_d(d_path)
                     if name:
                         con.execute(
                             "UPDATE runs SET instrument = ? WHERE id = ?",
                             (name, row["id"]),
                         )
                         updated += 1
-                        logger.info("Fixed instrument name for run %s: %s", row["id"], name)
+                        logger.info("Fixed instrument for run %s (%s): %s", row["id"], row["run_name"], name)
+                        details.append({"id": row["id"], "run": row["run_name"],
+                                        "result": "updated", "name": name})
                     else:
                         skipped += 1
+                        details.append({"id": row["id"], "run": row["run_name"],
+                                        "result": "skipped", "reason": "read_instrument_name_from_d returned None"})
                 except Exception as exc:
-                    logger.warning("Error reading instrument name for run %s: %s", row["id"], exc)
                     errors += 1
+                    details.append({"id": row["id"], "run": row["run_name"],
+                                    "result": "error", "reason": str(exc)})
+                    logger.warning("Error reading instrument name for run %s: %s", row["id"], exc)
 
             con.commit()
 
     except sqlite3.OperationalError as exc:
         return {"updated": 0, "skipped": 0, "errors": 1, "detail": str(exc)}
 
-    return {"updated": updated, "skipped": skipped, "errors": errors}
+    return {"updated": updated, "skipped": skipped, "errors": errors, "runs": details}
+
+
+@app.get("/api/runs/{run_id}/tdf-debug")
+async def api_tdf_debug(run_id: str) -> dict:
+    """Dump all GlobalMetadata key/value pairs from analysis.tdf for a run.
+
+    Use this to diagnose why instrument name resolution fails — shows every
+    key Bruker wrote into the TDF so we can find the right key for new models.
+    """
+    import sqlite3
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    raw_path = run.get("raw_path", "")
+    if not raw_path or not raw_path.lower().endswith(".d"):
+        return {"error": "not_bruker", "raw_path": raw_path}
+
+    from pathlib import Path
+    d_path = Path(raw_path)
+    tdf = d_path / "analysis.tdf"
+    if not tdf.exists():
+        return {"error": "no_tdf", "path": str(tdf)}
+
+    try:
+        with sqlite3.connect(str(tdf)) as con:
+            rows = con.execute("SELECT Key, Value FROM GlobalMetadata ORDER BY Key").fetchall()
+            meta = {r[0]: r[1] for r in rows}
+
+            # Also try to list tables
+            tables = [r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            ).fetchall()]
+
+        return {
+            "raw_path": raw_path,
+            "tdf_path": str(tdf),
+            "global_metadata": meta,
+            "tables": tables,
+        }
+    except Exception as exc:
+        return {"error": str(exc), "tdf_path": str(tdf)}
+
+
+@app.patch("/api/runs/{run_id}/instrument")
+async def api_set_instrument(run_id: str, body: dict) -> dict:
+    """Manually set the instrument name for a run."""
+    import sqlite3
+    from stan.db import get_db_path
+    name = (body.get("instrument") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="instrument name required")
+    db_path = get_db_path()
+    with sqlite3.connect(str(db_path)) as con:
+        con.execute("UPDATE runs SET instrument = ? WHERE id = ?", (name, run_id))
+        con.commit()
+    return {"ok": True, "run_id": run_id, "instrument": name}
 
 
 @app.get("/api/runs/{run_id}/phosphoisomer")
@@ -2846,11 +2988,18 @@ async def api_ccs(run_id: str) -> dict:
 
     report_path = _resolve_report_path(run)
     if report_path:
-        return get_ccs_data_diann(report_path, run_name=run.get("run_name"))
+        result = get_ccs_data_diann(report_path, run_name=run.get("run_name"))
+        if result:
+            return result
 
     sage_path = _resolve_sage_path(run)
     if sage_path:
         return get_ccs_data_sage(sage_path)
+
+    chimerys_path = _resolve_chimerys_path(run)
+    if chimerys_path:
+        from stan.metrics.mobility_chimerys import get_ccs_data_chimerys
+        return get_ccs_data_chimerys(chimerys_path)
 
     return {}
 
@@ -2860,6 +3009,150 @@ async def api_instrument_tic(instrument: str, limit: int = 20) -> dict:
     """Fetch recent TIC traces for an instrument (for overlay plot)."""
     traces = get_tic_traces_for_instrument(instrument, limit=min(limit, 50))
     return {"instrument": instrument, "traces": traces, "count": len(traces)}
+
+
+# ── MSAID Platform / CHIMERYS endpoints ──────────────────────────────────────
+
+@app.get("/api/msaid/status")
+async def api_msaid_status() -> dict:
+    """Check MSAID Platform authentication status."""
+    from stan.search.msaid_platform import MsaidPlatformClient, _DEFAULT_API_URL
+    from stan.config import load_instruments
+    inst = (load_instruments() or {}).get("instruments", [{}])[0]
+    api_url = inst.get("msaid_api_url", _DEFAULT_API_URL)
+    client = MsaidPlatformClient(api_url)
+    return {
+        "authenticated": client.is_authenticated,
+        "api_url": api_url,
+    }
+
+
+@app.get("/api/msaid/login")
+async def api_msaid_login() -> dict:
+    """Start MSAID Platform OAuth2 browser login flow.
+
+    Opens the system browser to the Cognito login page.  The auth code
+    is captured on the redirect callback at /api/msaid/callback.
+    Returns immediately — client should poll /api/msaid/status.
+    """
+    import threading
+    from stan.search.msaid_platform import MsaidPlatformClient, _DEFAULT_API_URL
+    from stan.config import load_instruments
+    inst = (load_instruments() or {}).get("instruments", [{}])[0]
+    api_url = inst.get("msaid_api_url", _DEFAULT_API_URL)
+
+    def _do_login():
+        try:
+            MsaidPlatformClient(api_url).login()
+        except Exception as e:
+            logger.warning("MSAID login error: %s", e)
+
+    threading.Thread(target=_do_login, daemon=True).start()
+    return {"status": "login_started", "message": "Browser opened — complete login then return here."}
+
+
+@app.get("/api/msaid/logout")
+async def api_msaid_logout() -> dict:
+    from stan.search.msaid_platform import MsaidPlatformClient, _DEFAULT_API_URL
+    from stan.config import load_instruments
+    inst = (load_instruments() or {}).get("instruments", [{}])[0]
+    api_url = inst.get("msaid_api_url", _DEFAULT_API_URL)
+    MsaidPlatformClient(api_url).logout()
+    return {"status": "logged_out"}
+
+
+@app.get("/api/msaid/experiments")
+async def api_msaid_experiments() -> list:
+    """List CHIMERYS experiments from the MSAID Platform."""
+    from stan.search.msaid_platform import MsaidPlatformClient, _DEFAULT_API_URL
+    from stan.config import load_instruments
+    inst = (load_instruments() or {}).get("instruments", [{}])[0]
+    api_url = inst.get("msaid_api_url", _DEFAULT_API_URL)
+    client = MsaidPlatformClient(api_url)
+    if not client.is_authenticated:
+        raise HTTPException(status_code=401, detail="Not authenticated with MSAID Platform. Use /api/msaid/login first.")
+    try:
+        return client.list_experiments(status="COMPLETED")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+class ChimerysLinkBody(BaseModel):
+    run_id: str
+    experiment_uuid: str
+    level: str = "PSMS"
+
+
+@app.post("/api/msaid/link")
+async def api_msaid_link(body: ChimerysLinkBody) -> dict:
+    """Download a Chimerys experiment result and link it to a run.
+
+    Downloads the specified result level (default: PSMS) to the local
+    Chimerys cache and stores the experiment UUID on the run record so
+    future requests resolve to the cached parquet automatically.
+    """
+    from stan.search.msaid_platform import MsaidPlatformClient, _DEFAULT_API_URL
+    from stan.config import load_instruments
+    from stan.db import update_run_field
+
+    run = get_run(body.run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    inst = (load_instruments() or {}).get("instruments", [{}])[0]
+    api_url = inst.get("msaid_api_url", _DEFAULT_API_URL)
+    client = MsaidPlatformClient(api_url)
+    if not client.is_authenticated:
+        raise HTTPException(status_code=401, detail="Not authenticated with MSAID Platform.")
+
+    try:
+        parquet_path = client.download_results(body.experiment_uuid, level=body.level)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Download failed: {e}")
+
+    # Store experiment UUID on run so _resolve_chimerys_path can find it
+    try:
+        update_run_field(body.run_id, "chimerys_experiment_uuid", body.experiment_uuid)
+        update_run_field(body.run_id, "chimerys_path", str(parquet_path))
+    except Exception as e:
+        logger.warning("Could not persist chimerys_path to DB: %s", e)
+
+    # Quick stats
+    try:
+        import polars as pl
+        df = pl.read_parquet(str(parquet_path))
+        n_psms = df.height
+    except Exception:
+        n_psms = -1
+
+    return {
+        "status":           "linked",
+        "run_id":           body.run_id,
+        "experiment_uuid":  body.experiment_uuid,
+        "parquet_path":     str(parquet_path),
+        "n_rows":           n_psms,
+        "level":            body.level,
+    }
+
+
+@app.get("/api/runs/{run_id}/chimerys-stats")
+async def api_chimerys_stats(run_id: str) -> dict:
+    """Return Chimerys peptide / chimeric spectrum statistics for a run."""
+    from stan.metrics.mobility_chimerys import get_peptide_stats_chimerys, get_charge_distribution_chimerys
+
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    chimerys_path = _resolve_chimerys_path(run)
+    if not chimerys_path:
+        return {"available": False}
+
+    return {
+        "available":    True,
+        "peptide_stats": get_peptide_stats_chimerys(chimerys_path),
+        "charge_dist":   get_charge_distribution_chimerys(chimerys_path),
+    }
 
 
 @app.get("/api/community/cohort")
@@ -3242,19 +3535,23 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
         search_mode = inst_cfg.get("search_mode", "community" if not fasta_path else "local")
 
         # ── Determine search tool and immunopeptidomics class ─────────────────
-        # Routing table:
-        #   diaPASEF / DIA   → DIA-NN (library-based)    → report.parquet
-        #   ddaPASEF         → Sage   (native .d)         → results.sage.parquet
-        #   DDA / ddaMS2     → Sage   (Thermo: +mzML)     → results.sage.parquet
+        # Routing table (respects preferred_dia_engine / preferred_dda_engine from instruments.yml):
+        #   diaPASEF / DIA   → preferred DIA engine (DIA-NN default) → report.parquet
+        #   ddaPASEF         → preferred DDA engine (Sage default)   → results.sage.parquet
+        #   DDA / ddaMS2     → preferred DDA engine (Sage default)   → results.sage.parquet
         #
         # DIA-NN is ONLY used for DIA data.  DDA searches use Sage (or MSFragger
-        # if FragPipe is installed — comparison.py handles that in the background).
+        # if configured — set preferred_dda_engine in instruments.yml).
         #
         # For immunopeptidomics samples (HLA / MHC in run name), the preset's
         # immuno_class (1 or 2) is passed through so Sage uses non-specific enzyme
         # params with the correct peptide length window.
-        use_diann = _is_dia(mode)   # DIA only — NOT ddaPASEF
-        use_sage  = not use_diann   # all DDA modes → Sage
+        preferred_dda = inst_cfg.get("preferred_dda_engine", "sage")
+        preferred_dia = inst_cfg.get("preferred_dia_engine", "diann")
+        use_diann = _is_dia(mode) and preferred_dia in ("diann", "")   # DIA only — NOT ddaPASEF
+        use_sage  = not _is_dia(mode) and preferred_dda in ("sage", "")  # DDA → Sage
+        # MSFragger routing (DDA): if preferred_dda_engine = msfragger
+        use_msfragger_dda = not _is_dia(mode) and preferred_dda == "msfragger"
 
         # Resolve immunopeptidomics class from preset or run name
         preset_key  = run.get("_preset", "")
@@ -3640,6 +3937,39 @@ async def api_mobility_calibration(run_id: str, max_points: int = 4000) -> dict:
         import traceback
         return {"error": "extraction_failed", "message": str(exc),
                 "traceback": traceback.format_exc()[-800:]}
+
+
+@app.get("/api/runs/{run_id}/4d-features")
+async def api_4d_features(run_id: str) -> dict:
+    """Novel 4D timsTOF feature analyses — impossible on Orbitrap.
+
+    Reads DIA-NN report.parquet and computes six analyses unique to ion mobility:
+      im_deviation  — Δ1/K₀ (measured − predicted) by peptide length
+      lc_im_map     — RT × 1/K₀ 2D density grid (the peptide diagonal)
+      im_fwhm       — chromatographic FWHM vs m/z vs 1/K₀ scatter
+      im_dispersion — IQR of 1/K₀ per charge state (CCS ladder)
+      seq_length_im — empirical CCS–mass law from the run's own peptides
+      conformers    — peptides detected at multiple distinct 1/K₀ values
+    """
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    report_path = _resolve_report_path(run)
+    if not report_path:
+        return {"error": "no_report",
+                "message": "No DIA-NN report.parquet for this run (DDA runs use Sage, not DIA-NN)."}
+
+    try:
+        from stan.metrics.mobility_4d_features import compute_all
+        result = compute_all(str(report_path), run.get("run_name"))
+        result["run_id"] = run_id
+        return result
+    except Exception as exc:
+        import traceback
+        logger.exception("4d-features failed for run %s", run_id)
+        return {"error": "computation_failed", "message": str(exc),
+                "traceback": traceback.format_exc()[-600:]}
 
 
 @app.post("/api/runs/{run_id}/recompute-metrics")
