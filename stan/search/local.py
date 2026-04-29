@@ -654,6 +654,439 @@ def _find_msconvert() -> str | None:
     return None
 
 
+def _find_msfragger() -> str | None:
+    """Find MSFragger jar — checks FragPipe install and common locations."""
+    # Known FragPipe installation path on this machine
+    candidates = [
+        r"C:\Users\Admin\Desktop\Fragpipe\fragpipe\MSFragger\MSFragger-3.7\MSFragger-3.7.jar",
+        r"C:\FragPipe\MSFragger-4.1\MSFragger-4.1.jar",
+        r"C:\FragPipe\MSFragger-3.8\MSFragger-3.8.jar",
+        r"C:\FragPipe\MSFragger-3.7\MSFragger-3.7.jar",
+        r"C:\tools\MSFragger\MSFragger.jar",
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+
+    # Broad search under Desktop and common tool dirs
+    import glob as _glob
+    for base in [
+        r"C:\Users\Admin\Desktop",
+        r"C:\Users\Admin\AppData\Local\FragPipe",
+        r"C:\FragPipe",
+        r"C:\tools",
+    ]:
+        for jar in _glob.glob(f"{base}/**/MSFragger*.jar", recursive=True):
+            return jar
+
+    return None
+
+
+def _find_bruker_lib_for_msfragger() -> str | None:
+    """Return the directory containing Bruker timsdata*.dll for MSFragger.
+
+    FragPipe ships timsdata*.dll in <jar_dir>/ext/bruker/.
+    We also check the DIA-NN tools folder as a fallback.
+    """
+    jar = _find_msfragger()
+    if jar is None:
+        return None
+
+    jar_dir = Path(jar).parent
+
+    # Primary: <jar_dir>/ext/bruker/ — standard FragPipe layout
+    ext_bruker = jar_dir / "ext" / "bruker"
+    if any(ext_bruker.glob("timsdata*.dll")):
+        return str(ext_bruker)
+
+    # Legacy: timsdata.dll directly next to the jar
+    if any(jar_dir.glob("timsdata*.dll")):
+        return str(jar_dir)
+
+    # FragPipe root sibling: tools/diann/*/win/  (FragPipe sometimes puts it there)
+    fragpipe_root = jar_dir.parent.parent.parent  # …/fragpipe/
+    for dll in fragpipe_root.rglob("timsdata*.dll"):
+        return str(dll.parent)
+
+    return None
+
+
+def _find_fragpipe_java() -> str | None:
+    """Return Java executable bundled with FragPipe, or None."""
+    jar = _find_msfragger()
+    if jar is None:
+        return None
+    # FragPipe JRE is at <fragpipe_root>/jre/bin/java.exe
+    fragpipe_root = Path(jar).parent.parent.parent.parent  # .../fragpipe/
+    candidate = fragpipe_root / "jre" / "bin" / "java.exe"
+    if candidate.exists():
+        return str(candidate)
+    # Also check parent of MSFragger-x.y dir (older layout)
+    for rel in ["jre/bin/java.exe", "../jre/bin/java.exe", "../../jre/bin/java.exe"]:
+        c = (Path(jar).parent / rel).resolve()
+        if c.exists():
+            return str(c)
+    return None
+
+
+def _build_msfragger_params(
+    fasta_path: str,
+    output_dir: Path,
+    vendor: str,
+    immuno_class: int = 0,
+    threads: int = 0,
+) -> dict:
+    """Return MSFragger params-file key-value pairs for a standard search."""
+    import os
+    if threads <= 0:
+        threads = max(2, (os.cpu_count() or 4) // 2)
+
+    # Tolerances: timsTOF 15/15 ppm; Thermo 20/10 ppm
+    if vendor == "bruker":
+        pre_lo, pre_hi, frag_tol = -15, 15, 20
+    else:
+        pre_lo, pre_hi, frag_tol = -20, 20, 20
+
+    base: dict = {
+        "database_name":            fasta_path,
+        "num_threads":              threads,
+        "output_location":          str(output_dir),
+        "output_format":            "tsv",
+        "output_report_topN":       1,
+        # Tolerances
+        "precursor_mass_lower":     pre_lo,
+        "precursor_mass_upper":     pre_hi,
+        "precursor_mass_units":     1,          # 1 = ppm
+        "fragment_mass_tolerance":  frag_tol,
+        "fragment_mass_units":      1,          # 1 = ppm
+        # Spectrum processing
+        "use_topN_peaks":           300,
+        "minimum_peaks":            6,
+        "max_fragment_charge":      2,
+        # Modifications
+        "variable_mod_01":          "15.9949 M 3",
+        "add_C_cysteine":           57.02146,
+        # MS2 deisotoping
+        "deisotope":                1,
+    }
+
+    if immuno_class == 1:
+        # MHC-I: semi-tryptic, 8–12 aa, z 1–3
+        base.update({
+            "search_enzyme_name_1":     "stricttrypsin",
+            "search_enzyme_cut_1":      "KR",
+            "search_enzyme_nocut_1":    "P",
+            "num_enzyme_termini":       1,
+            "num_missed_cleavages":     2,
+            "min_peptide_length":       8,
+            "max_peptide_length":       12,
+            "precursor_charge":         "1 3",
+            "override_charge":          0,
+            "variable_mod_02":          "0.984016 N 3",
+            "variable_mod_03":          "0.984016 Q 3",
+        })
+    elif immuno_class == 2:
+        # MHC-II: semi-tryptic, 13–25 aa, z 2–4
+        base.update({
+            "search_enzyme_name_1":     "stricttrypsin",
+            "search_enzyme_cut_1":      "KR",
+            "search_enzyme_nocut_1":    "P",
+            "num_enzyme_termini":       1,
+            "num_missed_cleavages":     2,
+            "min_peptide_length":       13,
+            "max_peptide_length":       25,
+            "precursor_charge":         "2 4",
+            "override_charge":          0,
+            "variable_mod_02":          "0.984016 N 3",
+            "variable_mod_03":          "0.984016 Q 3",
+        })
+    else:
+        base.update({
+            "search_enzyme_name_1":     "stricttrypsin",
+            "search_enzyme_cut_1":      "KR",
+            "search_enzyme_nocut_1":    "P",
+            "num_enzyme_termini":       2,
+            "num_missed_cleavages":     1,
+            "min_peptide_length":       7,
+            "max_peptide_length":       30,
+            "precursor_charge":         "2 4",
+        })
+
+    return base
+
+
+def _msfragger_tsv_to_sage_parquet(tsv_path: Path, output_path: Path) -> Path | None:
+    """Convert MSFragger TSV → Sage-compatible parquet with TDA q-values.
+
+    Sage's extractor needs: spectrum_q (or q_value), peptide, hyperscore,
+    delta_mass, retention_time, charge.  We compute q-values in-process
+    using target-decoy competition on Hyperscore.
+    """
+    try:
+        import polars as pl
+        import numpy as np
+    except ImportError as e:
+        logger.error("polars/numpy not available for MSFragger TSV conversion: %s", e)
+        return None
+
+    try:
+        df = pl.read_csv(str(tsv_path), separator="\t", infer_schema_length=5000)
+    except Exception as e:
+        logger.error("Could not read MSFragger TSV %s: %s", tsv_path.name, e)
+        return None
+
+    if df.height == 0:
+        logger.warning("MSFragger TSV has no rows: %s", tsv_path.name)
+        return None
+
+    # ── Column normalisation ──────────────────────────────────────────────────
+    rename: dict[str, str] = {}
+    for col in df.columns:
+        lc = col.lower().replace(" ", "_")
+        if lc == "peptide":
+            rename[col] = "peptide"
+        elif lc == "charge":
+            rename[col] = "charge"
+        elif lc in ("retention", "retention_time", "rt"):
+            rename[col] = "retention_time"
+        elif lc == "hyperscore":
+            rename[col] = "hyperscore"
+        elif lc == "delta_mass":
+            rename[col] = "delta_mass"
+        elif lc in ("protein", "protein_id"):
+            rename[col] = "protein"
+        elif lc == "ion_mobility":
+            rename[col] = "ion_mobility"
+        elif lc == "peptide_length":
+            rename[col] = "peptide_len"
+
+    df = df.rename({k: v for k, v in rename.items() if k != v})
+
+    # ── Target / decoy flag ───────────────────────────────────────────────────
+    if "protein" in df.columns:
+        is_decoy = df["protein"].str.starts_with("rev_")
+    else:
+        is_decoy = pl.Series("is_decoy", [False] * df.height)
+
+    df = df.with_columns(is_decoy.alias("is_decoy"))
+
+    # ── Q-values via target-decoy competition (sorted by Hyperscore desc) ────
+    if "hyperscore" in df.columns:
+        df = df.sort("hyperscore", descending=True)
+        is_dec_arr = df["is_decoy"].to_numpy()
+        cum_dec = is_dec_arr.cumsum().astype(float)
+        cum_tgt = (~is_dec_arr).cumsum().astype(float)
+        fdr = cum_dec / np.maximum(cum_tgt, 1.0)
+        # q-value = running minimum FDR from this PSM downwards
+        q_vals = np.minimum.accumulate(fdr[::-1])[::-1]
+        df = df.with_columns(pl.Series("spectrum_q", q_vals))
+    else:
+        df = df.with_columns(pl.lit(1.0).alias("spectrum_q"))
+
+    # ── Drop decoys before writing ────────────────────────────────────────────
+    result = df.filter(~pl.col("is_decoy"))
+
+    try:
+        result.write_parquet(str(output_path))
+        logger.info(
+            "MSFragger: %d target PSMs written to %s",
+            result.height, output_path.name,
+        )
+        return output_path
+    except Exception as e:
+        logger.error("Failed to write MSFragger parquet: %s", e)
+        return None
+
+
+def run_msfragger_local(
+    raw_path: Path,
+    output_dir: Path,
+    vendor: str,
+    threads: int = 0,
+    fasta_path: str | None = None,
+    search_mode: str = "community",
+    immuno_class: int = 0,
+) -> Path | None:
+    """Run MSFragger on a Bruker .d file and return results as Sage-like parquet.
+
+    MSFragger reads Bruker timsTOF .d directories natively via timsdata.dll —
+    no mzML conversion needed.  Output is a TSV which is converted in-process
+    to a results.sage.parquet-compatible file so the existing extractor works
+    without changes.
+
+    Args:
+        raw_path: Path to .d directory.
+        output_dir: Output directory for results + intermediate files.
+        vendor: "bruker" (only Bruker supported here).
+        threads: Number of threads (0 = auto).
+        fasta_path: Path to FASTA (required for local mode).
+        search_mode: "local" or "community".
+        immuno_class: 0 = tryptic, 1 = MHC-I, 2 = MHC-II.
+
+    Returns:
+        Path to results.sage.parquet (Sage-compatible), or None on failure.
+    """
+    jar = _find_msfragger()
+    if jar is None:
+        logger.warning(
+            "MSFragger jar not found — cannot run MSFragger for %s. "
+            "Install FragPipe or set msfragger_path in instruments.yml.",
+            raw_path.name,
+        )
+        return None
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Resolve FASTA ─────────────────────────────────────────────────────────
+    if search_mode == "community":
+        from stan.search.community_params import ensure_community_assets
+        cache_dir = output_dir.parent / "_community_assets"
+        ensure_community_assets(vendor, cache_dir)
+        # Community FASTA: human_hela_202604.fasta (already contains targets;
+        # MSFragger appends rev_ decoys automatically)
+        import glob as _glob
+        fastas = list(cache_dir.glob("*.fasta"))
+        if not fastas:
+            logger.error("Community FASTA not found in %s", cache_dir)
+            return None
+        fasta_path = str(fastas[0])
+    else:
+        if not fasta_path:
+            logger.error("No fasta_path for MSFragger local search")
+            return None
+        if not Path(fasta_path).exists():
+            logger.error("FASTA not found: %s", fasta_path)
+            return None
+
+    # ── Build params file ─────────────────────────────────────────────────────
+    import os
+    if threads <= 0:
+        threads = max(2, (os.cpu_count() or 4) // 2)
+
+    params = _build_msfragger_params(
+        fasta_path=fasta_path,
+        output_dir=output_dir,
+        vendor=vendor,
+        immuno_class=immuno_class,
+        threads=threads,
+    )
+
+    params_path = output_dir / "msfragger.params"
+    with open(params_path, "w") as fh:
+        for k, v in params.items():
+            fh.write(f"{k} = {v}\n")
+
+    # ── Find Java ─────────────────────────────────────────────────────────────
+    java_exe = _find_fragpipe_java() or shutil.which("java")
+    if java_exe is None:
+        logger.error(
+            "Java not found on PATH and no FragPipe-bundled JRE found. "
+            "Install Java 8+ or FragPipe.",
+        )
+        return None
+
+    # ── Build command ─────────────────────────────────────────────────────────
+    cmd = [java_exe, "-Xmx32g"]
+
+    # Add Bruker timsdata.dll directory to java.library.path
+    bruker_lib = _find_bruker_lib_for_msfragger()
+    if bruker_lib:
+        cmd.append(f"-Djava.library.path={bruker_lib}")
+        logger.debug("MSFragger bruker_lib: %s", bruker_lib)
+    else:
+        logger.warning(
+            "timsdata.dll not found near MSFragger jar — timsTOF native "
+            "reading may fail.  Copy timsdata.dll next to %s.",
+            jar,
+        )
+
+    cmd += ["-jar", jar, str(params_path), str(raw_path)]
+
+    logger.info("Running MSFragger on: %s", raw_path.name)
+    logger.info("Command: %s", " ".join(cmd))
+
+    log_file = output_dir / "msfragger.log"
+    try:
+        with open(log_file, "w") as lf:
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=lf,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=14400,
+            )
+        logger.info("MSFragger complete: %s", raw_path.name)
+    except FileNotFoundError as e:
+        logger.error("Java not found at: %s", java_exe)
+        from stan.telemetry import report_error
+        report_error(e, {"search_engine": "msfragger", "vendor": vendor})
+        return None
+    except subprocess.TimeoutExpired as e:
+        logger.error("MSFragger timed out after 4 hours: %s", raw_path.name)
+        from stan.telemetry import report_error
+        report_error(e, {"search_engine": "msfragger", "vendor": vendor})
+        _mirror_log_to_hive(log_file, raw_path.stem, "msfragger")
+        return None
+    except subprocess.CalledProcessError as e:
+        logger.error("MSFragger failed (rc=%d): %s", e.returncode, raw_path.name)
+        from stan.telemetry import report_error
+        report_error(e, {"search_engine": "msfragger", "vendor": vendor})
+        _mirror_log_to_hive(log_file, raw_path.stem, "msfragger")
+        return None
+
+    # ── Locate TSV output ─────────────────────────────────────────────────────
+    # MSFragger writes <stem>.tsv to output_location (or next to input file)
+    raw_stem = raw_path.stem  # e.g. "run.d" stem = "run" (Path.stem strips .d)
+    # Actually raw_path is a .d dir so raw_path.stem already strips .d
+    tsv_candidates = [
+        output_dir / f"{raw_stem}.tsv",
+        output_dir / f"{raw_path.name}.tsv",
+        raw_path.parent / f"{raw_stem}.tsv",
+        raw_path.parent / f"{raw_path.name}.tsv",
+    ]
+
+    tsv_path: Path | None = None
+    for c in tsv_candidates:
+        if c.exists():
+            tsv_path = c
+            break
+
+    if tsv_path is None:
+        # Broad search in both directories
+        for search_dir in [output_dir, raw_path.parent]:
+            found = list(search_dir.glob("*.tsv"))
+            if found:
+                tsv_path = found[0]
+                logger.info("Found MSFragger TSV at: %s", tsv_path)
+                break
+
+    if tsv_path is None:
+        logger.error(
+            "MSFragger TSV not found for %s (searched %s and %s)",
+            raw_path.name, output_dir, raw_path.parent,
+        )
+        _mirror_log_to_hive(log_file, raw_path.stem, "msfragger")
+        return None
+
+    # Move TSV to output_dir if it landed next to the raw file
+    if tsv_path.parent != output_dir:
+        dest = output_dir / tsv_path.name
+        tsv_path.rename(dest)
+        tsv_path = dest
+
+    # ── Convert TSV → Sage-compatible parquet ─────────────────────────────────
+    parquet_out = output_dir / "results.sage.parquet"
+    result = _msfragger_tsv_to_sage_parquet(tsv_path, parquet_out)
+    if result is None:
+        logger.error(
+            "MSFragger TSV conversion failed for %s", raw_path.name,
+        )
+        return None
+
+    return result
+
+
 def _convert_bruker_to_mzml(raw_path: Path, output_dir: Path) -> Path | None:
     """Convert a Bruker .d directory to mzML using ProteoWizard msconvert.
 
@@ -688,9 +1121,11 @@ def _convert_bruker_to_mzml(raw_path: Path, output_dir: Path) -> Path | None:
                                            # a 1 GB .d file expands to 30–50 GB mzML.
         "--filter", "msLevel 2",           # MS2 only — Sage doesn't use MS1
         "--filter", "zeroSamples removeExtra",
+        "--zlib",                          # zlib compression — ~50% size reduction
+        "--32",                            # 32-bit floats — sufficient for peptide IDs,
+                                           # halves float array size vs default 64-bit
         "--outdir", str(output_dir),
         "--outfile", mzml_path.name,
-        "--64",
     ]
 
     try:

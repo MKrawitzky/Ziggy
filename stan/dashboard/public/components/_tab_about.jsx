@@ -536,6 +536,7 @@
             <h3>What's New · ZIGGY · April 2026</h3>
             <div style={{display:'flex', flexDirection:'column', gap:'0.5rem', marginTop:'0.4rem'}}>
               {[
+                {tag:'FIX', color:'#60a5fa', text:'MSFragger primary DDA engine for Bruker timsTOF: Sage 0.14.x crashes (STATUS_STACK_BUFFER_OVERRUN) when reading large .d files via timsrust. ZIGGY now auto-detects MSFragger (FragPipe at C:/Users/Admin/Desktop/Fragpipe/) and uses it as the primary engine for all Bruker DDA searches — reads .d natively via timsdata.dll, no mzML conversion needed. Falls back to Sage if MSFragger is unavailable. TSV output converted to Sage-compatible parquet with TDA q-values in-process.'},
                 {tag:'NEW', color:'var(--pass)', text:'🔍 Comparison Search Engine Hub: every acquisition now auto-searches across MSFragger, X!Tandem, Comet, and MaxQuant in parallel — results appear in the Searches tab. Engines auto-skip when not installed (no configuration required).'},
                 {tag:'NEW', color:'var(--pass)', text:'🎯 Workflow-aware search params: run names are pattern-matched to presets (hela_digest, phospho, mhc_class_i_dda/dia, mhc_class_ii_dda/dia, tmt, single_cell) — each engine gets the correct enzyme, mods, and peptide length window automatically.'},
                 {tag:'NEW', color:'var(--pass)', text:'🤖 MaxQuant integration: full mqpar.xml generation with workflow-aware params (missed cleavages, enzyme, TMT/phospho mods). Auto-discovers MaxQuant at C:/MaxQuant and common install paths.'},

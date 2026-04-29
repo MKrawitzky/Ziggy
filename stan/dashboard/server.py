@@ -3671,16 +3671,57 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
             engine_label = "Sage"
             if immuno_class:
                 engine_label = f"Sage MHC-{'I' * immuno_class} (non-specific)"
-            _set("running", f"Running {engine_label} on {raw_path.name}…")
-            result_path = run_sage_local(
-                raw_path=raw_path,
-                output_dir=output_dir,
-                vendor=vendor,
-                sage_exe=sage_exe,
-                fasta_path=fasta_path,
-                search_mode=search_mode,
-                immuno_class=immuno_class,
-            )
+
+            # For Bruker DDA, prefer MSFragger if available — it reads .d natively
+            # via timsdata.dll, bypassing the Sage timsrust stack-buffer-overrun crash
+            # that occurs on large timsTOF .d files (≥ ~3 GB tdf_bin).
+            # Fall back to Sage if MSFragger is not installed.
+            msfragger_jar = inst_cfg.get("msfragger_path") or None
+            if msfragger_jar is None and vendor == "bruker":
+                from stan.search.local import _find_msfragger
+                msfragger_jar = _find_msfragger()
+
+            if msfragger_jar and vendor == "bruker":
+                from stan.search.local import run_msfragger_local
+                msf_label = "MSFragger"
+                if immuno_class:
+                    msf_label = f"MSFragger MHC-{'I' * immuno_class}"
+                _set("running", f"Running {msf_label} on {raw_path.name}…")
+                result_path = run_msfragger_local(
+                    raw_path=raw_path,
+                    output_dir=output_dir,
+                    vendor=vendor,
+                    fasta_path=fasta_path,
+                    search_mode=search_mode,
+                    immuno_class=immuno_class,
+                )
+                if result_path is None:
+                    # MSFragger failed — fall back to Sage
+                    logger.warning(
+                        "MSFragger failed for %s — falling back to Sage",
+                        raw_path.name,
+                    )
+                    _set("running", f"MSFragger failed — running {engine_label} (fallback) on {raw_path.name}…")
+                    result_path = run_sage_local(
+                        raw_path=raw_path,
+                        output_dir=output_dir,
+                        vendor=vendor,
+                        sage_exe=sage_exe,
+                        fasta_path=fasta_path,
+                        search_mode=search_mode,
+                        immuno_class=immuno_class,
+                    )
+            else:
+                _set("running", f"Running {engine_label} on {raw_path.name}…")
+                result_path = run_sage_local(
+                    raw_path=raw_path,
+                    output_dir=output_dir,
+                    vendor=vendor,
+                    sage_exe=sage_exe,
+                    fasta_path=fasta_path,
+                    search_mode=search_mode,
+                    immuno_class=immuno_class,
+                )
 
         # Primary search complete — release the semaphore so the next queued run can start.
         _search_semaphore.release()
