@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 #   timsTOF_Ultra_AIP, timsTOF_SCP_2, timsTOF (plain original)
 # \S* matches any non-whitespace after "timsTOF" so we never bleed into
 # the numeric fields that follow in the config line.
-_MODEL_RE = re.compile(r"(timsTOF\S*)", re.IGNORECASE)
+_MODEL_RE = re.compile(r"(timsTOF\w*)", re.IGNORECASE)
 _CONFIG_RE = re.compile(r"<configuration>(.*?)</configuration>", re.DOTALL)
 _SERIAL_RE = re.compile(r"\b(AQ\d{8})\b")
 
@@ -90,14 +90,34 @@ def read_instrument_name_from_d(d_path: str | Path) -> str | None:
             return m.group(1).strip().replace("_", " ")
         return None
 
-    # ── 1 & 2. .m subfolder method files ────────────────────────────────
-    # microTOFQImpacTemAcquisition.method checked first (known to contain
-    # the hard-wired instrument token in the first ~15 lines).
+    # ── 1. analysis.tdf GlobalMetadata — most authoritative source ───────
+    # InstrumentName contains the full model string (e.g. "timsUltra AIP",
+    # "timsTOF SCP") for all modern acquisitions.  Check this first so we
+    # never fall back to a less-specific value from the .m method files.
+    tdf = d_path / "analysis.tdf"
+    if tdf.exists():
+        try:
+            with sqlite3.connect(str(tdf)) as con:
+                all_meta = dict(con.execute(
+                    "SELECT Key, Value FROM GlobalMetadata"
+                ).fetchall())
+
+            # InstrumentName / InstrumentType first — return raw value even if
+            # it doesn't contain "timsTOF" (handles timsUltra, future families).
+            for key in ("InstrumentName", "InstrumentType"):
+                val = (all_meta.get(key) or "").strip()
+                if not val or val.lower() in ("", "none", "unknown", "n/a"):
+                    continue
+                return val.replace("_", " ")
+
+        except Exception:
+            logger.debug("Cannot read GlobalMetadata from %s", tdf, exc_info=True)
+
+    # ── 2. .m subfolder method files — legacy fallback ──────────────────
     try:
         for entry in d_path.iterdir():
             if not entry.is_dir() or entry.suffix.lower() != ".m":
                 continue
-            # Primary: the canonical Bruker acquisition method file
             primary = entry / "microTOFQImpacTemAcquisition.method"
             candidates = ([primary] if primary.is_file() else []) + [
                 f for f in entry.iterdir()
@@ -116,8 +136,7 @@ def read_instrument_name_from_d(d_path: str | Path) -> str | None:
     except OSError:
         logger.debug("Cannot iterate .d directory: %s", d_path)
 
-    # ── 3. analysis.tdf GlobalMetadata ──────────────────────────────────
-    tdf = d_path / "analysis.tdf"
+    # ── 3. Remaining TDF metadata keys (DeviceName, AcquisitionSoftware…) ─
     if tdf.exists():
         try:
             with sqlite3.connect(str(tdf)) as con:
@@ -125,20 +144,14 @@ def read_instrument_name_from_d(d_path: str | Path) -> str | None:
                     "SELECT Key, Value FROM GlobalMetadata"
                 ).fetchall())
 
-            # Keys that explicitly store the instrument name
-            for key in ("InstrumentName", "InstrumentType") + _TDF_INSTRUMENT_KEYS:
+            for key in _TDF_INSTRUMENT_KEYS:
                 val = (all_meta.get(key) or "").strip()
                 if not val or val.lower() in ("", "none", "unknown", "n/a"):
                     continue
                 m = _MODEL_RE.search(val)
                 if m:
                     return m.group(1).strip().replace("_", " ")
-                # Return raw value for InstrumentName/InstrumentType even without
-                # "timsTOF" — handles future instrument families
-                if key in ("InstrumentName", "InstrumentType"):
-                    return val.replace("_", " ")
 
-            # Scan every metadata value for a timsTOF token
             for val in all_meta.values():
                 if not val:
                     continue
@@ -147,7 +160,7 @@ def read_instrument_name_from_d(d_path: str | Path) -> str | None:
                     return m.group(1).strip().replace("_", " ")
 
         except Exception:
-            logger.debug("Cannot read GlobalMetadata from %s", tdf, exc_info=True)
+            pass
 
     # ── 4. Folder name heuristic ─────────────────────────────────────────
     m = _MODEL_RE.search(d_path.name)

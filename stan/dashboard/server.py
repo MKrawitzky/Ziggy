@@ -36,6 +36,40 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="STAN Dashboard", version=__version__)
 
+
+# ── File watcher — auto-search files dropped into watch folders ──────────────
+
+_watcher_daemon = None
+
+@app.on_event("startup")
+async def _start_watcher() -> None:
+    """Start the instrument folder watcher when the server starts."""
+    global _watcher_daemon
+    import threading
+    try:
+        from stan.watcher.daemon import WatcherDaemon
+        _watcher_daemon = WatcherDaemon()
+        t = threading.Thread(
+            target=_watcher_daemon.run,
+            name="watcher-daemon",
+            daemon=True,
+        )
+        t.start()
+        logger.info("File watcher started — monitoring instrument folders")
+    except Exception:
+        logger.warning("File watcher could not start", exc_info=True)
+
+
+@app.on_event("shutdown")
+async def _stop_watcher() -> None:
+    global _watcher_daemon
+    if _watcher_daemon is not None:
+        try:
+            _watcher_daemon.stop()
+        except Exception:
+            pass
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -107,25 +141,43 @@ def _immuno_class(run_name: str) -> int:
 
 
 def _suggest_preset(run: dict) -> str:
-    """Return the best search preset key for a run based on name + mode."""
+    """Return the best search preset key for a run based on name + mode.
+
+    Priority order (highest → lowest):
+    1. Immunopeptidomics (HLA / MHC keywords) — very distinctive workflow
+    2. Phospho enrichment  — Trypsin + Phospho(STY)
+    3. TMT / iTRAQ labelling — fixed TMT mods required
+    4. Single-cell keywords — relaxed settings
+    5. HeLa / K562 alone — standard tryptic digest (fallback for these cell lines)
+    6. Everything else — standard tryptic digest
+    """
     name = run.get("run_name", "")
     mode = run.get("mode", "")
+    name_lower = name.lower()
+
+    # 1. Immunopeptidomics — always trumps everything else
     if _is_immuno_run(name):
         cls = _immuno_class(name)
         if _is_dia(mode):
             return "mhc_class_i_dia" if cls == 1 else "mhc_class_ii_dia"
         else:
             return "mhc_class_i_dda" if cls == 1 else "mhc_class_ii_dda"
-    # Non-immuno
-    name_lower = name.lower()
-    if "k562" in name_lower or "hela" in name_lower:
-        return "hela_digest"
-    if any(k in name_lower for k in ["phospho", "phos", "sty"]):
+
+    # 2. Phospho enrichment — check before generic cell-line names so that
+    #    "HeLa_phospho_TiO2" correctly gets the phospho preset, not hela_digest
+    if any(k in name_lower for k in ["phospho", "phos", "sty", "timsphos"]):
         return "phospho"
+
+    # 3. Quantitative labelling
     if any(k in name_lower for k in ["tmt", "itraq"]):
         return "tmt"
-    if any(k in name_lower for k in ["sc_", "singlecell", "single_cell", "1cell", "1pg", "8pg", "40pg"]):
+
+    # 4. Single-cell / ultra-low input
+    if any(k in name_lower for k in ["sc_", "singlecell", "single_cell", "1cell",
+                                      "1pg", "8pg", "40pg", "200pg"]):
         return "single_cell"
+
+    # 5 & 6. Standard digest — HeLa, K562, or any other sample
     return "hela_digest"
 
 
@@ -1321,7 +1373,7 @@ async def api_fix_instrument_names() -> dict:
     updated = skipped = errors = 0
     details: list[dict] = []
 
-    _PLACEHOLDERS = {'auto', 'unknown', 'instrument', '', 'none'}
+    _PLACEHOLDERS = {'auto', 'unknown', 'instrument', '', 'none', 'timstof', 'timstof pro', 'timstof flex'}
 
     try:
         with sqlite3.connect(str(db_path)) as con:
@@ -1333,7 +1385,8 @@ async def api_fix_instrument_names() -> dict:
 
             for row in rows:
                 inst = (row["instrument"] or "").strip().lower()
-                if inst not in _PLACEHOLDERS:
+                looks_like_xml = '>' in inst or '<' in inst
+                if inst not in _PLACEHOLDERS and not looks_like_xml:
                     continue  # already has a real name
 
                 raw_path = (row["raw_path"] or "").strip()
@@ -3474,6 +3527,12 @@ async def api_scan_import(body: ScanImportRequest) -> dict:
 _process_jobs: dict[str, dict] = {}
 _process_lock = threading.Lock()
 
+# Limit concurrent primary searches (DIA-NN / Sage) to 1 at a time.
+# Comparison engine threads (MSFragger, X!Tandem, Comet, MaxQuant) are
+# unaffected — they run in their own daemon threads after the primary
+# search completes.
+_search_semaphore = threading.Semaphore(1)
+
 
 def _find_diann_exe() -> str:
     """Find DIA-NN executable: instruments.yml → common install paths → PATH."""
@@ -3501,12 +3560,19 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
         with _process_lock:
             _process_jobs[run_id] = {"status": status, "message": message}
 
+    _semaphore_acquired = False
+    _semaphore_released = False
     try:
-        _set("running", "Starting search…")
-
         raw_path = Path(run["raw_path"])
         mode = run.get("mode", "DIA")
         vendor = "bruker" if raw_path.suffix.lower() == ".d" else "thermo"
+
+        # Wait in the queue — only one primary search (DIA-NN/Sage) runs at a time.
+        # Update status so the UI shows "Queued (waiting…)" instead of just "queued".
+        _set("queued", f"Waiting for current search to finish before starting {raw_path.name}…")
+        _search_semaphore.acquire()
+        _semaphore_acquired = True
+        _set("running", "Starting search…")
 
         # Always re-verify mode from TDF for Bruker files — the DB value can be
         # wrong if the run was registered before the detector was in place, or
@@ -3521,6 +3587,14 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
                     raw_path.name, mode, detected,
                 )
                 mode = detected
+
+        # Pre-populate all comparison engine statuses so no column is ever blank.
+        # not_applicable = wrong mode, pending = will run (tool check happens later).
+        try:
+            from stan.search.comparison import init_run_comparison_statuses
+            init_run_comparison_statuses(run_id, mode)
+        except Exception:
+            pass
 
         # Resolve output dir — default to <watch_dir>/stan_results/<run_stem>
         output_dir_base = inst_cfg.get("output_dir", "")
@@ -3579,7 +3653,6 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
             _set("running", f"Re-extracting metrics from existing results for {raw_path.name}…")
             result_path = existing_parquet
         elif use_diann:
-            acq_mode_diann = "dia"
             if immuno_class:
                 _set("running", f"Running DIA-NN MHC-{'I' * immuno_class} on {raw_path.name}…")
             else:
@@ -3592,7 +3665,6 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
                 fasta_path=fasta_path,
                 lib_path=lib_path,
                 search_mode=search_mode,
-                acq_mode=acq_mode_diann,
             )
         else:
             sage_exe = inst_cfg.get("sage_path") or "sage"
@@ -3609,6 +3681,10 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
                 search_mode=search_mode,
                 immuno_class=immuno_class,
             )
+
+        # Primary search complete — release the semaphore so the next queued run can start.
+        _search_semaphore.release()
+        _semaphore_released = True
 
         if result_path is None:
             # Surface the most useful lines from the search engine log
@@ -3699,12 +3775,14 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
         # Uses raw_path.stem as run_id so _attach_comparisons can match by filename.
         try:
             from stan.search.comparison import dispatch_comparison_searches
+            _workflow = _suggest_preset({"run_name": raw_path.stem, "mode": str(mode)})
             dispatch_comparison_searches(
                 run_id=raw_path.stem,
                 raw_path=raw_path,
                 mode=mode,
                 output_base=output_dir.parent,
                 fasta_path=inst_cfg.get("fasta_path"),
+                workflow=_workflow,
             )
         except Exception:
             logger.debug("Comparison dispatch skipped (FragPipe not found or error)", exc_info=True)
@@ -3714,6 +3792,13 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
         # RuntimeError from ensure_community_assets has multi-line help text — take first line
         msg = str(exc).split("\n")[0][:300]
         _set("failed", msg)
+    finally:
+        # Release the semaphore on unexpected exceptions — prevents deadlock.
+        if _semaphore_acquired and not _semaphore_released:
+            try:
+                _search_semaphore.release()
+            except Exception:
+                pass
 
 
 @app.post("/api/runs/{run_id}/process")
@@ -6173,12 +6258,14 @@ async def api_run_compare(run_id: str) -> dict:
 
     try:
         from stan.search.comparison import dispatch_comparison_searches
+        _workflow = _suggest_preset({"run_name": raw_path.stem, "mode": mode})
         dispatch_comparison_searches(
             run_id=raw_path.stem,
             raw_path=raw_path,
             mode=mode,
             output_base=output_base,
             fasta_path=fasta_path,
+            workflow=_workflow,
         )
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

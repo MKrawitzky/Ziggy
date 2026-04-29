@@ -113,14 +113,17 @@ def _dispatch_comparison(
     """Fire comparison search engines in the background (non-blocking)."""
     try:
         from stan.search.comparison import dispatch_comparison_searches
+        from stan.dashboard.server import _suggest_preset
         # Use .value so AcquisitionMode enum members become "diaPASEF" etc.
         mode_str = mode.value if hasattr(mode, "value") else str(mode)
+        workflow = _suggest_preset({"run_name": raw_path.stem, "mode": mode_str})
         dispatch_comparison_searches(
             run_id=raw_path.stem,
             raw_path=raw_path,
             mode=mode_str,
             output_base=output_dir.parent,
             fasta_path=instrument_config.get("fasta_path"),
+            workflow=workflow,
         )
     except Exception:
         logger.debug("Could not dispatch comparison searches", exc_info=True)

@@ -579,6 +579,8 @@
         if (!entry) return React.createElement('td',{style:{textAlign:'right',color:'var(--border)',fontSize:'0.75rem'}},'—');
         const {status, n_psms, n_peptides, n_proteins, n_precursors, error_msg} = entry;
         const primary = metric === 'precursors' ? (n_precursors ?? n_psms) : n_psms;
+        if (status === 'not_applicable') return React.createElement('td',{style:{textAlign:'right',color:'var(--border)',fontSize:'0.72rem'},title:'Not compatible with this acquisition mode'},'N/A');
+        if (status === 'not_installed') return React.createElement('td',{style:{textAlign:'right',color:'#f59e0b',fontSize:'0.72rem'},title:error_msg||'Tool not installed'},'⚠ —');
         if (status === 'pending') return React.createElement('td',{style:{textAlign:'right',color:'var(--muted)',fontSize:'0.75rem'}},
           React.createElement('span',{title:'queued'},'⋯'));
         if (status === 'running') return React.createElement('td',{style:{textAlign:'right'}},

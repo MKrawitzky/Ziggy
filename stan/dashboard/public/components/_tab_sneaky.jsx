@@ -31,25 +31,30 @@
       useEffect(() => {
         const cv = cvRef.current; if (!cv) return;
         const ctx = cv.getContext('2d');
-        const W = cv.offsetWidth || 900, H = 400;
+        const W = cv.offsetWidth || 900, H = 500;
         cv.width = W; cv.height = H;
 
         // Seeded RNG (xorshift32)
         let s = 0xCAFEBABE;
         const rng = () => { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (s >>> 0) / 4294967295; };
 
-        // Face geometry
-        const cx = W * 0.5, cy = H * 0.52;
-        const fw = Math.min(W * 0.13, 110);
-        const fh = Math.min(H * 0.42, 155);
+        // ── Aladdin Sane — clean oval head (The Bends aesthetic) ─────────
+        // ── Ziggy Stardust + Aladdin Sane ────────────────────────────────
+        const cx = W * 0.5, cy = H * 0.63;   // face lower → room for hair above
+        const fw = Math.min(W * 0.138, 115);  // head half-width
+        const fh = Math.min(H * 0.305, 140);  // head half-height (~1.48 aspect)
 
-        // Bolt (same proportions as welcome drawBolt)
+        // Aladdin Sane lightning bolt — starts upper-right, sweeps to lower-left (authentic)
         const bs = fh * 0.90;
         const bpoly = [
-          [cx + bs*-.18, cy + bs*-.50], [cx + bs* .14, cy + bs*-.50],
-          [cx + bs* .05, cy + bs*-.02], [cx + bs* .22, cy + bs*  .00],
-          [cx + bs*-.05, cy + bs*  .50], [cx + bs*-.22, cy + bs*  .50],
-          [cx + bs*-.10, cy + bs*  .04], [cx + bs*-.28, cy + bs*  .00],
+          [cx + bs*.30, cy - bs*.62],   // top-right outer  (right temple/forehead)
+          [cx + bs*.07, cy - bs*.62],   // top-right inner
+          [cx - bs*.10, cy - bs*.01],   // kink left inner  (nose bridge level)
+          [cx + bs*.18, cy + bs*.01],   // kink right jut
+          [cx + bs*.02, cy + bs*.56],   // bottom-right outer
+          [cx - bs*.20, cy + bs*.56],   // bottom-left outer
+          [cx - bs*.12, cy + bs*.01],   // kink left outer
+          [cx + bs*.02, cy - bs*.52],   // ascending back
         ];
         const pip = (px, py, poly) => {
           let inside = false;
@@ -60,19 +65,58 @@
           return inside;
         };
         const boltSplitX = (py) => {
-          const fy = (py-cy)/bs;
-          if (fy < -0.02) { const tt=(fy+0.5)/0.48; return cx+bs*(-0.18+tt*0.23); }
-          return cx + bs * (-0.10 + Math.max(0,(fy-0.04)/0.46)*0.05);
+          const fy = (py - cy) / bs;
+          if (fy < -0.01) {
+            // Upper arm sweeps right-to-left — split along diagonal centerline
+            const tt = Math.max(0, Math.min(1, (fy + 0.62) / 0.61));
+            return cx + bs * (0.185 - tt * 0.155); // +0.185 at top → +0.03 at kink
+          }
+          // Lower arm — split moves left as bolt descends
+          const tt = Math.max(0, Math.min(1, fy / 0.56));
+          return cx + bs * (0.03 - tt * 0.14);
         };
+
+        // Clean oval with jaw taper (The Bends head shape)
+        const inFace = (px, py) => {
+          const dx = px - cx;
+          const normY = (py - cy) / fh;
+          const wf = normY > 0.18 ? Math.max(0.30, 1.0 - (normY-0.18)*0.62) : 1.0;
+          return (dx / (fw * wf)) ** 2 + normY * normY < 1.0;
+        };
+
+        // Ziggy flame-red spiky proto-mullet
         const inHair = (px, py) => {
-          const dx=(px-cx)/(fw*1.3), dy=(py-(cy-fh*1.0))/(fh*0.5);
-          return dx*dx+dy*dy < 1.0;
+          const hairCY = cy - fh * 1.42;
+          const hdx = (px - cx) / (fw * 1.55);
+          const hdy = (py - hairCY) / (fh * 0.56);
+          if (hdx*hdx + hdy*hdy < 1.0) return true;
+          const spikeBase = hairCY - fh * 0.48;
+          const spikes = [
+            {ox:cx-fw*0.62, w:fw*0.22, h:fh*0.70, lean:-0.28},
+            {ox:cx-fw*0.12, w:fw*0.20, h:fh*0.88, lean:-0.06},
+            {ox:cx+fw*0.28, w:fw*0.18, h:fh*0.75, lean: 0.12},
+            {ox:cx+fw*0.68, w:fw*0.15, h:fh*0.54, lean: 0.26},
+          ];
+          for (const sp of spikes) {
+            if (py > spikeBase || py < spikeBase - sp.h) continue;
+            const t = (spikeBase-py)/sp.h;
+            if (Math.abs(px-(sp.ox+sp.lean*(spikeBase-py))) < sp.w*(1-t*0.84)) return true;
+          }
+          return false;
         };
-        const eyes = [
-          { cx:cx-fw*.37, cy:cy-fh*.23, r:fw*.13 },
-          { cx:cx+fw*.38, cy:cy-fh*.21, r:fw*.12 },
-        ];
-        const lip = { cx, cy:cy+fh*.63, rx:fw*.30, ry:fh*.075 };
+
+        // Gold astral circle — forehead, above bolt
+        const goldC = { cx, cy: cy - fh*0.74, r: fw*0.128 };
+
+        // Eye sockets — almond shapes
+        const eyeL = { cx:cx-fw*.33, cy:cy-fh*.25, rx:fw*.165, ry:fh*.068 };
+        const eyeR = { cx:cx+fw*.20, cy:cy-fh*.28, rx:fw*.155, ry:fh*.063 }; // inside bolt (Aladdin Sane)
+        const inEye = (px,py) =>
+          (px-eyeL.cx)**2/eyeL.rx**2 + (py-eyeL.cy)**2/eyeL.ry**2 < 1.0 ||
+          (px-eyeR.cx)**2/eyeR.rx**2 + (py-eyeR.cy)**2/eyeR.ry**2 < 1.0;
+
+        // Lip oval
+        const lip = { cx, cy:cy+fh*.56, rx:fw*.255, ry:fh*.070 };
 
         const mk = (px,py,col,size,alpha,region,ex={}) => ({
           px,py,sx:0,sy:0,col,size,alpha,
@@ -82,41 +126,136 @@
 
         const parts = [];
 
-        // Face fill
-        for (let att=0,cnt=0; cnt<2400 && att<300000; att++) {
-          const px=cx+(rng()*2-1)*fw, py=cy+(rng()*2-1)*fh;
-          if ((px-cx)**2/fw**2+(py-cy)**2/fh**2>=1) continue;
-          if (eyes.some(e=>Math.hypot(px-e.cx,py-e.cy)<e.r)) continue;
-          const inB=pip(px,py,bpoly);
-          const col=inB?'#DAAA00':(px<boltSplitX(py)?'#22d3ee':'#f97316');
-          parts.push(mk(px,py,col,inB?.6+rng()*.9:.3+rng()*.65,inB?.45+rng()*.45:.12+rng()*.28,inB?'bolt':'face'));
+        // ── 1. ZIGGY FLAME-RED HAIR — spiky proto-mullet ─────────────────
+        for (let att=0,cnt=0; cnt<2500 && att<400000; att++) {
+          const px=cx+(rng()*2-1)*fw*2.1, py=cy-fh*0.38-rng()*fh*2.1;
+          if (!inHair(px,py)) continue;
+          // Tips brighter, roots deeper carmine
+          const normD=Math.max(0,Math.min(1,(cy-fh*0.85-py)/(fh*1.6)));
+          const c=normD>.55
+            ? ['#cc0000','#dd0000','#bb0000'][Math.floor(rng()*3)]
+            : ['#ee1111','#ff2222','#dd1111','#ee2200'][Math.floor(rng()*4)];
+          parts.push(mk(px,py,c, .50+rng()*.90, .45+rng()*.45, 'hair')); cnt++;
+        }
+
+        // ── 2. FACE SKIN — snow-white porcelain (rice-powder pale) ───────
+        for (let att=0,cnt=0; cnt<10000 && att<700000; att++) {
+          const px=cx+(rng()*2-1)*fw*1.12, py=cy+(rng()*2-1)*fh;
+          if (!inFace(px,py)) continue;
+          if (inEye(px,py)) continue;
+          if (pip(px,py,bpoly)) continue;   // bolt pass below
+          // skip gold circle area
+          if (Math.hypot(px-goldC.cx, py-goldC.cy) < goldC.r*1.05) continue;
+          const col=['#f9f7ff','#fafbff','#f5f3fe','#fefeff'][Math.floor(rng()*4)];
+          parts.push(mk(px,py,col, .28+rng()*.44, .65+rng()*.28, 'face'));
           cnt++;
         }
-        // Hair
-        for (let att=0,cnt=0; cnt<650 && att<150000; att++) {
-          const px=cx+(rng()*2-1)*fw*1.6, py=cy-fh*.55-rng()*fh*1.1;
-          if (!inHair(px,py)) continue;
-          const c=['#a855f7','#7c3aed','#c084fc','#8b5cf6'][Math.floor(rng()*4)];
-          parts.push(mk(px,py,c,.25+rng()*.55,.08+rng()*.22,'hair')); cnt++;
+
+        // ── 3. BOLT — cobalt-blue left / arterial-red right ──────────────
+        for (let att=0,cnt=0; cnt<4000 && att<400000; att++) {
+          const px=cx+(rng()*2-1)*fw*1.12, py=cy+(rng()*2-1)*fh;
+          if (!inFace(px,py)||!pip(px,py,bpoly)) continue;
+          const isLeft=px<boltSplitX(py);
+          const col=isLeft
+            ? ['#1e40af','#2563eb','#3b82f6','#60a5fa'][Math.floor(rng()*4)]
+            : ['#991b1b','#dc2626','#ef4444','#f87171'][Math.floor(rng()*4)];
+          parts.push(mk(px,py,col, .85+rng()*1.15, .82+rng()*.16, 'bolt')); cnt++;
         }
-        // Eyes
-        eyes.forEach((eye,ei) => {
-          for (let i=0;i<220;i++) {
-            const a=rng()*Math.PI*2, r=Math.sqrt(rng())*eye.r;
-            const px=eye.cx+Math.cos(a)*r, py=eye.cy+Math.sin(a)*r*.55;
-            const core=r<eye.r*.38;
-            parts.push(mk(px,py,core?'#ffffff':(ei===0?'#22d3ee':'#f97316'),
-              core?.7+rng()*.8:.3+rng()*.5, core?.65+rng()*.3:.25+rng()*.35,'eye',
-              {speed:1.2+rng()*2,wSpeed:.5+rng()}));
+
+        // ── 4. GOLD ASTRAL CIRCLE — forehead center ───────────────────────
+        for (let i=0;i<600;i++) {
+          const a=rng()*Math.PI*2, r=Math.sqrt(rng());
+          const isRim=r>0.68;
+          const px=goldC.cx+Math.cos(a)*goldC.r*r;
+          const py=goldC.cy+Math.sin(a)*goldC.r*r;
+          if (!inFace(px,py)) continue;
+          parts.push(mk(px,py, isRim?'#FFD700':'#DAAA00',
+            isRim?.70+rng()*1.0:.50+rng()*.70,
+            isRim?.82+rng()*.16:.72+rng()*.22,
+            'bolt', {speed:1.0+rng()*1.2, wSpeed:.4+rng()*.5}));
+        }
+
+        // ── 5. RED PANDA EYE SMEARS — large theatrical red around sockets
+        [eyeL, eyeR].forEach((eye,ei) => {
+          for (let i=0;i<500;i++) {
+            const t=(rng()*2-1);
+            const ex=eye.cx+t*eye.rx*1.85+(ei===0?-1:1)*rng()*eye.rx*.4;
+            const ey=eye.cy+(rng()*2-1)*eye.ry*2.8;
+            if (Math.abs(ey-eye.cy)>eye.ry*2.6) continue;
+            if (!inFace(ex,ey)) continue;
+            const c=rng()<.6?'#cc0000':'#991111';
+            parts.push(mk(ex,ey,c, .38+rng()*.52, .32+rng()*.38, 'shadow',
+              {speed:.8+rng()*.9,wSpeed:.3+rng()*.5}));
           }
         });
-        // Lips
-        for (let i=0;i<260;i++) {
+
+        // ── 6. EYES — solid dark (no iris detail, theatrical flat black) ──
+        [eyeL, eyeR].forEach(eye => {
+          for (let i=0;i<800;i++) {
+            const a=rng()*Math.PI*2, r=Math.sqrt(rng());
+            const px=eye.cx+Math.cos(a)*eye.rx*r;
+            const py=eye.cy+Math.sin(a)*eye.ry*r;
+            const edge=r>.76;
+            parts.push(mk(px,py, edge?'#18101e':'#060610',
+              edge?.42+rng()*.50:.58+rng()*.75,
+              edge?.72+rng()*.22:.90+rng()*.10,
+              'eye',{speed:.8+rng()*.8,wSpeed:.3+rng()*.4}));
+          }
+        });
+
+        // ── 6b. BLUE EYESHADOW — electric blue arc above left eye ───────────
+        for (let i=0;i<500;i++) {
+          const ex = eyeL.cx + (rng()*2-1)*eyeL.rx*1.5;
+          const ey = eyeL.cy - eyeL.ry*0.4 - rng()*eyeL.ry*4.0;
+          if (!inFace(ex,ey)) continue;
+          if (pip(ex,ey,bpoly)) continue;
+          const blues=['#1d4ed8','#2563eb','#3b82f6','#60a5fa','#7c3aed'];
+          parts.push(mk(ex,ey,blues[Math.floor(rng()*blues.length)],
+            .38+rng()*.55, .30+rng()*.42, 'brow',
+            {speed:.8+rng()*1.2,wSpeed:.3+rng()*.5}));
+        }
+
+        // ── 7. CHEEKBONE "BOLTS OF RED" — diagonal red slashes ───────────
+        [-1,1].forEach(side => {
+          for (let i=0;i<280;i++) {
+            const t=rng();  // 0=high cheek, 1=toward jaw
+            const bx=cx+side*(fw*.52+t*fw*.30)+(rng()-.5)*fw*.10;
+            const by=cy-fh*.08+t*fh*.50+(rng()-.5)*fh*.05;
+            if (!inFace(bx,by)||inEye(bx,by)) continue;
+            if (pip(bx,by,bpoly)) continue;  // don't draw over bolt
+            parts.push(mk(bx,by,'#cc1111', .40+rng()*.55, .38+rng()*.42, 'shadow'));
+          }
+        });
+
+        // ── 8. LIPS — deep bold red ───────────────────────────────────────
+        for (let i=0;i<700;i++) {
           const a=rng()*Math.PI*2, r=Math.sqrt(rng());
           parts.push(mk(lip.cx+Math.cos(a)*lip.rx*r, lip.cy+Math.sin(a)*lip.ry*r,
-            rng()<.55?'#f472b6':'#ec4899',.4+rng()*.65,.25+rng()*.4,'lip'));
+            rng()<.55?'#cc0000':'#e61515', .55+rng()*.80, .68+rng()*.28, 'lip'));
         }
-        // Stars
+
+        // ── 9. NECK ───────────────────────────────────────────────────────
+        for (let i=0;i<250;i++) {
+          const nx=cx+(rng()-.5)*fw*.38;
+          const ny=cy+fh*.93+rng()*fh*.36;
+          if (ny>cy+fh*1.30||Math.abs(nx-cx)>fw*.20) continue;
+          parts.push(mk(nx,ny,'#f0eef8', .28+rng()*.42, .58+rng()*.28, 'neck'));
+        }
+
+        // ── 9b. TEARDROP GEM — Brian Duffy's spontaneous glitter tear ────
+        // (placed at right shoulder/clavicle in the original Duffy photo)
+        const tearX = cx + fw*0.52, tearY = cy + fh*1.18;
+        for (let i=0;i<200;i++) {
+          const a=rng()*Math.PI*2;
+          const r=Math.sqrt(rng())*fw*0.062;
+          const px=tearX+Math.cos(a)*r, py=tearY+Math.sin(a)*r*1.6;
+          const gems=['#ffffff','#f0f8ff','#b8e0ff','#ffd700','#DAAA00','#e2f5ff'];
+          parts.push(mk(px,py,gems[Math.floor(rng()*gems.length)],
+            .55+rng()*.80, .72+rng()*.28, 'bolt',
+            {speed:1.5+rng()*2.5,wSpeed:.5+rng()*.9}));
+        }
+
+        // ── Stars ─────────────────────────────────────────────────────────
         const sc=['#DAAA00','#d946ef','#22d3ee','#a855f7','#f97316','#22c55e','#60a5fa'];
         for (let i=0;i<500;i++) {
           parts.push(mk(rng()*W,rng()*H,sc[Math.floor(rng()*sc.length)],
@@ -185,26 +324,33 @@
             const pulse=.87+.13*Math.sin(t*p.speed+p.phase);
             const wp=.78+.22*Math.sin(t*p.wSpeed+p.phase*1.7);
             ctx.save();ctx.globalAlpha=p.alpha*pulse*wp;
-            if(p.region==='bolt'||p.region==='eye'){ctx.shadowColor=p.col;ctx.shadowBlur=p.region==='bolt'?7:4;}
+            const glowR = {bolt:10,eye:6,shadow:5,lip:4,hair:3,brow:3}[p.region]||0;
+            if(glowR){ctx.shadowColor=p.col;ctx.shadowBlur=glowR;}
             ctx.fillStyle=p.col;
             ctx.beginPath();ctx.arc(tx+ox,ty+oy,p.size*pulse*wp,0,Math.PI*2);ctx.fill();
             ctx.restore();
           });
 
-          // Bolt glow overlay
-          const ba=(1-tr)*(.28+.09*Math.sin(t*2.1));
+          // Bolt glow overlay — blue upper-right / red lower-left, Aladdin Sane
+          const ba=(1-tr)*(.32+.10*Math.sin(t*2.1));
           if(ba>.01){
-            ctx.save();ctx.globalAlpha=ba;ctx.shadowColor='#DAAA00';ctx.shadowBlur=28+Math.sin(t*1.8)*9;
-            ctx.fillStyle='#DAAA00';ctx.beginPath();
-            ctx.moveTo(cx+bs*-.18,cy+bs*-.50);ctx.lineTo(cx+bs* .14,cy+bs*-.50);
-            ctx.lineTo(cx+bs* .05,cy+bs*-.02);ctx.lineTo(cx+bs* .22,cy+bs*  .00);
-            ctx.lineTo(cx+bs*-.05,cy+bs*  .50);ctx.lineTo(cx+bs*-.22,cy+bs*  .50);
-            ctx.lineTo(cx+bs*-.10,cy+bs*  .04);ctx.lineTo(cx+bs*-.28,cy+bs*  .00);
+            ctx.save();
+            // Gradient runs along the bolt diagonal: top-right=blue, bottom-left=red
+            const bgrad=ctx.createLinearGradient(cx+bs*.30,cy-bs*.62,cx-bs*.20,cy+bs*.56);
+            bgrad.addColorStop(0,'#1d4ed8');bgrad.addColorStop(.42,'#6d28d9');bgrad.addColorStop(1,'#dc2626');
+            ctx.globalAlpha=ba*.75;
+            ctx.shadowColor='#7c3aed';ctx.shadowBlur=30+Math.sin(t*1.8)*10;
+            ctx.fillStyle=bgrad;ctx.beginPath();
+            ctx.moveTo(cx+bs*.30,cy-bs*.62);ctx.lineTo(cx+bs*.07,cy-bs*.62);
+            ctx.lineTo(cx-bs*.10,cy-bs*.01);ctx.lineTo(cx+bs*.18,cy+bs*.01);
+            ctx.lineTo(cx+bs*.02,cy+bs*.56);ctx.lineTo(cx-bs*.20,cy+bs*.56);
+            ctx.lineTo(cx-bs*.12,cy+bs*.01);ctx.lineTo(cx+bs*.02,cy-bs*.52);
             ctx.closePath();ctx.fill();
-            ctx.globalAlpha=ba*.28;ctx.fillStyle='#ffffff';ctx.shadowBlur=10;
+            // bright white highlight along upper-arm leading edge
+            ctx.globalAlpha=ba*.22;ctx.fillStyle='#ffffff';ctx.shadowBlur=6;
             ctx.beginPath();
-            ctx.moveTo(cx+bs*-.08,cy+bs*-.38);ctx.lineTo(cx+bs* .06,cy+bs*-.38);
-            ctx.lineTo(cx+bs* .01,cy+bs*  .02);ctx.lineTo(cx+bs*-.01,cy+bs*  .02);
+            ctx.moveTo(cx+bs*.22,cy-bs*.58);ctx.lineTo(cx+bs*.14,cy-bs*.58);
+            ctx.lineTo(cx-bs*.02,cy-bs*.05);ctx.lineTo(cx+bs*.04,cy-bs*.05);
             ctx.closePath();ctx.fill();ctx.restore();
           }
 
@@ -321,7 +467,7 @@
           {/* Canvas */}
           <div style={{position:'relative'}}>
             <canvas ref={cvRef}
-              style={{width:'100%',height:'400px',display:'block',cursor:'pointer'}}
+              style={{width:'100%',height:'500px',display:'block',cursor:'pointer'}}
               onClick={toggle}/>
             {/* Mode badge */}
             <div style={{position:'absolute',bottom:'1rem',right:'1rem',

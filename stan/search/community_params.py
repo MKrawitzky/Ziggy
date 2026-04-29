@@ -156,6 +156,15 @@ def get_community_diann_params(vendor: str, cache_dir: str | None = None) -> dic
     params["lib"] = f"{cache}/{speclib_filename}"
     params["fasta"] = f"{cache}/{fasta_filename}"
 
+    # Fixed mass accuracy prevents DIA-NN auto-optimization mode, which can crash
+    # on certain timsTOF files. Vendor-specific values follow DE-LIMP guidelines.
+    if vendor == "thermo":
+        params["mass-acc"] = 20   # Orbitrap MS2 (HCD)
+        params["mass-acc-ms1"] = 10  # Orbitrap MS1
+    else:
+        params["mass-acc"] = 15   # timsTOF MS2
+        params["mass-acc-ms1"] = 15  # timsTOF MS1
+
     return params
 
 
@@ -217,14 +226,17 @@ def get_community_sage_params(
     params["database"]["fasta"] = f"{cache}/{fasta_filename}"
 
     if immuno_class == 1:
-        params["database"]["enzyme"] = {"cleave_at": "", "missed_cleavages": 0}
+        # MHC-I: semi-enzymatic to avoid OOM. Fully non-specific against a full
+        # proteome generates billions of 8-12 aa candidates and crashes Sage.
+        params["database"]["enzyme"] = {"cleave_at": "KR", "missed_cleavages": 2, "semi_enzymatic": True}
         params["database"]["min_len"] = 8
         params["database"]["max_len"] = 12
         params["database"]["variable_mods"] = {"M": [15.9949], "N": [0.9840], "Q": [0.9840]}
         params["precursor_charge"] = [1, 3]
         params["min_peaks"] = 6
     elif immuno_class == 2:
-        params["database"]["enzyme"] = {"cleave_at": "", "missed_cleavages": 0}
+        # MHC-II: semi-enzymatic for the same reason as MHC-I above.
+        params["database"]["enzyme"] = {"cleave_at": "KR", "missed_cleavages": 2, "semi_enzymatic": True}
         params["database"]["min_len"] = 13
         params["database"]["max_len"] = 25
         params["database"]["variable_mods"] = {"M": [15.9949], "N": [0.9840], "Q": [0.9840]}

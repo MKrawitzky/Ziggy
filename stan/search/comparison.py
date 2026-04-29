@@ -35,6 +35,199 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# ── Workflow presets ──────────────────────────────────────────────────────────
+# Each preset defines enzyme, specificity, mods, length ranges and charge range.
+# Workflows detected from run name (see server._detect_preset) override the
+# hardcoded defaults inside every comparison engine param writer.
+#
+# Keys:
+#   specificity  "specific" | "semi" | "non-specific"
+#   enzyme       human-readable enzyme name (Trypsin/P, LysC, non-specific …)
+#   missed_cleavages
+#   fixed_mods   list of display-name strings  e.g. ["Carbamidomethyl (C)"]
+#   var_mods     list of display-name strings  e.g. ["Oxidation (M)"]
+#   min_len / max_len   peptide length range
+#   min_charge / max_charge
+
+_WORKFLOW_PRESETS: dict[str, dict] = {
+    "hela_digest": {
+        "specificity": "specific",
+        "enzyme": "Trypsin/P",
+        "missed_cleavages": 2,
+        "fixed_mods": ["Carbamidomethyl (C)"],
+        "var_mods": ["Oxidation (M)", "Acetyl (Protein N-term)"],
+        "min_len": 7, "max_len": 30,
+        "min_charge": 2, "max_charge": 4,
+    },
+    "phospho": {
+        "specificity": "specific",
+        "enzyme": "Trypsin/P",
+        "missed_cleavages": 2,
+        "fixed_mods": ["Carbamidomethyl (C)"],
+        "var_mods": ["Oxidation (M)", "Phospho (STY)"],
+        "min_len": 7, "max_len": 30,
+        "min_charge": 2, "max_charge": 4,
+    },
+    "mhc_class_i_dda": {
+        "specificity": "non-specific",
+        "enzyme": "non-specific",
+        "missed_cleavages": 0,
+        "fixed_mods": [],
+        "var_mods": ["Oxidation (M)"],
+        "min_len": 8, "max_len": 12,
+        "min_charge": 1, "max_charge": 3,
+    },
+    "mhc_class_i_dia": {
+        "specificity": "non-specific",
+        "enzyme": "non-specific",
+        "missed_cleavages": 0,
+        "fixed_mods": [],
+        "var_mods": ["Oxidation (M)"],
+        "min_len": 8, "max_len": 12,
+        "min_charge": 1, "max_charge": 3,
+    },
+    "mhc_class_ii_dda": {
+        "specificity": "semi",
+        "enzyme": "Trypsin/P",
+        "missed_cleavages": 2,
+        "fixed_mods": [],
+        "var_mods": ["Oxidation (M)", "Deamidation (NQ)"],
+        "min_len": 13, "max_len": 25,
+        "min_charge": 2, "max_charge": 4,
+    },
+    "mhc_class_ii_dia": {
+        "specificity": "semi",
+        "enzyme": "Trypsin/P",
+        "missed_cleavages": 2,
+        "fixed_mods": [],
+        "var_mods": ["Oxidation (M)", "Deamidation (NQ)"],
+        "min_len": 13, "max_len": 25,
+        "min_charge": 2, "max_charge": 4,
+    },
+    "tmt": {
+        "specificity": "specific",
+        "enzyme": "Trypsin/P",
+        "missed_cleavages": 2,
+        "fixed_mods": ["Carbamidomethyl (C)", "TMT6plex (K)", "TMT6plex (N-term)"],
+        "var_mods": ["Oxidation (M)"],
+        "min_len": 7, "max_len": 30,
+        "min_charge": 2, "max_charge": 4,
+    },
+    "single_cell": {
+        "specificity": "specific",
+        "enzyme": "Trypsin/P",
+        "missed_cleavages": 1,
+        "fixed_mods": ["Carbamidomethyl (C)"],
+        "var_mods": ["Oxidation (M)"],
+        "min_len": 6, "max_len": 30,
+        "min_charge": 2, "max_charge": 4,
+    },
+}
+
+_DEFAULT_WORKFLOW = "hela_digest"
+
+
+def _resolve_search_config(
+    workflow: str | None = None,
+    override: dict | None = None,
+) -> dict:
+    """Return a merged search config dict.
+
+    Priority: override > named preset > default (hela_digest).
+    """
+    base = dict(_WORKFLOW_PRESETS.get(workflow or _DEFAULT_WORKFLOW,
+                                      _WORKFLOW_PRESETS[_DEFAULT_WORKFLOW]))
+    if override:
+        base.update(override)
+    return base
+
+
+# ── Mod mass tables for per-engine translation ────────────────────────────────
+
+# MSFragger variable_mod format: "mass residues max_occ"
+# Uses slot keys variable_mod_01 … variable_mod_07
+_MSF_VAR_MOD_MAP: dict[str, str] = {
+    "Oxidation (M)":            "15.994915 M 3",
+    "Acetyl (Protein N-term)":  "42.010565 [^ 1",
+    "Phospho (STY)":            "79.966331 STY 3",
+    "Phospho (S)":              "79.966331 S 3",
+    "Phospho (T)":              "79.966331 T 3",
+    "Phospho (Y)":              "79.966331 Y 3",
+    "Deamidation (NQ)":         "0.984016 NQ 3",
+    "Deamidation (N)":          "0.984016 N 3",
+    "Deamidation (Q)":          "0.984016 Q 3",
+}
+
+# MSFragger fixed mods → add_<RESIDUE> field + value
+_MSF_FIXED_MOD_MAP: dict[str, tuple[str, float]] = {
+    "Carbamidomethyl (C)":  ("add_C_cysteine",    57.021464),
+    "TMT6plex (K)":         ("add_K_lysine",      229.162932),
+    "TMT6plex (N-term)":    ("add_Nterm_peptide", 229.162932),
+}
+
+# X!Tandem fixed mods → "mass@residue" notation (residue, mod mass)
+_XT_FIXED_MOD_MAP: dict[str, str] = {
+    "Carbamidomethyl (C)": "57.021464@C",
+    "TMT6plex (K)":        "229.162932@K",
+    "TMT6plex (N-term)":   "229.162932@[",
+}
+
+# X!Tandem potential (variable) mods → "mass@residue" notation
+_XT_VAR_MOD_MAP: dict[str, str] = {
+    "Oxidation (M)":           "15.994915@M",
+    "Acetyl (Protein N-term)": "42.010565@[",
+    "Phospho (STY)":           "79.966331@S,79.966331@T,79.966331@Y",
+    "Phospho (S)":             "79.966331@S",
+    "Phospho (T)":             "79.966331@T",
+    "Phospho (Y)":             "79.966331@Y",
+    "Deamidation (NQ)":        "0.984016@N,0.984016@Q",
+    "Deamidation (N)":         "0.984016@N",
+    "Deamidation (Q)":         "0.984016@Q",
+}
+
+# MaxQuant display names (passed directly into mqpar.xml)
+_MQ_FIXED_MODS: dict[str, str] = {
+    "Carbamidomethyl (C)": "Carbamidomethyl (C)",
+    "TMT6plex (K)":        "TMT6plex (K)",
+    "TMT6plex (N-term)":   "TMT6plex (N-term)",
+}
+_MQ_VAR_MODS: dict[str, str] = {
+    "Oxidation (M)":            "Oxidation (M)",
+    "Acetyl (Protein N-term)":  "Acetyl (Protein N-term)",
+    "Phospho (STY)":            "Phospho (STY)",
+    "Phospho (S)":              "Phospho (STY)",
+    "Phospho (T)":              "Phospho (STY)",
+    "Phospho (Y)":              "Phospho (STY)",
+    "Deamidation (NQ)":         "Deamidation (NQ)",
+    "Deamidation (N)":          "Deamidation (N)",
+    "Deamidation (Q)":          "Deamidation (Q)",
+}
+
+# Comet enzyme number lookup (0 = no enzyme / non-specific, 1 = trypsin)
+_COMET_ENZYME_MAP: dict[str, int] = {
+    "Trypsin":     1,
+    "Trypsin/P":   1,
+    "LysC":        5,
+    "LysC/P":      5,
+    "GluC":        8,
+    "AspN":        9,
+    "non-specific": 0,
+}
+
+# Comet variable mod format: "mass residues binary max_occ distance_from_terminus
+#   which_terminus binarymod required_mod"  (simplified 8-field version)
+_COMET_VAR_MOD_MAP: dict[str, str] = {
+    "Oxidation (M)":            "15.994915 M 0 3 -1 0 0 0.0",
+    "Acetyl (Protein N-term)":  "42.010565 n 0 1 -1 0 0 0.0",
+    "Phospho (STY)":            "79.966331 STY 0 3 -1 0 0 0.0",
+    "Phospho (S)":              "79.966331 S 0 3 -1 0 0 0.0",
+    "Phospho (T)":              "79.966331 T 0 3 -1 0 0 0.0",
+    "Phospho (Y)":              "79.966331 Y 0 3 -1 0 0 0.0",
+    "Deamidation (NQ)":         "0.984016 NQ 0 3 -1 0 0 0.0",
+    "Deamidation (N)":          "0.984016 N 0 3 -1 0 0 0.0",
+    "Deamidation (Q)":          "0.984016 Q 0 3 -1 0 0 0.0",
+}
+
 # ── FragPipe auto-detection ──────────────────────────────────────────────────
 
 _FRAGPIPE_SEARCH_PATHS: list[Path] = [
@@ -75,6 +268,30 @@ def _fragpipe_paths(fragpipe_dir: Path) -> dict[str, Path | None]:
     }
 
 
+# ── Comet auto-detection ────────────────────────────────────────────────────
+
+_COMET_SEARCH_PATHS: list[Path] = [
+    Path.home() / "Desktop/Comet/comet.exe",
+    Path.home() / "Comet/comet.exe",
+    Path("C:/Comet/comet.exe"),
+    Path("C:/tools/Comet/comet.exe"),
+    Path("D:/Comet/comet.exe"),
+    Path("E:/Comet/comet.exe"),
+    Path("E:/tools/comet/comet.exe"),
+]
+
+
+def _find_comet() -> Path | None:
+    """Return path to comet.exe, or None if not installed."""
+    for candidate in _COMET_SEARCH_PATHS:
+        if candidate.exists():
+            return candidate
+    which = shutil.which("comet") or shutil.which("comet.exe")
+    if which:
+        return Path(which)
+    return None
+
+
 # ── X!Tandem auto-detection ─────────────────────────────────────────────────
 
 _XTANDEM_SEARCH_PATHS: list[Path] = [
@@ -109,51 +326,113 @@ def _has_timsconvert() -> bool:
     return shutil.which("timsconvert") is not None
 
 
+_MSCONVERT_SEARCH_PATHS: list[Path] = [
+    Path("C:/ProteoWizard/msconvert.exe"),
+    Path("C:/Program Files/ProteoWizard/msconvert.exe"),
+    Path("C:/Program Files (x86)/ProteoWizard/msconvert.exe"),
+    # Skyline ClickOnce deployment bundles msconvert
+    *sorted(
+        (Path.home() / "AppData/Local/Apps/2.0").glob("*/*/skyl*exe*/msconvert.exe")
+        if (Path.home() / "AppData/Local/Apps/2.0").exists() else [],
+        reverse=True,  # newest first
+    ),
+]
+
+
+def _find_msconvert() -> Path | None:
+    """Return path to msconvert.exe (ProteoWizard), or None if not found."""
+    for candidate in _MSCONVERT_SEARCH_PATHS:
+        if candidate.exists():
+            return candidate
+    which = shutil.which("msconvert") or shutil.which("msconvert.exe")
+    if which:
+        return Path(which)
+    return None
+
+
 def _convert_d_to_mzml(d_path: Path, output_dir: Path) -> Path | None:
-    """Convert a Bruker .d directory to indexed mzML using timsconvert.
+    """Convert a Bruker .d directory to indexed mzML.
+
+    Uses msconvert (ProteoWizard) if available, falling back to timsconvert.
+    msconvert flags are optimized for timsTOF data: vendor peak picking,
+    64-bit precision, zlib compression, MS1+MS2 included.
 
     Returns the path to the mzML file on success, or None on failure.
-    timsconvert is pip-installable: ``pip install timsconvert``.
     """
     mzml_path = output_dir / (d_path.stem + ".mzML")
     if mzml_path.exists():
         return mzml_path   # already converted
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Prefer msconvert (ProteoWizard) ─────────────────────────────────────
+    msconvert = _find_msconvert()
+    if msconvert:
+        log_path = output_dir / "msconvert.log"
+        # Optimized timsTOF settings:
+        # --filter "peakPicking vendor msLevel=1-2"  → vendor peak picking preserves shape
+        # --filter "zeroSamples removeExtra"          → strip trailing zeros (smaller file)
+        # --64                                        → 64-bit m/z precision
+        # --zlib                                      → compress output
+        # --indexed mzML                              → indexed for random access
+        cmd = [
+            str(msconvert),
+            str(d_path),
+            "--mzML",
+            "--64",
+            "--zlib",
+            "--filter", "peakPicking vendor msLevel=1-2",
+            "--filter", "zeroSamples removeExtra",
+            "--outdir", str(output_dir),
+        ]
+        logger.info("msconvert: converting %s → mzML (timsTOF optimized)", d_path.name)
+        try:
+            with open(log_path, "w") as lf:
+                subprocess.run(
+                    cmd, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                    text=True, timeout=3600,
+                )
+        except subprocess.CalledProcessError as e:
+            logger.warning("msconvert failed (rc=%d) for %s", e.returncode, d_path.name)
+        except subprocess.TimeoutExpired:
+            logger.warning("msconvert timed out for %s", d_path.name)
+        except Exception as exc:
+            logger.warning("msconvert error for %s: %s", d_path.name, exc)
+
+        if mzml_path.exists():
+            return mzml_path
+        found = list(output_dir.glob("*.mzML"))
+        if found:
+            return found[0]
+        logger.warning("msconvert produced no mzML for %s — falling back to timsconvert", d_path.name)
+
+    # ── Fallback: timsconvert ────────────────────────────────────────────────
+    if not shutil.which("timsconvert"):
+        logger.debug("Neither msconvert nor timsconvert available")
+        return None
 
     log_path = output_dir / "timsconvert.log"
     cmd = [
         "timsconvert",
         "--input",    str(d_path),
         "--outdir",   str(output_dir),
-        "--ms2_only", "False",   # keep MS1 + MS2
+        "--ms2_only", "False",
     ]
     logger.info("timsconvert: converting %s → mzML", d_path.name)
     try:
         with open(log_path, "w") as lf:
             subprocess.run(
-                cmd,
-                check=True,
-                stdout=lf,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=3600,   # 1 h max for large files
+                cmd, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                text=True, timeout=3600,
             )
-    except FileNotFoundError:
-        logger.debug("timsconvert not found on PATH")
-        return None
-    except subprocess.CalledProcessError as e:
-        logger.warning("timsconvert failed (rc=%d) for %s", e.returncode, d_path.name)
-        return None
-    except subprocess.TimeoutExpired:
-        logger.warning("timsconvert timed out for %s", d_path.name)
+    except Exception as exc:
+        logger.warning("timsconvert failed for %s: %s", d_path.name, exc)
         return None
 
-    # timsconvert writes <stem>.mzML in the output dir
     if mzml_path.exists():
         return mzml_path
-
-    # Fallback: find any mzML it may have produced with a different name
-    mzmls = list(output_dir.glob("*.mzML"))
-    return mzmls[0] if mzmls else None
+    found = list(output_dir.glob("*.mzML"))
+    return found[0] if found else None
 
 
 # ── X!Tandem parameter writers ───────────────────────────────────────────────
@@ -180,6 +459,7 @@ def _write_xtandem_params(
     fasta_path: str,
     input_file: Path,
     threads: int = 0,
+    search_config: dict | None = None,
 ) -> Path:
     """Write X!Tandem input.xml parameter file and return its path.
 
@@ -187,6 +467,34 @@ def _write_xtandem_params(
     """
     if threads <= 0:
         threads = max(2, (os.cpu_count() or 4) // 2)
+
+    sc = search_config or _WORKFLOW_PRESETS[_DEFAULT_WORKFLOW]
+    specificity = sc.get("specificity", "specific")
+    missed      = sc.get("missed_cleavages", 2)
+
+    # Enzyme / cleavage
+    if specificity == "non-specific":
+        cleavage_site = ""
+        cleavage_semi = "no"
+    elif specificity == "semi":
+        cleavage_site = "[RK]|{P}"
+        cleavage_semi = "yes"
+    else:
+        cleavage_site = "[RK]|{P}"
+        cleavage_semi = "no"
+
+    # Fixed mods → "57.021464@C" format
+    fixed_mod_strs = [_XT_FIXED_MOD_MAP[m] for m in sc.get("fixed_mods", [])
+                      if m in _XT_FIXED_MOD_MAP]
+    fixed_mod_val = ",".join(fixed_mod_strs) if fixed_mod_strs else ""
+
+    # Variable mods — collect all tokens (some entries expand to multiple)
+    var_tokens: list[str] = []
+    for m in sc.get("var_mods", []):
+        val = _XT_VAR_MOD_MAP.get(m)
+        if val:
+            var_tokens.extend(val.split(","))
+    var_mod_val = ",".join(var_tokens) if var_tokens else ""
 
     taxonomy_path = _write_xtandem_taxonomy(output_dir, fasta_path)
     output_xml    = output_dir / "output.xml"
@@ -222,20 +530,28 @@ def _write_xtandem_params(
         ("scoring, z ions",            "no"),
         ("scoring, c ions",            "no"),
         # Enzyme
-        ("protein, cleavage site",     "[RK]|{P}"),
-        ("protein, cleavage semi",     "no"),
+        ("protein, cleavage site",     cleavage_site),
+        ("protein, cleavage semi",     cleavage_semi),
         ("protein, maximum valid expectation value", "0.05"),
         ("protein, N-terminal residue modification mass", "0.0"),
-        # Mods
-        ("residue, modification mass",          "57.021464@C"),
-        ("residue, potential modification mass", "15.994915@M"),
-        # Refinement pass
+    ]
+
+    if fixed_mod_val:
+        notes.append(("residue, modification mass", fixed_mod_val))
+    if var_mod_val:
+        notes.append(("residue, potential modification mass", var_mod_val))
+
+    # Refinement pass — always enabled; refine with N-term acetyl + unanticipated cleavage
+    refine_var = var_mod_val
+    if "42.010565@[" not in refine_var:
+        refine_var = (refine_var + ",42.010565@[").lstrip(",")
+    notes += [
         ("refine",                              "yes"),
         ("refine, maximum valid expectation value", "0.05"),
         ("refine, sPTM complexity",             "2"),
-        ("refine, potential modification mass", "15.994915@M,42.010565@["),
+        ("refine, potential modification mass", refine_var),
         ("refine, unanticipated cleavage",      "yes"),
-        ("refine, cleavage semi",               "no"),
+        ("refine, cleavage semi",               cleavage_semi),
         # Threading
         ("process, start condition",            "no"),
         ("spectrum, threads",                   str(threads)),
@@ -335,6 +651,7 @@ def _run_xtandem_thread(
     xtandem_exe: Path,
     fasta_path: str,
     threads: int,
+    search_config: dict | None = None,
 ) -> None:
     """Background thread: convert (if needed), run X!Tandem, write results to DB."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -344,10 +661,10 @@ def _run_xtandem_thread(
     suffix = raw_path.suffix.lower()
     if suffix == ".d" or raw_path.is_dir():
         # Bruker .d — convert to mzML first
-        if not _has_timsconvert():
-            _upsert_comparison(run_id, "xtandem", "failed",
-                               error_msg="timsconvert not found (pip install timsconvert)")
-            logger.warning("X!Tandem skipped for %s: timsconvert not on PATH", raw_path.name)
+        if not _find_msconvert() and not _has_timsconvert():
+            _upsert_comparison(run_id, "xtandem", "not_installed",
+                               error_msg="msconvert or timsconvert required for .d files")
+            logger.warning("X!Tandem skipped for %s: no mzML converter found", raw_path.name)
             return
         input_file = _convert_d_to_mzml(raw_path, output_dir)
         if not input_file:
@@ -366,7 +683,8 @@ def _run_xtandem_thread(
         input_file = raw_path   # attempt anyway
 
     # ── 2. Write parameter files ─────────────────────────────────────────────
-    params_path = _write_xtandem_params(output_dir, fasta_path, input_file, threads)
+    params_path = _write_xtandem_params(output_dir, fasta_path, input_file, threads,
+                                        search_config=search_config)
 
     # ── 3. Run X!Tandem ──────────────────────────────────────────────────────
     cmd = [str(xtandem_exe), str(params_path)]
@@ -414,11 +732,307 @@ def _run_xtandem_thread(
     )
 
 
+# ── Comet engine ─────────────────────────────────────────────────────────────
+
+def _write_comet_params(
+    output_dir: Path,
+    fasta_path: str,
+    threads: int,
+    immuno_class: int = 0,
+    search_config: dict | None = None,
+) -> Path:
+    """Write a comet.params file for a DDA search and return its path.
+
+    If search_config is supplied it takes priority over immuno_class.
+    """
+    if search_config is not None:
+        sc = search_config
+        specificity = sc.get("specificity", "specific")
+        enzyme_key  = sc.get("enzyme", "Trypsin/P")
+        enzyme_num  = _COMET_ENZYME_MAP.get(enzyme_key, 1)
+        missed      = sc.get("missed_cleavages", 2)
+        min_len     = sc.get("min_len", 7)
+        max_len     = sc.get("max_len", 30)
+        min_charge  = sc.get("min_charge", 2)
+        max_charge  = sc.get("max_charge", 4)
+        if specificity == "non-specific":
+            num_termini = 0
+            enzyme_num = 0
+        elif specificity == "semi":
+            num_termini = 1
+        else:
+            num_termini = 2
+
+        # Fixed mods
+        add_C = 0.0
+        add_K = 0.0
+        add_nterm = 0.0
+        for m in sc.get("fixed_mods", []):
+            if "Carbamidomethyl" in m and "C" in m:
+                add_C = 57.021464
+            elif "TMT6plex (K)" in m:
+                add_K = 229.162932
+            elif "TMT6plex (N-term)" in m:
+                add_nterm = 229.162932
+
+        # Variable mods — up to 6 slots
+        var_lines: list[str] = []
+        for idx, m in enumerate(sc.get("var_mods", []), start=1):
+            if idx > 6:
+                break
+            val = _COMET_VAR_MOD_MAP.get(m)
+            if val:
+                var_lines.append(f"variable_mod{idx:02d} = {val}")
+        # Zero out remaining slots so Comet doesn't use stale values
+        for idx in range(len(var_lines) + 1, 7):
+            var_lines.append(f"variable_mod{idx:02d} = 0.0 X 0 3 -1 0 0 0.0")
+
+    else:
+        # Legacy immuno_class fallback
+        if immuno_class == 1:
+            enzyme_num, min_len, max_len, missed = 0, 8, 12, 0
+            num_termini, min_charge, max_charge = 0, 1, 3
+        elif immuno_class == 2:
+            enzyme_num, min_len, max_len, missed = 0, 13, 25, 2
+            num_termini, min_charge, max_charge = 1, 2, 4
+        else:
+            enzyme_num, min_len, max_len, missed = 1, 7, 30, 2
+            num_termini, min_charge, max_charge = 2, 2, 4
+        add_C, add_K, add_nterm = 57.021464, 0.0, 0.0
+        var_lines = [
+            "variable_mod01 = 15.9949146 M 0 3 -1 0 0 0.0",
+            "variable_mod02 = 0.9840156 NQ 0 3 -1 0 0 0.0",
+            "variable_mod03 = 0.0 X 0 3 -1 0 0 0.0",
+            "variable_mod04 = 0.0 X 0 3 -1 0 0 0.0",
+            "variable_mod05 = 0.0 X 0 3 -1 0 0 0.0",
+            "variable_mod06 = 0.0 X 0 3 -1 0 0 0.0",
+        ]
+
+    var_block = "\n".join(var_lines)
+    add_C_line    = f"add_C_cysteine = {add_C}" if add_C else ""
+    add_K_line    = f"add_K_lysine = {add_K}" if add_K else ""
+    add_nterm_line = f"add_Nterm_peptide = {add_nterm}" if add_nterm else ""
+    extra_fixed = "\n".join(l for l in [add_C_line, add_K_line, add_nterm_line] if l)
+
+    params = f"""\
+# Comet params — auto-generated by ZIGGY
+database_name = {fasta_path}
+decoy_search = 1
+num_threads = {threads}
+peptide_mass_tolerance = 15
+peptide_mass_units = 2
+mass_type_parent = 1
+mass_type_fragment = 1
+precursor_charge = {min_charge} {max_charge}
+max_fragment_charge = 3
+ms_level = 2
+search_enzyme_number = {enzyme_num}
+num_enzyme_termini = {num_termini}
+allowed_missed_cleavage = {missed}
+fragment_bin_tol = 0.02
+fragment_bin_offset = 0.0
+digest_min_length = {min_len}
+digest_max_length = {max_len}
+digest_mass_range = 500.0 5000.0
+max_variable_mods_in_peptide = 3
+require_variable_mod = 0
+{var_block}
+{extra_fixed}
+output_pepxmlfile = 1
+output_txtfile = 1
+output_sqtfile = 0
+output_mzidentmlfile = 0
+peff_format = 0
+num_results = 5
+max_duplicate_proteins = 0
+"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    params_path = output_dir / "comet.params"
+    params_path.write_text(params)
+    return params_path
+
+
+def _parse_comet_output(output_dir: Path) -> dict[str, int | None]:
+    """Parse Comet .txt output for PSM/peptide/protein counts at 1% FDR."""
+    # Comet txt output: tab-separated with columns including e-value
+    counts = {"n_psms": None, "n_peptides": None, "n_proteins": None}
+    txt_files = list(output_dir.glob("*.txt"))
+    if not txt_files:
+        return counts
+
+    try:
+        psms, peptides, proteins = set(), set(), set()
+        for txt_path in txt_files:
+            with open(txt_path, newline="", encoding="utf-8", errors="replace") as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                for row in reader:
+                    try:
+                        evalue = float(row.get("e-value", row.get("xcorr_evalue", "1")))
+                    except (ValueError, KeyError):
+                        continue
+                    if evalue > 0.01:
+                        continue
+                    seq = row.get("plain_peptide", row.get("sequence", ""))
+                    prot = row.get("protein", "")
+                    if seq:
+                        psms.add(row.get("scan", "") + seq)
+                        peptides.add(seq)
+                    if prot:
+                        proteins.add(prot.split("\t")[0].strip())
+        counts["n_psms"] = len(psms)
+        counts["n_peptides"] = len(peptides)
+        counts["n_proteins"] = len(proteins)
+    except Exception:
+        logger.debug("_parse_comet_output failed", exc_info=True)
+    return counts
+
+
+def _run_comet_thread(
+    run_id: str,
+    raw_path: Path,
+    output_dir: Path,
+    comet_exe: Path,
+    fasta_path: str,
+    threads: int,
+    search_config: dict | None = None,
+) -> None:
+    """Background thread: run Comet DDA search and write results to DB."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _upsert_comparison(run_id, "comet", "running")
+
+    # Convert .d to mzML if needed
+    input_path = raw_path
+    if raw_path.suffix.lower() == ".d":
+        if not _find_msconvert() and not _has_timsconvert():
+            _upsert_comparison(run_id, "comet", "not_installed",
+                               error_msg="msconvert or timsconvert required for .d files")
+            return
+        converted = _convert_d_to_mzml(raw_path, output_dir)
+        if not converted:
+            _upsert_comparison(run_id, "comet", "failed",
+                               error_msg="mzML conversion failed")
+            return
+        input_path = converted
+
+    params_path = _write_comet_params(output_dir, fasta_path, threads,
+                                      search_config=search_config)
+
+    cmd = [str(comet_exe), f"-P{params_path}", str(input_path)]
+    log_path = output_dir / "comet.log"
+    logger.info("Comet starting: %s", raw_path.name)
+
+    try:
+        with open(log_path, "w") as lf:
+            subprocess.run(
+                cmd, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                text=True, timeout=7200, cwd=str(output_dir),
+            )
+    except subprocess.CalledProcessError as e:
+        _upsert_comparison(run_id, "comet", "failed",
+                           error_msg=f"exit {e.returncode}", result_path=str(output_dir))
+        logger.error("Comet failed (rc=%d): %s", e.returncode, raw_path.name)
+        return
+    except subprocess.TimeoutExpired:
+        _upsert_comparison(run_id, "comet", "failed",
+                           error_msg="timeout (2h)", result_path=str(output_dir))
+        return
+    except Exception as exc:
+        _upsert_comparison(run_id, "comet", "failed", error_msg=str(exc))
+        return
+
+    stats = _parse_comet_output(output_dir)
+    _upsert_comparison(run_id, "comet", "done", result_path=str(output_dir), **stats)
+    logger.info("Comet done: %s — PSMs=%s  peptides=%s  proteins=%s",
+                raw_path.name, stats["n_psms"], stats["n_peptides"], stats["n_proteins"])
+
+
+def _dispatch_comet(
+    run_id: str,
+    raw_path: Path,
+    output_dir: Path,
+    comet_exe: Path,
+    fasta_path: str | None,
+    fragpipe: Path | None,
+    threads: int,
+    search_config: dict | None = None,
+) -> None:
+    """Resolve FASTA and fire Comet in a background thread."""
+    effective_fasta = fasta_path
+    if not effective_fasta or not Path(effective_fasta).exists():
+        if fragpipe:
+            bundled = _fragpipe_paths(fragpipe).get("bundled_fasta")
+            if bundled and Path(str(bundled)).exists():
+                effective_fasta = str(bundled)
+    if not effective_fasta or not Path(effective_fasta).exists():
+        _upsert_comparison(run_id, "comet", "failed", error_msg="No FASTA available")
+        return
+    t = threading.Thread(
+        target=_run_comet_thread,
+        args=(run_id, raw_path, output_dir, comet_exe, effective_fasta, threads,
+              search_config),
+        daemon=True,
+        name=f"comp-comet-{run_id[:16]}",
+    )
+    t.start()
+    logger.info("Dispatched comparison: comet for %s", raw_path.name)
+
+
 # ── DB helpers ───────────────────────────────────────────────────────────────
 
 def _get_db_path() -> Path:
     from stan.config import get_user_config_dir
     return get_user_config_dir() / "stan.db"
+
+
+# All comparison engines tracked in the UI, in display order.
+_ALL_COMPARISON_ENGINES = (
+    "msfragger_dia",
+    "msfragger_dda",
+    "xtandem",
+    "comet",
+    "maxquant",
+)
+
+# Engines that only make sense for DIA data.
+_DIA_ONLY_ENGINES = {"msfragger_dia"}
+
+# Engines that only make sense for DDA data.
+_DDA_ONLY_ENGINES = {"msfragger_dda", "xtandem", "comet", "maxquant"}
+
+
+def init_run_comparison_statuses(run_id: str, mode: str) -> None:
+    """Pre-populate search_comparisons rows for every engine before searching.
+
+    Inserts rows with:
+    - ``not_applicable`` — engine is incompatible with the acquisition mode
+    - ``pending``        — engine is compatible (tool availability checked later)
+
+    Uses INSERT OR IGNORE so existing rows (e.g. a previous ``done`` result)
+    are never overwritten.
+    """
+    import sqlite3
+
+    mode_str = mode.value if hasattr(mode, "value") else str(mode)
+    is_dia = mode_str in ("DIA", "diaPASEF")
+
+    rows = []
+    for engine in _ALL_COMPARISON_ENGINES:
+        if is_dia and engine in _DDA_ONLY_ENGINES:
+            status = "not_applicable"
+        elif not is_dia and engine in _DIA_ONLY_ENGINES:
+            status = "not_applicable"
+        else:
+            status = "pending"
+        rows.append((run_id, engine, status))
+
+    try:
+        with sqlite3.connect(str(_get_db_path())) as con:
+            con.executemany(
+                "INSERT OR IGNORE INTO search_comparisons (run_id, engine, status) VALUES (?, ?, ?)",
+                rows,
+            )
+    except Exception:
+        logger.debug("init_run_comparison_statuses failed", exc_info=True)
 
 
 def _upsert_comparison(run_id: str, engine: str, status: str, **kwargs: Any) -> None:
@@ -460,13 +1074,51 @@ def _write_msfragger_params(
     fasta_path: str,
     data_type: int = 0,
     threads: int = 0,
+    search_config: dict | None = None,
 ) -> Path:
     """Write fragger.params into output_dir and return its path.
 
     data_type: 0=DDA, 1=DIA, 2=DIA-narrow-window
+    If search_config is supplied it overrides the hardcoded enzyme/mod defaults.
     """
     if threads <= 0:
         threads = max(2, (os.cpu_count() or 4) // 2)
+
+    sc = search_config or _WORKFLOW_PRESETS[_DEFAULT_WORKFLOW]
+    specificity = sc.get("specificity", "specific")
+    missed      = sc.get("missed_cleavages", 2)
+    min_len     = sc.get("min_len", 7)
+    max_len     = sc.get("max_len", 50)
+
+    # Enzyme
+    if specificity == "non-specific":
+        enzyme_name = "nonspecific"
+        cut_1, nocut_1, sense_1 = "", "", "C"
+        num_termini = 0
+    elif specificity == "semi":
+        enzyme_name = "stricttrypsin"
+        cut_1, nocut_1, sense_1 = "KR", "", "C"
+        num_termini = 1
+    else:
+        enzyme_name = "stricttrypsin"
+        cut_1, nocut_1, sense_1 = "KR", "", "C"
+        num_termini = 2
+
+    # Variable mods — up to 7 MSFragger slots
+    var_mods: dict[str, str] = {}
+    for idx, m in enumerate(sc.get("var_mods", []), start=1):
+        if idx > 7:
+            break
+        val = _MSF_VAR_MOD_MAP.get(m)
+        if val:
+            var_mods[f"variable_mod_{idx:02d}"] = val
+
+    # Fixed mods
+    fixed_mods: dict[str, float] = {}
+    for m in sc.get("fixed_mods", []):
+        entry = _MSF_FIXED_MOD_MAP.get(m)
+        if entry:
+            fixed_mods[entry[0]] = entry[1]
 
     params: dict[str, Any] = {
         "num_threads":              threads,
@@ -481,21 +1133,18 @@ def _write_msfragger_params(
         "fragment_mass_tolerance":  20,
         "fragment_mass_units":      1,
         "calibrate_mass":           2,         # ON + find optimal params
-        "search_enzyme_name_1":     "stricttrypsin",
-        "search_enzyme_cut_1":      "KR",
-        "search_enzyme_nocut_1":    "",
-        "allowed_missed_cleavage_1": 2,
-        "search_enzyme_sense_1":    "C",
-        "num_enzyme_termini":       2,
+        "search_enzyme_name_1":     enzyme_name,
+        "search_enzyme_cut_1":      cut_1,
+        "search_enzyme_nocut_1":    nocut_1,
+        "allowed_missed_cleavage_1": missed,
+        "search_enzyme_sense_1":    sense_1,
+        "num_enzyme_termini":       num_termini,
         "clip_nTerm_M":             1,
-        "variable_mod_01":          "15.994915 M 3",
-        "variable_mod_02":          "42.010565 [^ 1",
-        "add_C_cysteine":           57.021464,
         "output_format":            "tsv",
         "output_report_topN":       1,
         "output_max_expect":        50,
-        "digest_min_length":        7,
-        "digest_max_length":        50,
+        "digest_min_length":        min_len,
+        "digest_max_length":        max_len,
         "digest_mass_range":        "500.0 5000.0",
         "max_fragment_charge":      2,
         "min_matched_fragments":    4,
@@ -506,7 +1155,10 @@ def _write_msfragger_params(
         "max_variable_mods_per_peptide": 3,
         "report_alternative_proteins": 0,
     }
+    params.update(var_mods)
+    params.update(fixed_mods)
 
+    output_dir.mkdir(parents=True, exist_ok=True)
     lines = [f"{k} = {v}\n" for k, v in params.items()]
     params_path = output_dir / "fragger.params"
     params_path.write_text("".join(lines))
@@ -610,6 +1262,7 @@ def _run_msfragger_thread(
     paths: dict[str, Path | None],
     fasta_path: str,
     threads: int,
+    search_config: dict | None = None,
 ) -> None:
     """Background thread: run MSFragger and write results to DB."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -629,7 +1282,8 @@ def _run_msfragger_thread(
         return
 
     params_path = _write_msfragger_params(
-        output_dir, fasta_path, data_type=data_type, threads=threads
+        output_dir, fasta_path, data_type=data_type, threads=threads,
+        search_config=search_config,
     )
 
     cmd = [
@@ -686,6 +1340,419 @@ def _run_msfragger_thread(
     )
 
 
+# ── MaxQuant ─────────────────────────────────────────────────────────────────
+
+_MAXQUANT_SEARCH_PATHS: list[Path] = [
+    Path("C:/MaxQuant/bin/MaxQuantCmd.exe"),
+    Path("D:/MaxQuant/bin/MaxQuantCmd.exe"),
+    Path("E:/MaxQuant/bin/MaxQuantCmd.exe"),
+    Path.home() / "MaxQuant/bin/MaxQuantCmd.exe",
+    Path("C:/Program Files/MaxQuant/bin/MaxQuantCmd.exe"),
+    Path("C:/tools/MaxQuant/bin/MaxQuantCmd.exe"),
+]
+
+
+def _find_maxquant() -> Path | None:
+    """Return path to MaxQuantCmd.exe if found."""
+    for p in _MAXQUANT_SEARCH_PATHS:
+        if p.is_file():
+            return p
+    found = shutil.which("MaxQuantCmd.exe")
+    if found:
+        return Path(found)
+    return None
+
+
+_MAXQUANT_PARAM_TEMPLATE = """\
+<?xml version="1.0" encoding="utf-8"?>
+<MaxQuantParams>
+  <fastaFiles>
+    <FastaFileInfo>
+      <fastaFilePath>{fasta_path}</fastaFilePath>
+      <identifierParseRule>&gt;(.+?) </identifierParseRule>
+      <descriptionParseRule>&gt;(.*)</descriptionParseRule>
+      <taxonomyParseRule></taxonomyParseRule>
+      <variationParseRule></variationParseRule>
+      <modificationParseRule></modificationParseRule>
+      <taxonomyId></taxonomyId>
+    </FastaFileInfo>
+  </fastaFiles>
+  <fastaFilesProteogenomics>
+  </fastaFilesProteogenomics>
+  <fastaFilesFirstSearch>
+  </fastaFilesFirstSearch>
+  <fixedSearchFolder></fixedSearchFolder>
+  <andromedaCacheSize>350000</andromedaCacheSize>
+  <advancedRatios>True</advancedRatios>
+  <pValueThres>0.005</pValueThres>
+  <neucodeRatioBasedQuantification>False</neucodeRatioBasedQuantification>
+  <neucodeStabilizeLargeRatios>False</neucodeStabilizeLargeRatios>
+  <neucodeRequireMsMs>False</neucodeRequireMsMs>
+  <minRatioCount>2</minRatioCount>
+  <lfqMode>1</lfqMode>
+  <lfqSkipNorm>False</lfqSkipNorm>
+  <lfqMinEdgesPerNode>3</lfqMinEdgesPerNode>
+  <lfqAvEdgesPerNode>6</lfqAvEdgesPerNode>
+  <lfqMaxFeatures>100000</lfqMaxFeatures>
+  <decoyMode>revert</decoyMode>
+  <includeContaminants>True</includeContaminants>
+  <maxPeptideMass>4600</maxPeptideMass>
+  <epsilonMutantScore>0</epsilonMutantScore>
+  <multipleProteinGroupsFromOneSpectrum>False</multipleProteinGroupsFromOneSpectrum>
+  <msInstrument>0</msInstrument>
+  <globalMolweightCutoff>0</globalMolweightCutoff>
+  <goldenRatio>False</goldenRatio>
+  <scoreThres>40</scoreThres>
+  <deltaScoreThres>6</deltaScoreThres>
+  <histogramType>Unknown</histogramType>
+  <intensityThres>0</intensityThres>
+  <useNormRatiosForHybridStatTest>True</useNormRatiosForHybridStatTest>
+  <maxQuantVersion>1.6.11.0</maxQuantVersion>
+  <minUniquePeptides>0</minUniquePeptides>
+  <minRazorPeptides>1</minRazorPeptides>
+  <minPeptides>1</minPeptides>
+  <ibaq>False</ibaq>
+  <top3>False</top3>
+  <ibaqLogFit>False</ibaqLogFit>
+  <separateLfq>False</separateLfq>
+  <ibaqMatchBetweenRuns>False</ibaqMatchBetweenRuns>
+  <weightedNormalization>False</weightedNormalization>
+  <referenceChannel></referenceChannel>
+  <numThreads>{threads}</numThreads>
+  <calcPeakProperties>False</calcPeakProperties>
+  <writeMsScansTable>False</writeMsScansTable>
+  <writeMsmsScansTable>True</writeMsmsScansTable>
+  <writePasefMsmsScansTable>True</writePasefMsmsScansTable>
+  <writeAccumulatedMsmsScansTable>False</writeAccumulatedMsmsScansTable>
+  <writeMsnScansTable>False</writeMsnScansTable>
+  <writeBoxCarScansTable>False</writeBoxCarScansTable>
+  <keepLowScoresMode>0</keepLowScoresMode>
+  <proteinGroupsForSorting>1</proteinGroupsForSorting>
+  <showCategoryNames>False</showCategoryNames>
+  <showDenovoScores>False</showDenovoScores>
+  <standardProteinGroupsForSorting>True</standardProteinGroupsForSorting>
+  <fixedModifications>
+{fixed_mods_xml}  </fixedModifications>
+  <paramGroupIndices>
+    <int>0</int>
+  </paramGroupIndices>
+  <msmsParamsIndices>
+    <int>0</int>
+  </msmsParamsIndices>
+  <fragmentationParamsIndices>
+    <int>0</int>
+  </fragmentationParamsIndices>
+  <parameterGroups>
+    <parameterGroup>
+      <msInstrument>0</msInstrument>
+      <maxCharge>5</maxCharge>
+      <minPeakLen>2</minPeakLen>
+      <diaMinPeakLen>2</diaMinPeakLen>
+      <useMs1Centroids>False</useMs1Centroids>
+      <useMs2Centroids>False</useMs2Centroids>
+      <cutPeaks>True</cutPeaks>
+      <gapScans>1</gapScans>
+      <minTime>NaN</minTime>
+      <maxTime>NaN</maxTime>
+      <matchType>MatchFromAndTo</matchType>
+      <intensityDetermination>0</intensityDetermination>
+      <centroidMatchTol>8</centroidMatchTol>
+      <centroidHalfWidth>35</centroidHalfWidth>
+      <valleyFactor>1.4</valleyFactor>
+      <isotopeValleyFactor>1.2</isotopeValleyFactor>
+      <advancedPeakSplitting>False</advancedPeakSplitting>
+      <intensityThreshold>0</intensityThreshold>
+      <labelMods>
+        <string></string>
+      </labelMods>
+      <lcmsRunType>Standard</lcmsRunType>
+      <reQuantify>False</reQuantify>
+      <lfqMode>1</lfqMode>
+      <lfqSkipNorm>False</lfqSkipNorm>
+      <lfqMinEdgesPerNode>3</lfqMinEdgesPerNode>
+      <lfqAvEdgesPerNode>6</lfqAvEdgesPerNode>
+      <lfqMaxFeatures>100000</lfqMaxFeatures>
+      <neucodeMaxPpm>0</neucodeMaxPpm>
+      <neucodeResolution>0</neucodeResolution>
+      <neucodeResolutionInMda>False</neucodeResolutionInMda>
+      <neucodeInSilicoLowRes>False</neucodeInSilicoLowRes>
+      <variableModifications>
+{var_mods_xml}      </variableModifications>
+      <maxNmods>5</maxNmods>
+      <maxMissedCleavages>{missed_cleavages}</maxMissedCleavages>
+      <multiplicity>1</multiplicity>
+      <enzymeMode>{enzyme_mode}</enzymeMode>
+      <complementaryReporterType>0</complementaryReporterType>
+      <reporterNormalization>0</reporterNormalization>
+      <neucodeIntensityMode>0</neucodeIntensityMode>
+      <enzymes>
+        <string>{enzyme_name}</string>
+      </enzymes>
+      <enzymesFirstSearch>
+        <string>Trypsin/P</string>
+      </enzymesFirstSearch>
+      <useEnzymeFirstSearch>False</useEnzymeFirstSearch>
+      <useVariableModificationsFirstSearch>False</useVariableModificationsFirstSearch>
+      <variableModificationsFirstSearch>
+      </variableModificationsFirstSearch>
+      <hasAdditionalVariableModifications>False</hasAdditionalVariableModifications>
+      <additionalVariableModifications>
+      </additionalVariableModifications>
+      <additionalVariableModificationProteins>
+      </additionalVariableModificationProteins>
+      <doMassFiltering>True</doMassFiltering>
+      <firstSearchTol>20</firstSearchTol>
+      <mainSearchTol>4.5</mainSearchTol>
+      <searchTolInPpm>True</searchTolInPpm>
+      <isotopeMatchTol>2</isotopeMatchTol>
+      <isotopeMatchTolInPpm>True</isotopeMatchTolInPpm>
+      <isotopeTimeCorrelation>0.6</isotopeTimeCorrelation>
+      <theorIsotopeCorrelation>0.6</theorIsotopeCorrelation>
+      <checkMassDeficit>True</checkMassDeficit>
+      <recalibrationInPpm>True</recalibrationInPpm>
+      <intensityThreshold>0</intensityThreshold>
+      <precursorMassTolerance>20</precursorMassTolerance>
+      <precursorMassToleranceInPpm>True</precursorMassToleranceInPpm>
+      <filePaths>
+        <string>{raw_path}</string>
+      </filePaths>
+      <experiments>
+        <string></string>
+      </experiments>
+      <fractions>
+        <short>32767</short>
+      </fractions>
+      <ptms>
+        <boolean>False</boolean>
+      </ptms>
+      <paramGroupIndices>
+        <int>0</int>
+      </paramGroupIndices>
+      <referenceChannel></referenceChannel>
+      <bframeSliceSize>1</bframeSliceSize>
+      <bframeOffset>0</bframeOffset>
+    </parameterGroup>
+  </parameterGroups>
+  <msmsParams>
+    <MsmsParams>
+      <Name>FTMS</Name>
+      <MatchTolerance>20</MatchTolerance>
+      <MatchToleranceInPpm>True</MatchToleranceInPpm>
+      <DeisotopeTolerance>7</DeisotopeTolerance>
+      <DeisotopeToleranceInPpm>True</DeisotopeToleranceInPpm>
+      <DeNovoTolerance>10</DeNovoTolerance>
+      <DeNovoToleranceInPpm>True</DeNovoToleranceInPpm>
+      <Deisotope>True</Deisotope>
+      <Topx>12</Topx>
+      <MaxPeakCount>300</MaxPeakCount>
+      <report>False</report>
+    </MsmsParams>
+  </msmsParams>
+  <outputFolder>{output_dir}</outputFolder>
+</MaxQuantParams>
+"""
+
+
+_MQ_ENZYME_MAP: dict[str, str] = {
+    "Trypsin/P":    "Trypsin/P",
+    "Trypsin":      "Trypsin",
+    "LysC":         "LysC",
+    "LysC/P":       "LysC/P",
+    "GluC":         "GluC",
+    "AspN":         "Asp-N",
+    "non-specific": "Unspecific",
+}
+
+
+def _write_maxquant_params(
+    output_dir: Path,
+    raw_path: Path,
+    fasta_path: str,
+    threads: int,
+    search_config: dict | None = None,
+) -> Path:
+    """Write mqpar.xml into output_dir and return its path."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sc = search_config or _WORKFLOW_PRESETS[_DEFAULT_WORKFLOW]
+    specificity = sc.get("specificity", "specific")
+    missed      = sc.get("missed_cleavages", 2)
+    enzyme_key  = sc.get("enzyme", "Trypsin/P")
+    enzyme_name = _MQ_ENZYME_MAP.get(enzyme_key, "Trypsin/P")
+    if specificity == "non-specific":
+        enzyme_mode = 2
+        enzyme_name = "Unspecific"
+    elif specificity == "semi":
+        enzyme_mode = 1
+    else:
+        enzyme_mode = 0
+
+    # Build fixed mods XML block
+    fixed_strs = [_MQ_FIXED_MODS[m] for m in sc.get("fixed_mods", []) if m in _MQ_FIXED_MODS]
+    if fixed_strs:
+        fixed_mods_xml = "".join(f"    <string>{m}</string>\n" for m in fixed_strs)
+    else:
+        fixed_mods_xml = ""
+
+    # Build variable mods XML block (de-duplicate via dict to preserve order)
+    seen: dict[str, None] = {}
+    for m in sc.get("var_mods", []):
+        mapped = _MQ_VAR_MODS.get(m)
+        if mapped and mapped not in seen:
+            seen[mapped] = None
+    if seen:
+        var_mods_xml = "".join(f"        <string>{m}</string>\n" for m in seen)
+    else:
+        var_mods_xml = ""
+
+    # MaxQuant requires absolute Windows paths with forward slashes
+    mqpar_path = output_dir / "mqpar.xml"
+    content = _MAXQUANT_PARAM_TEMPLATE.format(
+        fasta_path=str(fasta_path).replace("\\", "/"),
+        raw_path=str(raw_path).replace("\\", "/"),
+        output_dir=str(output_dir).replace("\\", "/"),
+        threads=threads,
+        fixed_mods_xml=fixed_mods_xml,
+        var_mods_xml=var_mods_xml,
+        missed_cleavages=missed,
+        enzyme_mode=enzyme_mode,
+        enzyme_name=enzyme_name,
+    )
+    mqpar_path.write_text(content, encoding="utf-8")
+    return mqpar_path
+
+
+def _parse_maxquant_output(output_dir: Path) -> dict[str, Any]:
+    """Parse MaxQuant combined/txt outputs for PSM / peptide / protein counts."""
+    combined = output_dir / "combined" / "txt"
+
+    n_psms = 0
+    n_peptides = 0
+    n_proteins = 0
+
+    # msms.txt — one row per PSM
+    msms_file = combined / "msms.txt"
+    if msms_file.exists():
+        try:
+            with open(msms_file, newline="", encoding="utf-8", errors="replace") as fh:
+                reader = csv.DictReader(fh, delimiter="\t")
+                for row in reader:
+                    score = float(row.get("Score", 0) or 0)
+                    if score > 0:
+                        n_psms += 1
+        except Exception:
+            pass
+
+    # peptides.txt — unique peptides
+    pep_file = combined / "peptides.txt"
+    if pep_file.exists():
+        try:
+            with open(pep_file, newline="", encoding="utf-8", errors="replace") as fh:
+                reader = csv.DictReader(fh, delimiter="\t")
+                for row in reader:
+                    seq = row.get("Sequence", "").strip()
+                    rev = row.get("Reverse", "").strip()
+                    cont = row.get("Potential contaminant", "").strip()
+                    if seq and rev != "+" and cont != "+":
+                        n_peptides += 1
+        except Exception:
+            pass
+
+    # proteinGroups.txt — protein groups (non-decoy, non-contaminant)
+    pg_file = combined / "proteinGroups.txt"
+    if pg_file.exists():
+        try:
+            with open(pg_file, newline="", encoding="utf-8", errors="replace") as fh:
+                reader = csv.DictReader(fh, delimiter="\t")
+                for row in reader:
+                    rev = row.get("Reverse", "").strip()
+                    cont = row.get("Potential contaminant", "").strip()
+                    only_id = row.get("Only identified by site", "").strip()
+                    if rev != "+" and cont != "+" and only_id != "+":
+                        n_proteins += 1
+        except Exception:
+            pass
+
+    return {"n_psms": n_psms or None, "n_peptides": n_peptides or None,
+            "n_proteins": n_proteins or None}
+
+
+def _run_maxquant_thread(
+    run_id: str,
+    raw_path: Path,
+    output_dir: Path,
+    maxquant_cmd: Path,
+    fasta_path: str,
+    threads: int,
+    search_config: dict | None = None,
+) -> None:
+    """Run MaxQuantCmd.exe and record results — called in a daemon thread."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _upsert_comparison(run_id, "maxquant", "running")
+
+    mqpar_path = _write_maxquant_params(output_dir, raw_path, fasta_path, threads,
+                                        search_config=search_config)
+    log_path = output_dir / "maxquant.log"
+    cmd = [str(maxquant_cmd), str(mqpar_path)]
+    logger.info("MaxQuant starting: %s", raw_path.name)
+
+    try:
+        with open(log_path, "w") as lf:
+            subprocess.run(
+                cmd, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                text=True, timeout=14400,  # 4h max
+                cwd=str(output_dir),
+            )
+    except subprocess.CalledProcessError as e:
+        _upsert_comparison(run_id, "maxquant", "failed",
+                           error_msg=f"exit {e.returncode}", result_path=str(output_dir))
+        logger.error("MaxQuant failed (rc=%d): %s", e.returncode, raw_path.name)
+        return
+    except subprocess.TimeoutExpired:
+        _upsert_comparison(run_id, "maxquant", "failed",
+                           error_msg="timeout (4h)", result_path=str(output_dir))
+        return
+    except Exception as exc:
+        _upsert_comparison(run_id, "maxquant", "failed", error_msg=str(exc))
+        return
+
+    stats = _parse_maxquant_output(output_dir)
+    _upsert_comparison(run_id, "maxquant", "done", result_path=str(output_dir), **stats)
+    logger.info("MaxQuant done: %s — PSMs=%s  peptides=%s  proteins=%s",
+                raw_path.name, stats["n_psms"], stats["n_peptides"], stats["n_proteins"])
+
+
+def _dispatch_maxquant(
+    run_id: str,
+    raw_path: Path,
+    output_dir: Path,
+    maxquant_cmd: Path,
+    fasta_path: str | None,
+    fragpipe: Path | None,
+    threads: int,
+    search_config: dict | None = None,
+) -> None:
+    """Resolve FASTA and fire MaxQuant in a background thread."""
+    effective_fasta = fasta_path
+    if not effective_fasta or not Path(effective_fasta).exists():
+        if fragpipe:
+            bundled = _fragpipe_paths(fragpipe).get("bundled_fasta")
+            if bundled and Path(str(bundled)).exists():
+                effective_fasta = str(bundled)
+    if not effective_fasta or not Path(effective_fasta).exists():
+        _upsert_comparison(run_id, "maxquant", "failed", error_msg="No FASTA available")
+        return
+    t = threading.Thread(
+        target=_run_maxquant_thread,
+        args=(run_id, raw_path, output_dir, maxquant_cmd, effective_fasta, threads,
+              search_config),
+        daemon=True,
+        name=f"comp-maxquant-{run_id[:16]}",
+    )
+    t.start()
+    logger.info("Dispatched comparison: maxquant for %s", raw_path.name)
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def dispatch_comparison_searches(
@@ -695,6 +1762,7 @@ def dispatch_comparison_searches(
     output_base: Path,
     fasta_path: str | None = None,
     threads: int = 0,
+    workflow: str | None = None,
 ) -> None:
     """Fire comparison search engines as background daemon threads.
 
@@ -709,9 +1777,17 @@ def dispatch_comparison_searches(
         output_base: Directory where _comparison/ subdirectories are created.
         fasta_path:  FASTA for search. Falls back to FragPipe bundled FASTA.
         threads:     CPU threads per engine (0 = half of available CPUs).
+        workflow:    Preset key e.g. "phospho", "mhc_class_i_dda", "hela_digest".
+                     All engines inherit enzyme/mod settings from this preset.
+                     Falls back to "hela_digest" if None or unrecognised.
     """
     if threads <= 0:
         threads = max(2, (os.cpu_count() or 4) // 2)
+
+    # Build the search config that all engines will use
+    search_config = _resolve_search_config(workflow)
+    logger.info("dispatch_comparison_searches: workflow=%s → %s",
+                workflow or "default", search_config.get("enzyme"))
 
     # Accept AcquisitionMode enum objects or plain strings
     mode_str = mode.value if hasattr(mode, "value") else str(mode)
@@ -743,7 +1819,8 @@ def dispatch_comparison_searches(
                 t = threading.Thread(
                     target=_run_msfragger_thread,
                     args=(run_id, raw_path, out_dir, engine_name,
-                          data_type, paths, effective_fasta, threads),
+                          data_type, paths, effective_fasta, threads,
+                          search_config),
                     daemon=True,
                     name=f"comp-{engine_name}-{run_id[:16]}",
                 )
@@ -752,32 +1829,70 @@ def dispatch_comparison_searches(
                             engine_name, raw_path.name, t.name)
         else:
             logger.warning("No FASTA found — skipping MSFragger comparisons for %s", run_id)
+            for eng in ("msfragger_dda", "msfragger_dia"):
+                if is_dia and eng == "msfragger_dda":
+                    continue  # already not_applicable
+                if not is_dia and eng == "msfragger_dia":
+                    continue
+                _upsert_comparison(run_id, eng, "failed", error_msg="No FASTA available")
     else:
         logger.debug("FragPipe not found — skipping MSFragger comparisons for %s", run_id)
+        for eng in ("msfragger_dda", "msfragger_dia"):
+            if is_dia and eng == "msfragger_dda":
+                continue
+            if not is_dia and eng == "msfragger_dia":
+                continue
+            _upsert_comparison(run_id, eng, "not_installed", error_msg="FragPipe not found")
 
     # ── X!Tandem (standalone — does not need FragPipe) ───────────────────────
-    xtandem_exe = _find_xtandem()
-    if xtandem_exe:
-        # Resolve FASTA: prefer caller-supplied; fall back to FragPipe bundled if available
-        xt_fasta = fasta_path
-        if (not xt_fasta or not Path(xt_fasta).exists()) and fragpipe:
-            paths_for_fasta = _fragpipe_paths(fragpipe)
-            bundled = paths_for_fasta.get("bundled_fasta")
-            if bundled and Path(str(bundled)).exists():
-                xt_fasta = str(bundled)
+    if not is_dia:
+        xtandem_exe = _find_xtandem()
+        if xtandem_exe:
+            xt_fasta = fasta_path
+            if (not xt_fasta or not Path(xt_fasta).exists()) and fragpipe:
+                paths_for_fasta = _fragpipe_paths(fragpipe)
+                bundled = paths_for_fasta.get("bundled_fasta")
+                if bundled and Path(str(bundled)).exists():
+                    xt_fasta = str(bundled)
 
-        if xt_fasta and Path(xt_fasta).exists():
-            xt_out_dir = comparison_base / "xtandem"
-            t = threading.Thread(
-                target=_run_xtandem_thread,
-                args=(run_id, raw_path, xt_out_dir, xtandem_exe, xt_fasta, threads),
-                daemon=True,
-                name=f"comp-xtandem-{run_id[:16]}",
-            )
-            t.start()
-            logger.info("Dispatched comparison: xtandem for %s (thread: %s)",
-                        raw_path.name, t.name)
+            if xt_fasta and Path(xt_fasta).exists():
+                xt_out_dir = comparison_base / "xtandem"
+                t = threading.Thread(
+                    target=_run_xtandem_thread,
+                    args=(run_id, raw_path, xt_out_dir, xtandem_exe, xt_fasta, threads,
+                          search_config),
+                    daemon=True,
+                    name=f"comp-xtandem-{run_id[:16]}",
+                )
+                t.start()
+                logger.info("Dispatched comparison: xtandem for %s (thread: %s)",
+                            raw_path.name, t.name)
+            else:
+                logger.warning("No FASTA found — skipping X!Tandem comparison for %s", run_id)
+                _upsert_comparison(run_id, "xtandem", "failed", error_msg="No FASTA available")
         else:
-            logger.warning("No FASTA found — skipping X!Tandem comparison for %s", run_id)
-    else:
-        logger.debug("X!Tandem not found — skipping X!Tandem comparison for %s", run_id)
+            logger.debug("X!Tandem not found — marking not_installed for %s", run_id)
+            _upsert_comparison(run_id, "xtandem", "not_installed", error_msg="tandem.exe not found")
+
+    # ── Comet ────────────────────────────────────────────────────────────────
+    if not is_dia:
+        comet_exe = _find_comet()
+        if comet_exe:
+            _dispatch_comet(run_id, raw_path, comparison_base / "comet",
+                            comet_exe, fasta_path, fragpipe, threads,
+                            search_config=search_config)
+        else:
+            logger.debug("Comet not found — marking not_installed for %s", run_id)
+            _upsert_comparison(run_id, "comet", "not_installed", error_msg="comet.exe not found")
+
+    # ── MaxQuant ─────────────────────────────────────────────────────────────
+    if not is_dia:
+        maxquant_cmd = _find_maxquant()
+        if maxquant_cmd:
+            _dispatch_maxquant(run_id, raw_path, comparison_base / "maxquant",
+                               maxquant_cmd, fasta_path, fragpipe, threads,
+                               search_config=search_config)
+        else:
+            logger.debug("MaxQuant not found — marking not_installed for %s", run_id)
+            _upsert_comparison(run_id, "maxquant", "not_installed",
+                               error_msg="MaxQuantCmd.exe not found")
