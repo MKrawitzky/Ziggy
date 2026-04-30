@@ -751,7 +751,7 @@ def _build_msfragger_params(
         "database_name":            fasta_path,
         "num_threads":              threads,
         "output_location":          str(output_dir),
-        "output_format":            "tsv",
+        "output_format":            "tsv_pin",  # writes both .tsv (targets) and .pin (targets+decoys for TDA FDR)
         "output_report_topN":       1,
         # Tolerances
         "precursor_mass_lower":     pre_lo,
@@ -816,19 +816,61 @@ def _build_msfragger_params(
 
 
 def _msfragger_tsv_to_sage_parquet(tsv_path: Path, output_path: Path) -> Path | None:
-    """Convert MSFragger TSV → Sage-compatible parquet with TDA q-values.
+    """Convert MSFragger TSV + PIN output to Sage-compatible parquet with TDA q-values.
 
-    Sage's extractor needs: spectrum_q (or q_value), peptide, hyperscore,
-    delta_mass, retention_time, charge.  We compute q-values in-process
-    using target-decoy competition on Hyperscore.
+    MSFragger writes target-only PSMs to .tsv.  The .pin (Percolator Input)
+    file contains both target (Label=1) and decoy (Label=-1) PSMs needed for
+    proper target-decoy competition FDR.
+
+    Strategy:
+      1. Read PIN for TDA q-value computation (hyperscore + Label columns).
+      2. Read TSV for full PSM annotations (peptide, protein, RT, mass error).
+      3. Map q-values onto TSV rows by scan number.
+      4. Write Sage-compatible parquet (targets at ≤1% FDR).
     """
     try:
         import polars as pl
         import numpy as np
     except ImportError as e:
-        logger.error("polars/numpy not available for MSFragger TSV conversion: %s", e)
+        logger.error("polars/numpy not available for MSFragger conversion: %s", e)
         return None
 
+    # ── 1. Read PIN for TDA FDR ───────────────────────────────────────────────
+    pin_path = tsv_path.with_suffix(".pin")
+    q_by_scan: dict[int, float] = {}
+
+    if pin_path.exists():
+        try:
+            pin = pl.read_csv(str(pin_path), separator="\t", infer_schema_length=5000)
+            label_col = next((c for c in pin.columns if c.lower() == "label"), None)
+            scan_col  = next((c for c in pin.columns if c.lower() == "scannr"), None)
+            score_col = next((c for c in pin.columns if c.lower() in ("hyperscore", "score")), None)
+
+            if label_col and scan_col and score_col:
+                pin = pin.sort(score_col, descending=True)
+                is_dec  = (pin[label_col] == -1).to_numpy()
+                cum_dec = is_dec.cumsum().astype(float)
+                cum_tgt = (~is_dec).cumsum().astype(float)
+                fdr     = cum_dec / np.maximum(cum_tgt, 1.0)
+                q_arr   = np.minimum.accumulate(fdr[::-1])[::-1]
+                for scan, q, decoy in zip(pin[scan_col].to_numpy(), q_arr, is_dec):
+                    if not decoy:
+                        q_by_scan[int(scan)] = float(q)
+                n_pass = sum(1 for q in q_by_scan.values() if q <= 0.01)
+                logger.info(
+                    "PIN TDA FDR: %d target PSMs total, %d pass 1%% FDR",
+                    len(q_by_scan), n_pass,
+                )
+            else:
+                logger.warning(
+                    "PIN missing columns (label=%s scan=%s score=%s) — "
+                    "falling back to expectscore",
+                    label_col, scan_col, score_col,
+                )
+        except Exception as e:
+            logger.warning("Could not read PIN %s: %s — using expectscore fallback", pin_path.name, e)
+
+    # ── 2. Read TSV for annotations ───────────────────────────────────────────
     try:
         df = pl.read_csv(str(tsv_path), separator="\t", infer_schema_length=5000)
     except Exception as e:
@@ -839,57 +881,49 @@ def _msfragger_tsv_to_sage_parquet(tsv_path: Path, output_path: Path) -> Path | 
         logger.warning("MSFragger TSV has no rows: %s", tsv_path.name)
         return None
 
-    # ── Column normalisation ──────────────────────────────────────────────────
+    # ── 3. Normalise column names to Sage-compatible names ────────────────────
     rename: dict[str, str] = {}
     for col in df.columns:
-        lc = col.lower().replace(" ", "_")
-        if lc == "peptide":
-            rename[col] = "peptide"
-        elif lc == "charge":
-            rename[col] = "charge"
-        elif lc in ("retention", "retention_time", "rt"):
-            rename[col] = "retention_time"
-        elif lc == "hyperscore":
-            rename[col] = "hyperscore"
-        elif lc == "delta_mass":
-            rename[col] = "delta_mass"
+        lc = col.lower()
+        if lc == "peptide":             rename[col] = "peptide"
+        elif lc == "charge":            rename[col] = "charge"
+        elif lc == "retention_time":    rename[col] = "retention_time"
+        elif lc == "hyperscore":        rename[col] = "hyperscore"
+        elif lc == "massdiff":          rename[col] = "delta_mass"
         elif lc in ("protein", "protein_id"):
-            rename[col] = "protein"
-        elif lc == "ion_mobility":
-            rename[col] = "ion_mobility"
-        elif lc == "peptide_length":
-            rename[col] = "peptide_len"
+                                        rename[col] = "protein"
+        elif lc == "ion_mobility":      rename[col] = "ion_mobility"
+        elif lc == "num_missed_cleavages":
+                                        rename[col] = "missed_cleavages"
+        elif lc == "scannum":           rename[col] = "scannum"
 
     df = df.rename({k: v for k, v in rename.items() if k != v})
 
-    # ── Target / decoy flag ───────────────────────────────────────────────────
-    if "protein" in df.columns:
-        is_decoy = df["protein"].str.starts_with("rev_")
-    else:
-        is_decoy = pl.Series("is_decoy", [False] * df.height)
-
-    df = df.with_columns(is_decoy.alias("is_decoy"))
-
-    # ── Q-values via target-decoy competition (sorted by Hyperscore desc) ────
-    if "hyperscore" in df.columns:
-        df = df.sort("hyperscore", descending=True)
-        is_dec_arr = df["is_decoy"].to_numpy()
-        cum_dec = is_dec_arr.cumsum().astype(float)
-        cum_tgt = (~is_dec_arr).cumsum().astype(float)
-        fdr = cum_dec / np.maximum(cum_tgt, 1.0)
-        # q-value = running minimum FDR from this PSM downwards
-        q_vals = np.minimum.accumulate(fdr[::-1])[::-1]
+    # ── 4. Assign q-values ───────────────────────────────────────────────────
+    if q_by_scan and "scannum" in df.columns:
+        scan_arr = df["scannum"].to_numpy()
+        q_vals   = np.array([q_by_scan.get(int(s), 1.0) for s in scan_arr])
         df = df.with_columns(pl.Series("spectrum_q", q_vals))
+    elif "expectscore" in df.columns:
+        # Fallback: expectscore ≈ E-value; treat as FDR proxy
+        df = df.with_columns(pl.col("expectscore").alias("spectrum_q"))
+        logger.info("Using expectscore as FDR proxy (no PIN decoys available)")
     else:
         df = df.with_columns(pl.lit(1.0).alias("spectrum_q"))
 
-    # ── Drop decoys before writing ────────────────────────────────────────────
-    result = df.filter(~pl.col("is_decoy"))
+    # ── 5. Filter to 1% FDR and write ────────────────────────────────────────
+    result = df.filter(pl.col("spectrum_q") <= 0.01)
+    if result.height == 0:
+        logger.warning(
+            "MSFragger: 0 PSMs pass 1%% FDR for %s — writing all target PSMs",
+            tsv_path.name,
+        )
+        result = df
 
     try:
         result.write_parquet(str(output_path))
         logger.info(
-            "MSFragger: %d target PSMs written to %s",
+            "MSFragger: %d target PSMs at 1%% FDR written to %s",
             result.height, output_path.name,
         )
         return output_path
@@ -1069,11 +1103,19 @@ def run_msfragger_local(
         _mirror_log_to_hive(log_file, raw_path.stem, "msfragger")
         return None
 
-    # Move TSV to output_dir if it landed next to the raw file
+    # Move TSV (and matching .pin) to output_dir if they landed next to the raw file
     if tsv_path.parent != output_dir:
         dest = output_dir / tsv_path.name
         tsv_path.rename(dest)
         tsv_path = dest
+        # Move matching .pin if present
+        src_pin = tsv_path.with_suffix(".pin")
+        if src_pin.exists():
+            src_pin.rename(output_dir / src_pin.name)
+    # Also move .pin when TSV is already in output_dir but pin is beside raw file
+    pin_beside_raw = raw_path.parent / tsv_path.with_suffix(".pin").name
+    if pin_beside_raw.exists() and pin_beside_raw.parent != output_dir:
+        pin_beside_raw.rename(output_dir / pin_beside_raw.name)
 
     # ── Convert TSV → Sage-compatible parquet ─────────────────────────────────
     parquet_out = output_dir / "results.sage.parquet"

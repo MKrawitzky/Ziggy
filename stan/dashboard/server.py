@@ -3753,12 +3753,15 @@ def _run_process_job(run_id: str, run: dict, inst_cfg: dict) -> None:
 
         _set("running", "Extracting QC metrics…")
         grad_min = inst_cfg.get("gradient_length_min")
-        # ddaPASEF output is a DIA-NN report.parquet → extract_dia_metrics
-        # Thermo/generic DDA output is a Sage results.sage.parquet → extract_dda_metrics
-        if _is_dia(mode) or _is_bruker_dda(mode):
-            metrics = extract_dia_metrics(result_path, gradient_min=float(grad_min) if grad_min else None)
-        else:
+        # Route to the correct extractor based on the result file, not the mode.
+        # DIA-NN → report.parquet → extract_dia_metrics
+        # Sage / MSFragger → results.sage.parquet → extract_dda_metrics
+        # (Historically ddaPASEF used DIA-NN → report.parquet, but MSFragger now
+        # produces results.sage.parquet for Bruker DDA — check the filename.)
+        if result_path.name == "results.sage.parquet":
             metrics = extract_dda_metrics(result_path, gradient_min=float(grad_min) if grad_min else 60)
+        else:
+            metrics = extract_dia_metrics(result_path, gradient_min=float(grad_min) if grad_min else None)
 
         # Update the existing run record with all available metrics.
         # Include every writeable DB column that an extractor might return —
