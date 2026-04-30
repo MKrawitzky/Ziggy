@@ -1297,9 +1297,19 @@ def _run_msfragger_thread(
         search_config=search_config,
     )
 
+    # Use D: for MSFragger temp files — avoids filling the E: data drive with
+    # multi-GB peptide index shards.  Create the dir if needed.
+    msf_tmp = Path("D:/msfragger_tmp")
+    try:
+        msf_tmp.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        msf_tmp = output_dir  # fallback: same dir as output
     cmd = [
         str(java),
-        "-Xmx14g",
+        "-Xmx8g",                           # 14g left no room for native heap (pepindex mmap)
+        f"-Djava.io.tmpdir={msf_tmp}",
+        "-XX:+UseG1GC",
+        "-XX:MaxHeapFreeRatio=20",
     ]
     if bruker_lib and Path(str(bruker_lib)).exists():
         cmd.append(f"-Djava.library.path={bruker_lib}")
@@ -1810,15 +1820,21 @@ def dispatch_comparison_searches(
     if threads <= 0:
         threads = max(2, (os.cpu_count() or 4) // 2)
 
-    # Build the search config that all engines will use
-    search_config = _resolve_search_config(workflow)
-    logger.info("dispatch_comparison_searches: workflow=%s → %s",
-                workflow or "default", search_config.get("enzyme"))
+    # Build the search config that all engines will use.
+    # For comparison searches we intentionally use a STANDARD tryptic preset
+    # regardless of the run's workflow.  This keeps all engines on a level
+    # playing field (HLA semi-specific generates ~109M peptides and OOMs MSFragger),
+    # and the primary DIA-NN/Sage result already captures workflow-specific IDs.
+    search_config = _WORKFLOW_PRESETS.get("hela_digest") or _WORKFLOW_PRESETS[_DEFAULT_WORKFLOW]
+    logger.info("dispatch_comparison_searches: workflow=%s (comparison locked to hela_digest)",
+                workflow or "default")
 
     # Accept AcquisitionMode enum objects or plain strings
     mode_str = mode.value if hasattr(mode, "value") else str(mode)
     is_dia = mode_str in ("DIA", "diaPASEF")
-    comparison_base = output_base / "_comparison"
+
+    # Use D: drive for comparison output — E: is the data drive and fills up fast
+    comparison_base = Path("D:/ziggy_comparison")
 
     # ── MSFragger (requires FragPipe) ────────────────────────────────────────
     fragpipe = _find_fragpipe()
