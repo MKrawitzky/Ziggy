@@ -16,6 +16,34 @@
     const _isDdaPreset    = key => key && key.includes('_dda');
     const _isDiaPreset    = key => key && key.includes('_dia');
 
+    // ── Engine / mode validator ──────────────────────────────────────────────
+    // DDA presets use Sage/MSFragger; everything else uses DIA-NN.
+    // Returns { hard: [{run_name, mode, reason}], soft: [...] }
+    // hard = will definitely fail (DIA file → DDA engine)
+    // soft = will likely produce bad results (DDA file → DIA engine)
+    const _DDA_PRESETS = new Set(['mhc_class_i_dda', 'mhc_class_ii_dda']);
+    const _modeIsDia = m => m && /dia/i.test(m);
+    const _modeIsDda = m => m && /dda/i.test(m);
+
+    function computeEngineConflicts(selectedRuns, presetKey) {
+      if (!presetKey || !selectedRuns.length) return { hard: [], soft: [] };
+      const presetIsDda = _DDA_PRESETS.has(presetKey);
+      const hard = [], soft = [];
+      for (const r of selectedRuns) {
+        const m = r.mode || '';
+        if (presetIsDda && _modeIsDia(m)) {
+          // DIA-PASEF file + DDA engine — engine reads the wrong scan type, will fail or produce no results
+          hard.push({ run_name: r.run_name, mode: m,
+            reason: `${m} acquisition cannot be searched with a DDA engine (Sage/MSFragger requires MS2 from ddaPASEF)` });
+        } else if (!presetIsDda && _modeIsDda(m)) {
+          // ddaPASEF file + DIA engine — DIA-NN will try to quantify DDA data, results unreliable
+          soft.push({ run_name: r.run_name, mode: m,
+            reason: `${m} acquisition with DIA-NN may produce unreliable results — consider a DDA preset instead` });
+        }
+      }
+      return { hard, soft };
+    }
+
     function SearchAssistantTab() {
       const { data: unsearched, loading: unsearchedLoading, refetch: refetchUnsearched } = useFetch('/api/search/unsearched');
       const { data: presets,    loading: presetsLoading  } = useFetch('/api/search/presets');
@@ -70,6 +98,12 @@
       const presetList = presets ? Object.entries(presets) : [];
       const fastaList  = Array.isArray(fastas)    ? fastas    : [];
       const libList    = Array.isArray(libraries) ? libraries : [];
+
+      const selectedRuns = unsearchedList.filter(r => selected.has(r.id));
+      const engineConflicts = useMemo(
+        () => computeEngineConflicts(selectedRuns, chosenPreset),
+        [selectedRuns.map(r=>r.id).join(','), chosenPreset]
+      );
 
       // Group unsearched by instrument
       const byInstrument = useMemo(() => {
@@ -430,27 +464,42 @@
                   const meta = PRESET_META[key] || {};
                   const isSelected = chosenPreset === key;
                   const engines = p.engines || (p.diann_args ? ['diann'] : ['sage']);
+                  // Per-card conflict check against current selection
+                  const cardConflicts = computeEngineConflicts(selectedRuns, key);
+                  const hasHard = cardConflicts.hard.length > 0;
+                  const hasSoft = cardConflicts.soft.length > 0;
+                  const conflictBorderColor = hasHard ? '#ef4444' : hasSoft ? '#f59e0b' : null;
                   return React.createElement('div', {
                     key,
                     onClick: () => setChosenPreset(key),
                     style:{
                       padding:'0.75rem 0.9rem',
                       borderRadius:'0.55rem',
-                      border:`2px solid ${isSelected ? (meta.color||'#DAAA00') : 'var(--border)'}`,
-                      background: isSelected ? `${(meta.color||'#DAAA00')}15` : 'var(--surface)',
+                      border:`2px solid ${isSelected ? (conflictBorderColor || meta.color||'#DAAA00') : (conflictBorderColor ? conflictBorderColor+'88' : 'var(--border)')}`,
+                      background: isSelected ? `${(conflictBorderColor || meta.color||'#DAAA00')}15` : 'var(--surface)',
                       cursor:'pointer', transition:'all 0.15s',
                     },
                   },
                     React.createElement('div', {style:{display:'flex',alignItems:'center',gap:'0.4rem',marginBottom:'0.3rem'}},
                       React.createElement('span', {style:{fontSize:'1.1rem'}}, p.icon || meta.icon || '🔍'),
-                      React.createElement('span', {style:{fontWeight:700,fontSize:'0.85rem',color:isSelected?(meta.color||'#DAAA00'):'var(--text)',flex:1}}, p.label),
+                      React.createElement('span', {style:{fontWeight:700,fontSize:'0.85rem',color:isSelected?(conflictBorderColor||meta.color||'#DAAA00'):'var(--text)',flex:1}}, p.label),
                       engines.map(e => React.createElement('span', {key:e, style:{
                         fontSize:'0.6rem', fontWeight:700,
                         background: e==='diann' ? 'rgba(34,211,238,0.15)' : e==='sage' ? 'rgba(52,211,153,0.15)' : 'rgba(251,191,36,0.15)',
                         color:      e==='diann' ? '#22d3ee'               : e==='sage' ? '#34d399'               : '#fbbf24',
                         border:     `1px solid ${e==='diann' ? '#22d3ee44' : e==='sage' ? '#34d39944' : '#fbbf2444'}`,
                         borderRadius:'0.2rem', padding:'0.05rem 0.3rem',
-                      }}, e.toUpperCase()))
+                      }}, e.toUpperCase())),
+                      hasHard && React.createElement('span', {title: cardConflicts.hard.map(c=>c.reason).join('\n'), style:{
+                        fontSize:'0.6rem', fontWeight:700, background:'rgba(239,68,68,0.15)',
+                        color:'#ef4444', border:'1px solid #ef444488',
+                        borderRadius:'0.2rem', padding:'0.05rem 0.3rem', cursor:'help',
+                      }}, `✗ ${cardConflicts.hard.length} MODE CONFLICT`),
+                      !hasHard && hasSoft && React.createElement('span', {title: cardConflicts.soft.map(c=>c.reason).join('\n'), style:{
+                        fontSize:'0.6rem', fontWeight:700, background:'rgba(245,158,11,0.15)',
+                        color:'#f59e0b', border:'1px solid #f59e0b88',
+                        borderRadius:'0.2rem', padding:'0.05rem 0.3rem', cursor:'help',
+                      }}, `⚠ ${cardConflicts.soft.length} MISMATCH`)
                     ),
                     React.createElement('div', {style:{fontSize:'0.73rem',color:'var(--muted)',lineHeight:'1.4'}}, p.description),
                     isSelected && (p.diann_args||p.sage_enzyme) && React.createElement('div', {style:{
@@ -463,6 +512,37 @@
               )
             );
           })}
+
+          {/* Conflict summary for chosen preset */}
+          {chosenPreset && (engineConflicts.hard.length > 0 || engineConflicts.soft.length > 0) && (
+            <div style={{
+              marginTop:'0.75rem',
+              padding:'0.65rem 0.85rem',
+              borderRadius:'0.45rem',
+              border:`1px solid ${engineConflicts.hard.length > 0 ? '#ef4444' : '#f59e0b'}`,
+              background: engineConflicts.hard.length > 0 ? 'rgba(239,68,68,0.08)' : 'rgba(245,158,11,0.08)',
+            }}>
+              <div style={{fontWeight:700, fontSize:'0.82rem', marginBottom:'0.35rem',
+                           color: engineConflicts.hard.length > 0 ? '#ef4444' : '#f59e0b'}}>
+                {engineConflicts.hard.length > 0 ? '✗ Engine / mode conflict' : '⚠ Acquisition mode mismatch'}
+              </div>
+              {engineConflicts.hard.map((c, i) => (
+                <div key={i} style={{fontSize:'0.75rem', color:'#fca5a5', marginBottom:'0.15rem'}}>
+                  <strong>{c.run_name.replace(/\.d$/,'')}</strong> ({c.mode}) — {c.reason}
+                </div>
+              ))}
+              {engineConflicts.soft.map((c, i) => (
+                <div key={i} style={{fontSize:'0.75rem', color:'#fde68a', marginBottom:'0.15rem'}}>
+                  <strong>{c.run_name.replace(/\.d$/,'')}</strong> ({c.mode}) — {c.reason}
+                </div>
+              ))}
+              {engineConflicts.hard.length > 0 && (
+                <div style={{fontSize:'0.72rem', color:'var(--muted)', marginTop:'0.3rem'}}>
+                  These runs will be skipped by the engine. Deselect them or choose the matching preset.
+                </div>
+              )}
+            </div>
+          )}
 
           <div style={{display:'flex', justifyContent:'space-between', marginTop:'1rem'}}>
             <button onClick={() => setStep(1)} style={{padding:'0.4rem 1rem', fontSize:'0.82rem',
@@ -696,6 +776,27 @@
               ))}
             </div>
           </div>
+
+          {/* Engine conflict warning in review step */}
+          {(engineConflicts.hard.length > 0 || engineConflicts.soft.length > 0) && (
+            <div style={{
+              padding:'0.65rem 0.85rem', borderRadius:'0.45rem', marginBottom:'0.75rem',
+              border:`1px solid ${engineConflicts.hard.length > 0 ? '#ef4444' : '#f59e0b'}`,
+              background: engineConflicts.hard.length > 0 ? 'rgba(239,68,68,0.08)' : 'rgba(245,158,11,0.08)',
+            }}>
+              <div style={{fontWeight:700, fontSize:'0.82rem', marginBottom:'0.3rem',
+                           color: engineConflicts.hard.length > 0 ? '#ef4444' : '#f59e0b'}}>
+                {engineConflicts.hard.length > 0
+                  ? `✗ ${engineConflicts.hard.length} run${engineConflicts.hard.length>1?'s':''} will fail — wrong engine for acquisition mode`
+                  : `⚠ ${engineConflicts.soft.length} run${engineConflicts.soft.length>1?'s':''} may produce unreliable results`}
+              </div>
+              {[...engineConflicts.hard, ...engineConflicts.soft].map((c, i) => (
+                <div key={i} style={{fontSize:'0.73rem', color: i < engineConflicts.hard.length ? '#fca5a5' : '#fde68a'}}>
+                  • {c.run_name.replace(/\.d$/,'')} ({c.mode})
+                </div>
+              ))}
+            </div>
+          )}
 
           {submitError && (
             <div style={{

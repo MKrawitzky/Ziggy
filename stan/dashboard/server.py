@@ -5279,8 +5279,8 @@ SEARCH_PRESETS = {
             "--missed-cleavages", "0",
             "--min-pr-charge", "1", "--max-pr-charge", "3",
             "--min-pr-mz", "350",  "--max-pr-mz", "1100",
-            "--var-mod", "UniMod:35,15.9949,M",
-            "--var-mod", "UniMod:7,0.9840,NQ",
+            "--var-mod", "UniMod:35,3,M",
+            "--var-mod", "UniMod:7,3,NQ",
             "--cut", "*",
             "--no-prot-inf",
             "--smart-profiling",
@@ -5305,8 +5305,8 @@ SEARCH_PRESETS = {
             "--missed-cleavages", "0",
             "--min-pr-charge", "2", "--max-pr-charge", "4",
             "--min-pr-mz", "450",  "--max-pr-mz", "1400",
-            "--var-mod", "UniMod:35,15.9949,M",
-            "--var-mod", "UniMod:7,0.9840,NQ",
+            "--var-mod", "UniMod:35,3,M",
+            "--var-mod", "UniMod:7,3,NQ",
             "--cut", "*",
             "--no-prot-inf",
             "--smart-profiling",
@@ -5352,7 +5352,8 @@ async def api_search_unsearched() -> list[dict]:
         con.row_factory = _sqlite3_sa.Row
         rows = con.execute(
             "SELECT id, run_name, instrument, raw_path, run_date, mode, lc_system "
-            "FROM runs WHERE result_path IS NULL OR n_proteins IS NULL "
+            "FROM runs WHERE result_path IS NULL "
+            "   OR (n_proteins IS NULL AND n_psms IS NULL AND n_precursors IS NULL) "
             "ORDER BY run_date DESC, run_name"
         ).fetchall()
     result = []

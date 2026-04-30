@@ -461,6 +461,18 @@ def extract_dda_metrics(
     n_psms = filt.height
     n_peptides = filt[peptide_col].n_unique() if peptide_col else 0
 
+    protein_col = _find_column(df, ["protein_id", "protein", "proteins", "Protein.Group"])
+    n_proteins = 0
+    if protein_col:
+        # Each cell may contain semicolon-delimited protein IDs; count unique leading IDs
+        all_prots = set()
+        for val in filt[protein_col].drop_nulls().to_list():
+            for p in str(val).split(";"):
+                p = p.strip()
+                if p:
+                    all_prots.add(p)
+        n_proteins = len(all_prots)
+
     median_score = float(filt[score_col].median()) if score_col else 0.0
     pct_score_gt30 = (
         float((filt[score_col] > 30).mean()) if score_col else 0.0
@@ -524,6 +536,7 @@ def extract_dda_metrics(
     return {
         "n_psms": n_psms,
         "n_peptides_dda": n_peptides,
+        "n_proteins": n_proteins,
         "median_hyperscore": median_score,
         "pct_hyperscore_gt30": pct_score_gt30,
         "ms2_scan_rate": ms2_scan_rate,
