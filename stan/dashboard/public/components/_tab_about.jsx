@@ -520,6 +520,24 @@
                          'CCS conformational density map with charge corridors','MA plot, shift map, dynamic range + charge bars',
                          'm/z target finder across run pairs'],
                 },
+                {
+                  icon:'🌀', title:'Chimerys TIMS Analysis',
+                  items:['Novel chimeric collision landscape: m/z × 1/K₀ scatter of co-fragmented precursors',
+                         'TIMS separation efficiency: chimeric rate by 1/K₀ bin reveals where IMS fails',
+                         'Scan proxy grouping (RT_bin=2s × MZ_bin=0.012Da) to detect co-isolated precursors',
+                         'Multiplicity histogram: singleton vs 2-way vs 3+ chimeric scans',
+                         'Rescued peptides count: IDs that Chimerys resolved from chimeric spectra',
+                         'Auto-ingests MSAID Platform .parquet files — download once via Config tab'],
+                },
+                {
+                  icon:'🔩', title:'Engine Comparison Hub',
+                  items:['DIA-NN, MSFragger-DIA, Sage, MSFragger-DDA, X!Tandem, MaxQuant, Comet',
+                         'Chimerys (MSAID): cloud chimeric deconvolution — parquet auto-ingested',
+                         'Andromeda (MaxQuant 2.x standalone): .apar XML params, msms.txt output parsed',
+                         'PrOLuCID (Yates-lab): JAR auto-detected, SQT format parsed with Xcorr cutoffs',
+                         'Engines auto-skip DIA/DDA mismatches and not-installed tools',
+                         'Comparison searches fire automatically after every primary search'],
+                },
               ].map(({icon, title, items}) => (
                 <div key={title} style={{padding:'0.75rem', background:'var(--bg)', borderRadius:'0.5rem', border:'1px solid var(--border)'}}>
                   <div style={{fontWeight:700, fontSize:'0.95rem', marginBottom:'0.4rem'}}>{icon} {title}</div>
@@ -536,6 +554,10 @@
             <h3>What's New · ZIGGY · April 2026</h3>
             <div style={{display:'flex', flexDirection:'column', gap:'0.5rem', marginTop:'0.4rem'}}>
               {[
+                {tag:'NEW', color:'var(--pass)', text:'🌀 Chimerys tab: novel 4D chimeric collision analysis powered by MSAID Platform parquets. Groups PSMs by scan proxy (RT_bin=2s × MZ_bin=0.012Da) to map exactly where in m/z × 1/K₀ space TIMS separation breaks down. Panels: Chimeric Collision Landscape (scatter of co-isolated precursors), TIMS Separation Efficiency (chimeric rate by 1/K₀ bin), Peptide Length Distribution, and Stats Summary. Auto-ingests on Config tab download — no manual steps.'},
+                {tag:'NEW', color:'var(--pass)', text:'🔩 Andromeda engine in comparison table: MaxQuant 2.x standalone Andromeda auto-discovered at common install paths. Writes .apar XML parameter file, runs search, parses msms.txt / peptides.txt / proteinGroups.txt. Sky-blue column in Engine Comparison view.'},
+                {tag:'NEW', color:'var(--pass)', text:'🔩 PrOLuCID engine in comparison table: Yates-lab Java search engine. JAR auto-detected at common locations; .d files converted to .ms2 via msconvert (mzXML fallback). SQT output parsed with charge-specific Xcorr cutoffs (z=1: ≥1.5, z=2: ≥2.0, z≥3: ≥2.5). Rose-red column in Engine Comparison view.'},
+                {tag:'FIX', color:'#60a5fa', text:'MSFragger comparison columns were all empty (✗) even after successful search: MSFragger writes TSV output to the INPUT file\'s parent directory, not the comparison output dir. Fixed: ZIGGY now copies TSVs from the raw file directory to the output dir after search, with direct-parse fallback. Also fixed: MSFragger TSV uses `expectscore` column (not `expect`/`e-value`) — parser now checks all variants.'},
                 {tag:'FIX', color:'#60a5fa', text:'MSFragger primary DDA engine for Bruker timsTOF: Sage 0.14.x crashes (STATUS_STACK_BUFFER_OVERRUN) when reading large .d files via timsrust. ZIGGY now auto-detects MSFragger (FragPipe at C:/Users/Admin/Desktop/Fragpipe/) and uses it as the primary engine for all Bruker DDA searches — reads .d natively via timsdata.dll, no mzML conversion needed. Falls back to Sage if MSFragger is unavailable. TSV output converted to Sage-compatible parquet with TDA q-values in-process.'},
                 {tag:'NEW', color:'var(--pass)', text:'🔍 Comparison Search Engine Hub: every acquisition now auto-searches across MSFragger, X!Tandem, Comet, and MaxQuant in parallel — results appear in the Searches tab. Engines auto-skip when not installed (no configuration required).'},
                 {tag:'NEW', color:'var(--pass)', text:'🎯 Workflow-aware search params: run names are pattern-matched to presets (hela_digest, phospho, mhc_class_i_dda/dia, mhc_class_ii_dda/dia, tmt, single_cell) — each engine gets the correct enzyme, mods, and peptide length window automatically.'},
