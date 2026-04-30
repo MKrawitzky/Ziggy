@@ -1308,8 +1308,6 @@ def _run_msfragger_thread(
         str(java),
         "-Xmx8g",                           # 14g left no room for native heap (pepindex mmap)
         f"-Djava.io.tmpdir={msf_tmp}",
-        "-XX:+UseG1GC",
-        "-XX:MaxHeapFreeRatio=20",
     ]
     if bruker_lib and Path(str(bruker_lib)).exists():
         cmd.append(f"-Djava.library.path={bruker_lib}")
