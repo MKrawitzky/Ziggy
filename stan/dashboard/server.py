@@ -4115,16 +4115,25 @@ async def api_recompute_metrics(run_id: str) -> dict:
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    report_path = _resolve_report_path(run)
-    if not report_path:
-        return {"ok": False, "error": "No report.parquet found for this run."}
+    mode = (run.get("mode") or "").lower()
+    is_dda = "dda" in mode
+
+    if is_dda:
+        report_path = _resolve_sage_path(run)
+        if not report_path:
+            return {"ok": False, "error": "No results.sage.parquet found for this DDA run."}
+    else:
+        report_path = _resolve_report_path(run)
+        if not report_path:
+            # Fall back to sage parquet in case mode is wrong
+            report_path = _resolve_sage_path(run)
+        if not report_path:
+            return {"ok": False, "error": "No report.parquet found for this run."}
 
     try:
         from stan.metrics.extractor import extract_dia_metrics, extract_dda_metrics
 
-        # Detect DDA vs DIA by mode or file name
-        mode = (run.get("mode") or "").lower()
-        is_dda = "dda" in mode or "sage" in str(report_path).lower()
+        is_dda = is_dda or report_path.name == "results.sage.parquet"
 
         if is_dda:
             metrics = extract_dda_metrics(report_path)
