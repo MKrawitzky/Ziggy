@@ -369,20 +369,21 @@ def _convert_d_to_mzml(d_path: Path, output_dir: Path) -> Path | None:
     msconvert = _find_msconvert()
     if msconvert:
         log_path = output_dir / "msconvert.log"
-        # Optimized timsTOF settings:
-        # --filter "peakPicking vendor msLevel=1-2"  → vendor peak picking preserves shape
-        # --filter "zeroSamples removeExtra"          → strip trailing zeros (smaller file)
-        # --64                                        → 64-bit m/z precision
-        # --zlib                                      → compress output
-        # --indexed mzML                              → indexed for random access
+        # CRITICAL for Bruker ddaPASEF: --ddaProcessing combines all ion-mobility
+        # sub-scans for the same precursor into a single MS2 spectrum.
+        # Without this flag every TIMS step writes as its own spectrum →
+        # a 1 GB .d file expands to 14–18 GB mzML.  With it, output is ~1–3 GB.
+        # --32 halves float array size (sufficient precision for peptide IDs).
+        # --filter "msLevel 2" keeps MS2 only — DDA engines don't use MS1 from mzML.
         cmd = [
             str(msconvert),
             str(d_path),
             "--mzML",
-            "--64",
-            "--zlib",
-            "--filter", "peakPicking vendor msLevel=1-2",
+            "--ddaProcessing",
+            "--filter", "msLevel 2",
             "--filter", "zeroSamples removeExtra",
+            "--zlib",
+            "--32",
             "--outdir", str(output_dir),
         ]
         logger.info("msconvert: converting %s → mzML (timsTOF optimized)", d_path.name)
@@ -1381,7 +1382,7 @@ _MAXQUANT_PARAM_TEMPLATE = """\
   </fastaFilesProteogenomics>
   <fastaFilesFirstSearch>
   </fastaFilesFirstSearch>
-  <fixedSearchFolder></fixedSearchFolder>
+  <fixedSearchFolder>{output_dir}</fixedSearchFolder>
   <andromedaCacheSize>350000</andromedaCacheSize>
   <advancedRatios>True</advancedRatios>
   <pValueThres>0.005</pValueThres>
