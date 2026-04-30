@@ -16,6 +16,59 @@
     const _isDdaPreset    = key => key && key.includes('_dda');
     const _isDiaPreset    = key => key && key.includes('_dia');
 
+    // ── Parse preset API data → human-readable params ────────────────────────
+    function _parsePresetParams(p) {
+      if (!p) return {};
+      const args = p.diann_args || [];
+      const getArg = flag => { const i = args.indexOf(flag); return i >= 0 ? args[i+1] : null; };
+      const engine   = (p.engines || ['?'])[0];
+      const minLen   = getArg('--min-pep-len') || (p.sage_min_len != null ? String(p.sage_min_len) : '?');
+      const maxLen   = getArg('--max-pep-len') || (p.sage_max_len != null ? String(p.sage_max_len) : '?');
+      const mc       = getArg('--missed-cleavages') || '1';
+      const cut      = getArg('--cut');
+      const enzyme   = (p.sage_enzyme === 'nonspecific' || cut === '')
+                         ? 'non-specific'
+                         : (cut === 'K*,R*' || cut === 'K,R') ? 'trypsin'
+                         : cut || p.sage_enzyme || 'trypsin';
+      const varModArgs = args.reduce((acc, a, i) => args[i-1]==='--var-mod' ? [...acc, a] : acc, []);
+      const mods     = varModArgs.map(m => { const parts=m.split(','); return parts.length>=1?parts[0]:m; });
+      if (args.includes('--fixed-mod')) {
+        const fi = args.indexOf('--fixed-mod');
+        if (fi>=0 && args[fi+1]) { const fm=args[fi+1].split(','); mods.push(fm[0]+' (fixed)'); }
+      }
+      const chargeHint = engine === 'sage' && p.sage_min_len <= 8 ? 'z=1–3' : 'z=2–4';
+      return { engine, minLen, maxLen, mc, enzyme, mods, chargeHint };
+    }
+
+    // ── Preset parameter summary card ─────────────────────────────────────────
+    function PresetParamSummary({ presetData, color }) {
+      if (!presetData) return null;
+      const { engine, minLen, maxLen, mc, enzyme, mods, chargeHint } = _parsePresetParams(presetData);
+      const col = color || '#DAAA00';
+      const rows = [
+        { k:'Engine',    v: engine==='diann' ? 'DIA-NN' : engine==='sage' ? 'Sage' : engine,
+                         c: engine==='diann' ? '#22d3ee' : '#34d399' },
+        { k:'Enzyme',    v: enzyme,
+                         c: enzyme==='non-specific' ? '#f472b6' : 'var(--text)' },
+        { k:'Length',    v: `${minLen}–${maxLen} aa`, c:'var(--text)' },
+        { k:'Missed MC', v: mc,                       c:'var(--muted)' },
+        { k:'Charge',    v: chargeHint,               c:'var(--muted)' },
+        mods.length && { k:'Mods', v: mods.join(', '), c:'#a78bfa' },
+      ].filter(Boolean);
+      return React.createElement('div',{style:{
+        display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(110px,1fr))',
+        gap:'0.35rem',marginTop:'0.55rem',
+      }},
+        rows.map(r => React.createElement('div',{key:r.k,style:{
+          background:'rgba(0,0,0,0.35)',borderRadius:'0.3rem',padding:'0.3rem 0.45rem',
+          border:`1px solid ${col}22`,
+        }},
+          React.createElement('div',{style:{fontSize:'0.58rem',color:'var(--muted)',letterSpacing:'0.05em',textTransform:'uppercase',marginBottom:'0.12rem'}},r.k),
+          React.createElement('div',{style:{fontSize:'0.76rem',fontWeight:600,color:r.c}},r.v),
+        ))
+      );
+    }
+
     // ── Engine / mode validator ──────────────────────────────────────────────
     // DDA presets use Sage/MSFragger; everything else uses DIA-NN.
     // Returns { hard: [{run_name, mode, reason}], soft: [...] }
@@ -49,6 +102,7 @@
       const { data: presets,    loading: presetsLoading  } = useFetch('/api/search/presets');
       const { data: fastas,     loading: fastasLoading   } = useFetch('/api/fasta');
       const { data: libraries,  loading: librariesLoading} = useFetch('/api/libraries');
+      const { data: savedDefaults } = useFetch('/api/search/defaults');
 
       // wizard state
       const [step, setStep]               = useState(1);   // 1=select runs  2=preset  3=configure  4=review
@@ -93,6 +147,23 @@
         const id = setInterval(poll, 2000);
         return () => clearInterval(id);
       }, [expandedJob]);
+
+      // Auto-fill FASTA/library from saved defaults when a preset is chosen
+      const PRESET_FAMILY_MAP = {
+        hela_digest:'tryptic', single_cell:'single_cell', phospho:'phospho', tmt:'tmt',
+        mhc_class_i_dda:'immuno_class_i', mhc_class_i_dia:'immuno_class_i',
+        mhc_class_ii_dda:'immuno_class_ii', mhc_class_ii_dia:'immuno_class_ii',
+      };
+      React.useEffect(() => {
+        if (!chosenPreset || !savedDefaults) return;
+        const family = PRESET_FAMILY_MAP[chosenPreset];
+        const def = family && savedDefaults[family];
+        if (def) {
+          if (def.fasta_path && !fastaPath) setFastaPath(def.fasta_path);
+          if (def.library_path && !libraryPath) setLibraryPath(def.library_path);
+          if (def.extra_args && !extraArgs) setExtraArgs(def.extra_args);
+        }
+      }, [chosenPreset, savedDefaults]);
 
       const unsearchedList = Array.isArray(unsearched) ? unsearched : [];
       const presetList = presets ? Object.entries(presets) : [];
@@ -412,10 +483,79 @@
             ))
           )}
 
+          {/* ── Auto-detection summary ──────────────────────────────── */}
+          {selected.size > 0 && (() => {
+            const selRuns = unsearchedList.filter(r => selected.has(r.id));
+            const detected = [...new Set(selRuns.map(r => r.suggested_preset).filter(Boolean))];
+            const consensus = detected.length === 1 ? detected[0] : null;
+            const presetD   = consensus && presets ? presets[consensus] : null;
+            const meta      = consensus ? (PRESET_META[consensus] || {}) : {};
+            const col       = meta.color || '#DAAA00';
+
+            const conflictsForConsensus = consensus ? computeEngineConflicts(selRuns, consensus) : {hard:[],soft:[]};
+            const hasConflict = conflictsForConsensus.hard.length > 0;
+
+            // Can we skip directly to review? Only if FASTA is already filled (from defaults).
+            const family = consensus && PRESET_FAMILY_MAP[consensus];
+            const def    = family && savedDefaults && savedDefaults[family];
+            const hasFasta = !!(fastaPath || (def && def.fasta_path));
+
+            const smartSearch = () => {
+              setChosenPreset(consensus);
+              if (def) {
+                if (def.fasta_path && !fastaPath) setFastaPath(def.fasta_path);
+                if (def.library_path && !libraryPath) setLibraryPath(def.library_path);
+                if (def.extra_args && !extraArgs) setExtraArgs(def.extra_args);
+              }
+              setStep(hasFasta ? 4 : 3);
+            };
+
+            if (!consensus && detected.length > 1) {
+              return React.createElement('div',{style:{
+                marginTop:'0.75rem',padding:'0.6rem 0.85rem',borderRadius:'0.4rem',
+                border:'1px solid #f59e0b55',background:'rgba(245,158,11,0.06)',
+                fontSize:'0.78rem',color:'#f59e0b',
+              }},
+                '⚠ Selected runs have mixed preset suggestions (',
+                detected.join(', '),
+                '). Choose a preset manually in step 2.');
+            }
+            if (!consensus) return null;
+
+            return React.createElement('div',{style:{
+              marginTop:'0.85rem',padding:'0.85rem 1rem',borderRadius:'0.5rem',
+              border:`1px solid ${hasConflict?'#ef4444':col}55`,
+              background:hasConflict?'rgba(239,68,68,0.06)':`${col}08`,
+            }},
+              React.createElement('div',{style:{display:'flex',alignItems:'center',gap:'0.55rem',flexWrap:'wrap'}},
+                React.createElement('span',{style:{fontSize:'1.2rem'}},meta.icon||'🔍'),
+                React.createElement('div',{style:{flex:1,minWidth:0}},
+                  React.createElement('div',{style:{fontWeight:700,fontSize:'0.9rem',color:hasConflict?'#ef4444':col}},
+                    hasConflict ? '✗ Mode conflict detected' : 'ZIGGY auto-detected: '+presetD?.label),
+                  React.createElement('div',{style:{fontSize:'0.72rem',color:'var(--muted)',marginTop:'0.1rem'}},
+                    hasConflict
+                      ? conflictsForConsensus.hard.map(c=>`${c.run_name.replace(/\.d$/,'')} (${c.mode}): ${c.reason}`).join(' · ')
+                      : `${selected.size} run${selected.size>1?'s':''} · engine: ${(presetD?.engines||[]).join('/')?.toUpperCase()} · ${hasFasta?'FASTA configured ✓':'configure FASTA in next step'}`
+                  ),
+                ),
+                !hasConflict && React.createElement('button',{
+                  onClick: smartSearch,
+                  title: hasFasta ? 'Skip to review — FASTA already configured' : 'Skip preset selection, go to FASTA config',
+                  style:{
+                    padding:'0.4rem 1rem',fontWeight:700,fontSize:'0.8rem',
+                    background:col,color:'#0e0018',
+                    border:'none',borderRadius:'0.4rem',cursor:'pointer',flexShrink:0,
+                    boxShadow:`0 0 10px ${col}55`,
+                  },
+                }, hasFasta ? '⚡ Smart Search' : '⚡ Use This Preset'),
+              ),
+              !hasConflict && React.createElement(PresetParamSummary,{presetData:presetD,color:col}),
+            );
+          })()}
+
           <div style={{marginTop:'1rem', display:'flex', justifyContent:'flex-end'}}>
             <button
               onClick={() => {
-                // Auto-suggest preset based on selected runs
                 const selRuns = unsearchedList.filter(r => selected.has(r.id));
                 const suggestions = [...new Set(selRuns.map(r => r.suggested_preset).filter(Boolean))];
                 if (suggestions.length === 1 && !chosenPreset) setChosenPreset(suggestions[0]);
@@ -430,7 +570,7 @@
                 cursor: selected.size > 0 ? 'pointer' : 'default',
               }}
             >
-              Next →
+              Choose Preset →
             </button>
           </div>
         </div>
@@ -731,6 +871,7 @@
                 <div style={{fontSize:'0.75rem', color:'var(--muted)'}}>
                   {presetData?.description}
                 </div>
+                {presetData && React.createElement(PresetParamSummary,{presetData,color:presetMeta.color})}
               </div>
             </div>
 
