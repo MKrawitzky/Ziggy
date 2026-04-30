@@ -5675,6 +5675,13 @@ async def api_search_submit(body: SearchSubmitRequest) -> dict:
                         cmd += ["--fasta", fasta_path_str]
                     if body.library_path:
                         cmd += ["--lib", body.library_path]
+                    # Fixed mass accuracy prevents DIA-NN auto-optimization crash on timsTOF
+                    _dia_vendor = "bruker" if raw.suffix.lower() == ".d" else "thermo"
+                    if "--mass-acc" not in cmd and "--mass-acc-ms1" not in cmd:
+                        if _dia_vendor == "bruker":
+                            cmd += ["--mass-acc", "15", "--mass-acc-ms1", "15"]
+                        else:
+                            cmd += ["--mass-acc", "20", "--mass-acc-ms1", "10"]
                     cmd += extra_args
                     engine_label = f"DIA-NN {'MHC-' + 'I'*run_immuno if run_immuno else 'DIA'}"
                     job["log"].append(f"  engine: {engine_label}")
@@ -5721,34 +5728,58 @@ async def api_search_submit(body: SearchSubmitRequest) -> dict:
                         continue
 
                 else:
-                    # ── Sage path (DDA / ddaPASEF / immuno) ─────────────────
-                    from stan.search.local import run_sage_local
+                    # ── DDA / immuno path ────────────────────────────────────
+                    # For Bruker .d: prefer MSFragger (reads .d natively,
+                    # avoids Sage timsrust stack-buffer-overrun on large files).
+                    # Fall back to Sage if MSFragger is not installed.
                     vendor = "bruker" if raw.suffix.lower() == ".d" else "thermo"
-                    # Prefer system PATH, then bundled binary shipped with ZIGGY
-                    _bundled_sage = Path(__file__).parent.parent.parent / "tools" / "sage"
-                    _bundled_exe = next(_bundled_sage.rglob("sage.exe"), None) if _bundled_sage.exists() else None
-                    sage_exe = shutil.which("sage") or (str(_bundled_exe) if _bundled_exe else "sage")
-                    engine_label = f"Sage {'MHC-' + 'I'*(run_immuno==1) + 'II'*(run_immuno==2) + (' (non-specific)' if run_immuno else 'DDA')}"
-                    job["log"].append(f"  engine: {engine_label} · {sage_exe}")
-
-                    # community mode uses bundled FASTA; local mode requires user FASTA
                     s_mode = "community" if not fasta_ok else "local"
-                    result_file = run_sage_local(
-                        raw_path=raw,
-                        output_dir=out_dir,
-                        vendor=vendor,
-                        sage_exe=sage_exe,
-                        fasta_path=fasta_path_str if fasta_ok else None,
-                        search_mode=s_mode,
-                        immuno_class=run_immuno,
-                    )
-                    # Surface sage.log in job log so failures are visible
-                    sage_log = out_dir / "sage.log"
-                    if sage_log.exists():
-                        lines = sage_log.read_text(errors="replace").splitlines()
-                        for ln in lines[-40:]:  # last 40 lines
-                            if ln.strip():
-                                job["log"].append(f"    {ln}")
+
+                    msf_jar = None
+                    if vendor == "bruker":
+                        from stan.search.local import _find_msfragger, run_msfragger_local
+                        msf_jar = _find_msfragger()
+
+                    if msf_jar and vendor == "bruker":
+                        msf_label = f"MSFragger {'MHC-' + 'I'*(run_immuno==1) + 'II'*(run_immuno==2) if run_immuno else 'DDA'}"
+                        job["log"].append(f"  engine: {msf_label} · {msf_jar}")
+                        result_file = run_msfragger_local(
+                            raw_path=raw,
+                            output_dir=out_dir,
+                            vendor=vendor,
+                            fasta_path=fasta_path_str if fasta_ok else None,
+                            search_mode=s_mode,
+                            immuno_class=run_immuno,
+                        )
+                        if result_file is None:
+                            job["log"].append("  ⚠ MSFragger failed — retrying with Sage")
+
+                    if (msf_jar is None or vendor != "bruker" or result_file is None):
+                        from stan.search.local import run_sage_local
+                        _bundled_sage = Path(__file__).parent.parent.parent / "tools" / "sage"
+                        _bundled_exe = next(_bundled_sage.rglob("sage.exe"), None) if _bundled_sage.exists() else None
+                        sage_exe = shutil.which("sage") or (str(_bundled_exe) if _bundled_exe else "sage")
+                        engine_label = f"Sage {'MHC-' + 'I'*(run_immuno==1) + 'II'*(run_immuno==2) + (' (non-specific)' if run_immuno else 'DDA')}"
+                        job["log"].append(f"  engine: {engine_label} · {sage_exe}")
+                        result_file = run_sage_local(
+                            raw_path=raw,
+                            output_dir=out_dir,
+                            vendor=vendor,
+                            sage_exe=sage_exe,
+                            fasta_path=fasta_path_str if fasta_ok else None,
+                            search_mode=s_mode,
+                            immuno_class=run_immuno,
+                        )
+
+                    # Surface search log in job log so failures are visible
+                    for log_name in ("msfragger.log", "sage.log"):
+                        search_log = out_dir / log_name
+                        if search_log.exists():
+                            lines = search_log.read_text(errors="replace").splitlines()
+                            for ln in lines[-40:]:
+                                if ln.strip():
+                                    job["log"].append(f"    {ln}")
+                            break
 
                 if result_file and result_file.exists():
                     # Parse result and update DB
