@@ -992,13 +992,19 @@ _ALL_COMPARISON_ENGINES = (
     "xtandem",
     "comet",
     "maxquant",
+    "andromeda",
+    "prolucid",
+    "chimerys",
 )
 
 # Engines that only make sense for DIA data.
 _DIA_ONLY_ENGINES = {"msfragger_dia"}
 
 # Engines that only make sense for DDA data.
-_DDA_ONLY_ENGINES = {"msfragger_dda", "xtandem", "comet", "maxquant"}
+_DDA_ONLY_ENGINES = {"msfragger_dda", "xtandem", "comet", "maxquant", "andromeda", "prolucid"}
+
+# Engines that work on both DIA and DDA (cloud or external platforms).
+_UNIVERSAL_ENGINES = {"chimerys"}
 
 
 def init_run_comparison_statuses(run_id: str, mode: str) -> None:
@@ -1018,7 +1024,9 @@ def init_run_comparison_statuses(run_id: str, mode: str) -> None:
 
     rows = []
     for engine in _ALL_COMPARISON_ENGINES:
-        if is_dia and engine in _DDA_ONLY_ENGINES:
+        if engine in _UNIVERSAL_ENGINES:
+            status = "pending"
+        elif is_dia and engine in _DDA_ONLY_ENGINES:
             status = "not_applicable"
         elif not is_dia and engine in _DIA_ONLY_ENGINES:
             status = "not_applicable"
@@ -1197,8 +1205,10 @@ def _parse_msfragger_tsv(output_dir: Path) -> dict[str, int | None]:
                     row_lower = {k.strip().lower(): v for k, v in row.items()}
 
                     # E-value / expect score filtering at 1 %
+                    # MSFragger uses "expectscore"; X!Tandem/Comet use "expect"/"e-value"
                     expect_str = (
-                        row_lower.get("expect")
+                        row_lower.get("expectscore")
+                        or row_lower.get("expect")
                         or row_lower.get("e-value")
                         or row_lower.get("expectation")
                         or ""
@@ -1328,7 +1338,22 @@ def _run_msfragger_thread(
         logger.error("MSFragger %s error: %s", engine_name, exc)
         return
 
+    # MSFragger writes TSV output alongside the INPUT FILE, not in output_dir.
+    # Copy any TSVs from the raw file's parent into output_dir so the parser finds them.
+    raw_parent = raw_path.parent
+    for tsv in raw_parent.glob(f"{raw_path.stem}*.tsv"):
+        dest = output_dir / tsv.name
+        if not dest.exists():
+            try:
+                shutil.copy2(str(tsv), str(dest))
+            except Exception:
+                pass
+
     stats = _parse_msfragger_tsv(output_dir)
+    # If output_dir still has no TSVs, fall back to parsing directly from raw_parent
+    if stats.get("n_psms") is None:
+        stats = _parse_msfragger_tsv(raw_parent)
+
     _upsert_comparison(
         run_id, engine_name, "done",
         result_path=str(output_dir),
@@ -1897,3 +1922,722 @@ def dispatch_comparison_searches(
             logger.debug("MaxQuant not found — marking not_installed for %s", run_id)
             _upsert_comparison(run_id, "maxquant", "not_installed",
                                error_msg="MaxQuantCmd.exe not found")
+
+    # ── Andromeda (standalone — MaxQuant 2.x ships standalone Andromeda CLI) ──
+    if not is_dia:
+        andromeda_exe = _find_andromeda()
+        if andromeda_exe:
+            andro_fasta = fasta_path
+            if (not andro_fasta or not Path(andro_fasta).exists()) and fragpipe:
+                bundled = _fragpipe_paths(fragpipe).get("bundled_fasta")
+                if bundled and Path(str(bundled)).exists():
+                    andro_fasta = str(bundled)
+            if andro_fasta and Path(andro_fasta).exists():
+                t = threading.Thread(
+                    target=_run_andromeda_thread,
+                    args=(run_id, raw_path, comparison_base / "andromeda",
+                          andromeda_exe, andro_fasta, threads, search_config),
+                    daemon=True,
+                    name=f"comp-andromeda-{run_id[:16]}",
+                )
+                t.start()
+                logger.info("Dispatched comparison: andromeda for %s", raw_path.name)
+            else:
+                _upsert_comparison(run_id, "andromeda", "failed", error_msg="No FASTA available")
+        else:
+            logger.debug("Andromeda not found — marking not_installed for %s", run_id)
+            _upsert_comparison(run_id, "andromeda", "not_installed",
+                               error_msg="Andromeda.exe not found")
+
+    # ── PrOLuCID ─────────────────────────────────────────────────────────────
+    if not is_dia:
+        prolucid_jar = _find_prolucid()
+        if prolucid_jar:
+            pl_fasta = fasta_path
+            if (not pl_fasta or not Path(pl_fasta).exists()) and fragpipe:
+                bundled = _fragpipe_paths(fragpipe).get("bundled_fasta")
+                if bundled and Path(str(bundled)).exists():
+                    pl_fasta = str(bundled)
+            if pl_fasta and Path(pl_fasta).exists():
+                t = threading.Thread(
+                    target=_run_prolucid_thread,
+                    args=(run_id, raw_path, comparison_base / "prolucid",
+                          prolucid_jar, pl_fasta, threads, search_config),
+                    daemon=True,
+                    name=f"comp-prolucid-{run_id[:16]}",
+                )
+                t.start()
+                logger.info("Dispatched comparison: prolucid for %s", raw_path.name)
+            else:
+                _upsert_comparison(run_id, "prolucid", "failed", error_msg="No FASTA available")
+        else:
+            logger.debug("PrOLuCID not found — marking not_installed for %s", run_id)
+            _upsert_comparison(run_id, "prolucid", "not_installed",
+                               error_msg="prolucid.jar not found")
+
+
+# ── Andromeda (standalone) ─────────────────────────────────────────────────────
+
+_ANDROMEDA_SEARCH_PATHS: list[Path] = [
+    # MaxQuant 2.x ships a standalone Andromeda under its bin directory
+    Path("C:/MaxQuant/bin/Andromeda.exe"),
+    Path("D:/MaxQuant/bin/Andromeda.exe"),
+    Path("E:/MaxQuant/bin/Andromeda.exe"),
+    Path.home() / "MaxQuant/bin/Andromeda.exe",
+    Path("C:/tools/Andromeda/Andromeda.exe"),
+    Path("C:/Andromeda/Andromeda.exe"),
+    Path("D:/Andromeda/Andromeda.exe"),
+    Path("E:/Andromeda/Andromeda.exe"),
+    Path.home() / "Desktop/Andromeda/Andromeda.exe",
+    # MaxQuant also installs under Program Files
+    Path("C:/Program Files/MaxQuant/bin/Andromeda.exe"),
+    Path("C:/Program Files (x86)/MaxQuant/bin/Andromeda.exe"),
+]
+
+
+def _find_andromeda() -> Path | None:
+    """Return path to standalone Andromeda.exe or None if not found."""
+    for p in _ANDROMEDA_SEARCH_PATHS:
+        if p.is_file():
+            return p
+    found = shutil.which("Andromeda.exe") or shutil.which("Andromeda")
+    if found:
+        return Path(found)
+    return None
+
+
+# Andromeda enzyme notation (used in apar XML params)
+_ANDROMEDA_ENZYME_MAP: dict[str, str] = {
+    "Trypsin/P":    "Trypsin/P",
+    "Trypsin":      "Trypsin",
+    "LysC":         "LysC",
+    "LysC/P":       "LysC/P",
+    "GluC":         "GluC",
+    "AspN":         "Asp-N",
+    "non-specific": "Unspecific",
+}
+
+
+def _write_andromeda_params(
+    output_dir: Path,
+    raw_path: Path,
+    fasta_path: str,
+    threads: int,
+    search_config: dict | None = None,
+) -> Path:
+    """Write Andromeda standalone parameter XML (apar format) and return path."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sc = search_config or _WORKFLOW_PRESETS[_DEFAULT_WORKFLOW]
+    specificity = sc.get("specificity", "specific")
+    missed      = sc.get("missed_cleavages", 2)
+    min_len     = sc.get("min_len", 7)
+    max_len     = sc.get("max_len", 30)
+    enzyme_key  = sc.get("enzyme", "Trypsin/P")
+    enzyme_name = _ANDROMEDA_ENZYME_MAP.get(enzyme_key, "Trypsin/P")
+
+    if specificity == "non-specific":
+        enzyme_mode = "Unspecific"
+        enzyme_name = "Unspecific"
+        num_termini = "0"
+    elif specificity == "semi":
+        enzyme_mode = "SemiSpecific"
+        num_termini = "1"
+    else:
+        enzyme_mode = "Specific"
+        num_termini = "2"
+
+    # Fixed mods
+    fixed_xml = ""
+    for m in sc.get("fixed_mods", []):
+        if "Carbamidomethyl" in m:
+            fixed_xml += '    <string>Carbamidomethyl (C)</string>\n'
+        elif "TMT6plex (K)" in m:
+            fixed_xml += '    <string>TMT6plex (K)</string>\n'
+        elif "TMT6plex (N-term)" in m:
+            fixed_xml += '    <string>TMT6plex (N-term)</string>\n'
+
+    # Variable mods
+    var_xml = ""
+    for m in sc.get("var_mods", []):
+        mapped = _MQ_VAR_MODS.get(m)
+        if mapped:
+            var_xml += f'    <string>{mapped}</string>\n'
+
+    # Andromeda standalone uses .apar XML format
+    content = f"""\
+<?xml version="1.0" encoding="utf-8"?>
+<AndromedaParams>
+  <fastaFile>{fasta_path.replace(chr(92), '/')}</fastaFile>
+  <rawFile>{str(raw_path).replace(chr(92), '/')}</rawFile>
+  <outputFolder>{str(output_dir).replace(chr(92), '/')}</outputFolder>
+  <enzyme>{enzyme_name}</enzyme>
+  <enzymeMode>{enzyme_mode}</enzymeMode>
+  <numEnzymeTermini>{num_termini}</numEnzymeTermini>
+  <maxMissedCleavages>{missed}</maxMissedCleavages>
+  <minPeptideLen>{min_len}</minPeptideLen>
+  <maxPeptideLen>{max_len}</maxPeptideLen>
+  <precursorMassTolerancePpm>20</precursorMassTolerancePpm>
+  <fragmentMassToleranceDa>0.02</fragmentMassToleranceDa>
+  <maxModificationsPerPeptide>5</maxModificationsPerPeptide>
+  <numThreads>{threads}</numThreads>
+  <fixedModifications>
+{fixed_xml}  </fixedModifications>
+  <variableModifications>
+{var_xml}  </variableModifications>
+  <andromeda>
+    <topX>12</topX>
+    <deNovo>false</deNovo>
+    <deNovoScoreThreshold>0</deNovoScoreThreshold>
+    <ionSeries>b y</ionSeries>
+  </andromeda>
+</AndromedaParams>
+"""
+    apar_path = output_dir / "andromeda.apar"
+    apar_path.write_text(content, encoding="utf-8")
+    return apar_path
+
+
+def _parse_andromeda_output(output_dir: Path) -> dict[str, int | None]:
+    """Parse Andromeda standalone text output for PSM/peptide/protein counts."""
+    # Andromeda standalone writes tab-delimited results to 'msms.txt' and 'evidence.txt'
+    counts = {"n_psms": None, "n_peptides": None, "n_proteins": None}
+
+    # Try msms.txt (PSM-level)
+    msms = output_dir / "msms.txt"
+    pep_file = output_dir / "peptides.txt"
+    pg_file  = output_dir / "proteinGroups.txt"
+
+    n_psms, peptides, proteins = 0, set(), set()
+
+    if msms.exists():
+        try:
+            with open(msms, newline="", encoding="utf-8", errors="replace") as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                for row in reader:
+                    score = float(row.get("Score", 0) or 0)
+                    if score > 0:
+                        n_psms += 1
+                        seq = row.get("Sequence", "").strip()
+                        prot = row.get("Proteins", "").strip()
+                        if seq:
+                            peptides.add(seq)
+                        if prot:
+                            proteins.add(prot.split(";")[0].strip())
+        except Exception:
+            pass
+
+    if pep_file.exists():
+        try:
+            with open(pep_file, newline="", encoding="utf-8", errors="replace") as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                peptides_from_file: set[str] = set()
+                for row in reader:
+                    seq = row.get("Sequence", "").strip()
+                    rev = row.get("Reverse", "").strip()
+                    if seq and rev != "+":
+                        peptides_from_file.add(seq)
+                if peptides_from_file:
+                    peptides = peptides_from_file
+        except Exception:
+            pass
+
+    if pg_file.exists():
+        try:
+            with open(pg_file, newline="", encoding="utf-8", errors="replace") as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                pg_from_file: set[str] = set()
+                for row in reader:
+                    rev  = row.get("Reverse", "").strip()
+                    cont = row.get("Potential contaminant", "").strip()
+                    if rev != "+" and cont != "+":
+                        pg_from_file.add(row.get("Majority protein IDs", "").strip())
+                if pg_from_file:
+                    proteins = pg_from_file
+        except Exception:
+            pass
+
+    if n_psms or peptides:
+        counts["n_psms"]     = n_psms or None
+        counts["n_peptides"] = len(peptides) or None
+        counts["n_proteins"] = len(proteins) or None
+    return counts
+
+
+def _run_andromeda_thread(
+    run_id: str,
+    raw_path: Path,
+    output_dir: Path,
+    andromeda_exe: Path,
+    fasta_path: str,
+    threads: int,
+    search_config: dict | None = None,
+) -> None:
+    """Background thread: run standalone Andromeda and write results to DB."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _upsert_comparison(run_id, "andromeda", "running")
+
+    # Convert .d to mzML if needed (Andromeda prefers mzML/mzXML)
+    input_path = raw_path
+    if raw_path.suffix.lower() == ".d":
+        if not _find_msconvert() and not _has_timsconvert():
+            _upsert_comparison(run_id, "andromeda", "not_installed",
+                               error_msg="msconvert or timsconvert required for .d files")
+            return
+        converted = _convert_d_to_mzml(raw_path, output_dir)
+        if not converted:
+            _upsert_comparison(run_id, "andromeda", "failed",
+                               error_msg="mzML conversion failed")
+            return
+        input_path = converted
+
+    apar_path = _write_andromeda_params(output_dir, input_path, fasta_path, threads,
+                                         search_config=search_config)
+    log_path = output_dir / "andromeda.log"
+    cmd = [str(andromeda_exe), str(apar_path)]
+    logger.info("Andromeda starting: %s", raw_path.name)
+
+    try:
+        with open(log_path, "w") as lf:
+            subprocess.run(
+                cmd, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                text=True, timeout=7200, cwd=str(output_dir),
+            )
+    except subprocess.CalledProcessError as e:
+        _upsert_comparison(run_id, "andromeda", "failed",
+                           error_msg=f"exit {e.returncode}", result_path=str(output_dir))
+        logger.error("Andromeda failed (rc=%d): %s", e.returncode, raw_path.name)
+        return
+    except subprocess.TimeoutExpired:
+        _upsert_comparison(run_id, "andromeda", "failed",
+                           error_msg="timeout (2h)", result_path=str(output_dir))
+        return
+    except Exception as exc:
+        _upsert_comparison(run_id, "andromeda", "failed", error_msg=str(exc))
+        return
+
+    stats = _parse_andromeda_output(output_dir)
+    _upsert_comparison(run_id, "andromeda", "done", result_path=str(output_dir), **stats)
+    logger.info("Andromeda done: %s — PSMs=%s  pep=%s  pg=%s",
+                raw_path.name, stats["n_psms"], stats["n_peptides"], stats["n_proteins"])
+
+
+# ── PrOLuCID ──────────────────────────────────────────────────────────────────
+# Yates-lab Java-based search engine, part of IP2 (Integrated Proteomics Pipeline).
+# Accepts .ms2 files; outputs .sqt.  Requires Java and a prolucid.jar.
+
+_PROLUCID_SEARCH_PATHS: list[Path] = [
+    # IP2 standard install
+    Path("C:/IP2/ip2_binaries/bin/prolucid.jar"),
+    Path("C:/IP2/bin/prolucid.jar"),
+    Path("D:/IP2/ip2_binaries/bin/prolucid.jar"),
+    Path("E:/IP2/ip2_binaries/bin/prolucid.jar"),
+    # Standalone distribution
+    Path("C:/prolucid/prolucid.jar"),
+    Path("C:/tools/prolucid/prolucid.jar"),
+    Path("D:/prolucid/prolucid.jar"),
+    Path("E:/prolucid/prolucid.jar"),
+    Path.home() / "prolucid/prolucid.jar",
+    Path.home() / "Desktop/prolucid/prolucid.jar",
+    # Windows native EXE variants
+    Path("C:/prolucid/ProLuCID.exe"),
+    Path("C:/IP2/ip2_binaries/bin/ProLuCID.exe"),
+    Path("E:/tools/prolucid/ProLuCID.exe"),
+]
+
+
+def _find_prolucid() -> Path | None:
+    """Return path to prolucid.jar or ProLuCID.exe, or None if not found."""
+    for p in _PROLUCID_SEARCH_PATHS:
+        if p.is_file():
+            return p
+    found = shutil.which("prolucid") or shutil.which("ProLuCID")
+    if found:
+        return Path(found)
+    return None
+
+
+def _find_java() -> Path | None:
+    """Return path to java.exe for running JAR files."""
+    # Try FragPipe JRE first (already known to work for MSFragger)
+    fragpipe = _find_fragpipe()
+    if fragpipe:
+        java = fragpipe / "jre/bin/java.exe"
+        if java.exists():
+            return java
+    # Try system Java
+    found = shutil.which("java") or shutil.which("java.exe")
+    if found:
+        return Path(found)
+    # Common install paths
+    for candidate in [
+        Path("C:/Program Files/Java/jre/bin/java.exe"),
+        Path("C:/Program Files/Eclipse Adoptium/jre-17.0.0+35/bin/java.exe"),
+        Path("C:/Program Files/Microsoft/jdk-17.0.0.35-hotspot/bin/java.exe"),
+    ]:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+# PrOLuCID enzyme → numeric code used in params XML
+_PROLUCID_ENZYME_MAP: dict[str, int] = {
+    "Trypsin/P":    1,
+    "Trypsin":      1,
+    "LysC":         7,
+    "LysC/P":       7,
+    "GluC":        15,
+    "AspN":        11,
+    "non-specific": 0,
+}
+
+
+def _write_prolucid_params(
+    output_dir: Path,
+    fasta_path: str,
+    ms2_path: Path,
+    threads: int,
+    search_config: dict | None = None,
+) -> Path:
+    """Write PrOLuCID params.xml and return its path."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sc = search_config or _WORKFLOW_PRESETS[_DEFAULT_WORKFLOW]
+    specificity = sc.get("specificity", "specific")
+    enzyme_key  = sc.get("enzyme", "Trypsin/P")
+    enzyme_num  = _PROLUCID_ENZYME_MAP.get(enzyme_key, 1)
+    missed      = sc.get("missed_cleavages", 2)
+    min_len     = sc.get("min_len", 7)
+    max_len     = sc.get("max_len", 30)
+
+    # 0 = non-specific, 1 = semi, 2 = specific
+    if specificity == "non-specific":
+        num_termini = 0
+        enzyme_num  = 0
+    elif specificity == "semi":
+        num_termini = 1
+    else:
+        num_termini = 2
+
+    # Static modifications
+    static_mods = ""
+    for m in sc.get("fixed_mods", []):
+        if "Carbamidomethyl" in m and "C" in m:
+            static_mods += '  <staticModification residue="C" offset="57.021464"/>\n'
+        elif "TMT6plex (K)" in m:
+            static_mods += '  <staticModification residue="K" offset="229.162932"/>\n'
+        elif "TMT6plex (N-term)" in m:
+            static_mods += '  <staticModification residue="n" offset="229.162932"/>\n'
+
+    # Dynamic modifications
+    dyn_mods = ""
+    for m in sc.get("var_mods", []):
+        if "Oxidation (M)" in m:
+            dyn_mods += '  <dynamicModification residue="M" offset="15.994915"/>\n'
+        elif "Phospho (STY)" in m:
+            dyn_mods += '  <dynamicModification residue="S" offset="79.966331"/>\n'
+            dyn_mods += '  <dynamicModification residue="T" offset="79.966331"/>\n'
+            dyn_mods += '  <dynamicModification residue="Y" offset="79.966331"/>\n'
+        elif "Deamidation" in m:
+            dyn_mods += '  <dynamicModification residue="N" offset="0.984016"/>\n'
+            dyn_mods += '  <dynamicModification residue="Q" offset="0.984016"/>\n'
+        elif "Acetyl (Protein N-term)" in m:
+            dyn_mods += '  <dynamicModification residue="n" offset="42.010565"/>\n'
+
+    output_sqt = output_dir / (ms2_path.stem + ".sqt")
+
+    content = f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<ProLuCID_Params>
+  <dbFilePath>{fasta_path.replace(chr(92), '/')}</dbFilePath>
+  <ms2FilePath>{str(ms2_path).replace(chr(92), '/')}</ms2FilePath>
+  <outputFilePath>{str(output_sqt).replace(chr(92), '/')}</outputFilePath>
+  <useMonoIsoMass>true</useMonoIsoMass>
+  <ESI_type>{enzyme_num}</ESI_type>
+  <numOfMissedCleavageSite>{missed}</numOfMissedCleavageSite>
+  <numEnzymeTermini>{num_termini}</numEnzymeTermini>
+  <isotopeType>MONO</isotopeType>
+  <precursorTolerance>15</precursorTolerance>
+  <precursorToleranceUnit>ppm</precursorToleranceUnit>
+  <fragmentTolerance>20</fragmentTolerance>
+  <fragmentToleranceUnit>ppm</fragmentToleranceUnit>
+  <XcorrCutoff>1.0</XcorrCutoff>
+  <deltaCNcutoff>0.08</deltaCNcutoff>
+  <minPeptideLen>{min_len}</minPeptideLen>
+  <maxPeptideLen>{max_len}</maxPeptideLen>
+  <maximumNumberOfDynamicModification>3</maximumNumberOfDynamicModification>
+  <numProcessingThreads>{threads}</numProcessingThreads>
+  <printDecoy>false</printDecoy>
+  <checkShiftTerminal>true</checkShiftTerminal>
+{static_mods}{dyn_mods}</ProLuCID_Params>
+"""
+    params_path = output_dir / "params.xml"
+    params_path.write_text(content, encoding="utf-8")
+    return params_path
+
+
+def _convert_d_to_ms2(d_path: Path, output_dir: Path) -> Path | None:
+    """Convert a Bruker .d directory to .ms2 format via msconvert.
+
+    MS2 format is PrOLuCID's native input.  Falls back to mzXML if msconvert
+    does not support --ms2 (older ProteoWizard versions).
+    """
+    ms2_path  = output_dir / (d_path.stem + ".ms2")
+    mzxml_path = output_dir / (d_path.stem + ".mzXML")
+
+    for p in (ms2_path, mzxml_path):
+        if p.exists():
+            return p
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    msconvert = _find_msconvert()
+    if not msconvert:
+        logger.debug("msconvert not found — cannot convert .d to ms2 for PrOLuCID")
+        return None
+
+    # Try MS2 format first (compact, PrOLuCID-native)
+    log_path = output_dir / "msconvert_ms2.log"
+    cmd = [
+        str(msconvert), str(d_path),
+        "--ms2",
+        "--filter", "msLevel 2",
+        "--filter", "zeroSamples removeExtra",
+        "--outdir", str(output_dir),
+    ]
+    try:
+        with open(log_path, "w") as lf:
+            subprocess.run(cmd, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                           text=True, timeout=3600)
+        if ms2_path.exists():
+            return ms2_path
+    except Exception:
+        pass
+
+    # Fallback: mzXML (PrOLuCID also accepts mzXML)
+    log_path2 = output_dir / "msconvert_mzxml.log"
+    cmd2 = [
+        str(msconvert), str(d_path),
+        "--mzXML",
+        "--ddaProcessing",
+        "--filter", "msLevel 2",
+        "--filter", "zeroSamples removeExtra",
+        "--zlib", "--32",
+        "--outdir", str(output_dir),
+    ]
+    try:
+        with open(log_path2, "w") as lf:
+            subprocess.run(cmd2, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                           text=True, timeout=3600)
+        found = list(output_dir.glob("*.mzXML"))
+        return found[0] if found else None
+    except Exception as exc:
+        logger.warning("msconvert mzXML fallback failed: %s", exc)
+        return None
+
+
+def _parse_prolucid_sqt(output_dir: Path) -> dict[str, int | None]:
+    """Parse PrOLuCID SQT output for PSM / peptide / protein counts.
+
+    Filters PSMs at Xcorr thresholds appropriate for each charge state:
+      +1: Xcorr > 1.5
+      +2: Xcorr > 2.0
+      +3+: Xcorr > 2.5
+
+    SQT format rows:
+      S  scan_start scan_end charge ... (spectrum header)
+      M  rank ... xcorr deltaCN ... sequence (PSM match)
+      L  locus (protein accession)
+    """
+    sqt_files = list(output_dir.glob("*.sqt"))
+    if not sqt_files:
+        return {"n_psms": None, "n_peptides": None, "n_proteins": None}
+
+    # Xcorr cutoffs by charge
+    xcorr_cut = {1: 1.5, 2: 2.0}   # default for z≥3: 2.5
+
+    n_psms = 0
+    peptides: set[str] = set()
+    proteins: set[str] = set()
+
+    for sqt_path in sqt_files:
+        try:
+            current_charge = 2
+            current_xcorr  = 0.0
+            current_seq    = ""
+            current_prots: list[str] = []
+
+            with open(sqt_path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.rstrip()
+                    if not line:
+                        continue
+                    parts = line.split("\t")
+                    tag = parts[0].strip()
+
+                    if tag == "S":
+                        # Flush previous PSM if it passed threshold
+                        cut = xcorr_cut.get(current_charge, 2.5)
+                        if current_seq and current_xcorr >= cut:
+                            n_psms += 1
+                            # Strip modifications: [mass] or *
+                            clean = re.sub(r"\[[\d.+-]+\]|\*", "", current_seq).strip(".")
+                            if clean:
+                                peptides.add(clean)
+                            for p in current_prots:
+                                if p and not p.startswith("Reverse_") and not p.startswith("Rev_"):
+                                    proteins.add(p.split(" ")[0])
+                        # Reset for new spectrum
+                        try:
+                            current_charge = int(parts[3]) if len(parts) > 3 else 2
+                        except (ValueError, IndexError):
+                            current_charge = 2
+                        current_xcorr  = 0.0
+                        current_seq    = ""
+                        current_prots  = []
+
+                    elif tag == "M" and len(parts) >= 10:
+                        rank = int(parts[1]) if parts[1].isdigit() else 99
+                        if rank == 1:  # top-ranked match only
+                            try:
+                                current_xcorr = float(parts[5])
+                                current_seq   = parts[9].strip()
+                            except (ValueError, IndexError):
+                                pass
+                            current_prots = []
+
+                    elif tag == "L" and len(parts) >= 2:
+                        current_prots.append(parts[1].strip())
+
+                # Flush last PSM
+                cut = xcorr_cut.get(current_charge, 2.5)
+                if current_seq and current_xcorr >= cut:
+                    n_psms += 1
+                    clean = re.sub(r"\[[\d.+-]+\]|\*", "", current_seq).strip(".")
+                    if clean:
+                        peptides.add(clean)
+                    for p in current_prots:
+                        if p and not p.startswith("Reverse_") and not p.startswith("Rev_"):
+                            proteins.add(p.split(" ")[0])
+
+        except Exception:
+            logger.debug("_parse_prolucid_sqt error on %s", sqt_path, exc_info=True)
+
+    return {
+        "n_psms":     n_psms     or None,
+        "n_peptides": len(peptides)  or None,
+        "n_proteins": len(proteins)  or None,
+    }
+
+
+def _run_prolucid_thread(
+    run_id: str,
+    raw_path: Path,
+    output_dir: Path,
+    prolucid_jar: Path,
+    fasta_path: str,
+    threads: int,
+    search_config: dict | None = None,
+) -> None:
+    """Background thread: convert if needed, run PrOLuCID, write results."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _upsert_comparison(run_id, "prolucid", "running")
+
+    # ── 1. Convert .d to MS2 / mzXML ─────────────────────────────────────────
+    input_path = raw_path
+    if raw_path.suffix.lower() == ".d" or raw_path.is_dir():
+        if not _find_msconvert():
+            _upsert_comparison(run_id, "prolucid", "not_installed",
+                               error_msg="msconvert required for .d → ms2 conversion")
+            return
+        converted = _convert_d_to_ms2(raw_path, output_dir)
+        if not converted:
+            _upsert_comparison(run_id, "prolucid", "failed",
+                               error_msg="Conversion to ms2/mzXML failed")
+            return
+        input_path = converted
+
+    # ── 2. Write params ───────────────────────────────────────────────────────
+    params_path = _write_prolucid_params(output_dir, fasta_path, input_path, threads,
+                                         search_config=search_config)
+
+    # ── 3. Build command ──────────────────────────────────────────────────────
+    jar_suffix = prolucid_jar.suffix.lower()
+    if jar_suffix == ".jar":
+        java = _find_java()
+        if not java:
+            _upsert_comparison(run_id, "prolucid", "failed", error_msg="Java not found")
+            return
+        cmd = [str(java), "-Xmx8g", "-jar", str(prolucid_jar), str(params_path)]
+    else:
+        # Native EXE
+        cmd = [str(prolucid_jar), str(params_path)]
+
+    log_path = output_dir / "prolucid.log"
+    logger.info("PrOLuCID starting: %s", raw_path.name)
+
+    try:
+        with open(log_path, "w") as lf:
+            subprocess.run(
+                cmd, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                text=True, timeout=7200, cwd=str(output_dir),
+            )
+    except subprocess.CalledProcessError as e:
+        _upsert_comparison(run_id, "prolucid", "failed",
+                           error_msg=f"exit {e.returncode}", result_path=str(output_dir))
+        logger.error("PrOLuCID failed (rc=%d): %s", e.returncode, raw_path.name)
+        return
+    except subprocess.TimeoutExpired:
+        _upsert_comparison(run_id, "prolucid", "failed",
+                           error_msg="timeout (2h)", result_path=str(output_dir))
+        return
+    except Exception as exc:
+        _upsert_comparison(run_id, "prolucid", "failed", error_msg=str(exc))
+        return
+
+    # ── 4. Parse SQT results ──────────────────────────────────────────────────
+    stats = _parse_prolucid_sqt(output_dir)
+    _upsert_comparison(run_id, "prolucid", "done", result_path=str(output_dir), **stats)
+    logger.info("PrOLuCID done: %s — PSMs=%s  pep=%s  pg=%s",
+                raw_path.name, stats["n_psms"], stats["n_peptides"], stats["n_proteins"])
+
+
+# ── Chimerys (MSAID cloud platform — read locally cached parquet) ─────────────
+
+def ingest_chimerys_results(run_id: str, parquet_path) -> bool:
+    """Extract stats from a locally-cached Chimerys PSM parquet and write to DB.
+
+    Called when a Chimerys parquet is available (either just downloaded via the
+    MSAID platform connector, or found on disk by _resolve_chimerys_path).
+
+    Returns True on success.  The comparison row is written with engine="chimerys".
+    n_proteins is not available from PSM-level parquets — it is stored as None.
+    """
+    from pathlib import Path as _Path
+    parquet_path = _Path(parquet_path)
+
+    try:
+        from stan.metrics.mobility_chimerys import get_peptide_stats_chimerys
+        stats = get_peptide_stats_chimerys(parquet_path)
+    except Exception as exc:
+        logger.warning("ingest_chimerys_results: could not parse %s — %s", parquet_path, exc)
+        _upsert_comparison(run_id, "chimerys", "failed", error_msg=str(exc)[:200])
+        return False
+
+    if not stats or not stats.get("n_psms"):
+        _upsert_comparison(run_id, "chimerys", "failed",
+                           error_msg="No PSMs in parquet after FDR filter")
+        return False
+
+    _upsert_comparison(
+        run_id, "chimerys", "done",
+        result_path=str(parquet_path),
+        n_psms=stats.get("n_psms"),
+        n_peptides=stats.get("n_unique_seqs"),
+        n_proteins=None,
+        n_precursors=None,
+    )
+    logger.info(
+        "Chimerys ingested for %s — PSMs=%s  unique_peptides=%s",
+        run_id, stats.get("n_psms"), stats.get("n_unique_seqs"),
+    )
+    return True

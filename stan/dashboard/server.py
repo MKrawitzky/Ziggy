@@ -3208,6 +3208,31 @@ async def api_chimerys_stats(run_id: str) -> dict:
     }
 
 
+@app.get("/api/runs/{run_id}/chimerys-collision")
+async def api_chimerys_collision(run_id: str) -> dict:
+    """Novel chimeric collision analysis — reveals where TIMS separation fails.
+
+    Groups Chimerys PSMs by scan proxy (RT_bin × MZ_bin) to detect co-isolated
+    precursors.  Returns m/z × 1/K₀ scatter colored by chimeric multiplicity,
+    mobility-resolved chimeric rate, and summary statistics.
+    """
+    from stan.metrics.mobility_chimerys import get_chimeric_collision_analysis
+
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    chimerys_path = _resolve_chimerys_path(run)
+    if not chimerys_path:
+        return {"available": False}
+
+    try:
+        return get_chimeric_collision_analysis(chimerys_path)
+    except Exception as exc:
+        logger.warning("chimerys-collision failed for %s: %s", run_id, exc)
+        return {"available": False, "error": str(exc)}
+
+
 @app.get("/api/community/cohort")
 async def api_community_cohort() -> dict:
     """Fetch community cohort data.
@@ -4588,6 +4613,23 @@ def _attach_comparisons(runs: list[dict]) -> None:
         raw = run.get("raw_path") or ""
         stem = Path(raw).stem if raw else ""
         run["comparisons"] = by_run.get(stem, {})
+
+        # Lazily ingest Chimerys results if a local parquet exists but no DB row yet.
+        if stem and run["comparisons"].get("chimerys", {}).get("status") not in ("done", "running", "failed"):
+            chimerys_path = _resolve_chimerys_path(run)
+            if chimerys_path:
+                try:
+                    from stan.search.comparison import ingest_chimerys_results
+                    if ingest_chimerys_results(stem, chimerys_path):
+                        run["comparisons"]["chimerys"] = {
+                            "status": "done",
+                            "result_path": str(chimerys_path),
+                            "n_psms": None, "n_peptides": None, "n_proteins": None,
+                            "n_precursors": None, "error_msg": None,
+                            "started_at": None, "finished_at": None,
+                        }
+                except Exception:
+                    pass
 
 
 # ── De Novo Sequencing ───────────────────────────────────────────────
@@ -6366,6 +6408,16 @@ async def api_run_compare(run_id: str) -> dict:
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
+    # Also ingest Chimerys results if a local parquet is available.
+    chimerys_ingested = False
+    chimerys_path = _resolve_chimerys_path(run)
+    if chimerys_path:
+        try:
+            from stan.search.comparison import ingest_chimerys_results
+            chimerys_ingested = ingest_chimerys_results(raw_path.stem, chimerys_path)
+        except Exception:
+            pass
+
     return {
         "ok": True,
         "message": "Comparison searches dispatched",
@@ -6373,6 +6425,7 @@ async def api_run_compare(run_id: str) -> dict:
         "mode": mode,
         "fasta": fasta_path or "not found",
         "output_base": str(output_base),
+        "chimerys": "ingested" if chimerys_ingested else ("found" if chimerys_path else "not found"),
     }
 
 

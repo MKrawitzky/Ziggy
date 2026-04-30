@@ -388,3 +388,147 @@ def get_ccs_data_chimerys(
         "ccs_available": ccs_available,
         "source":        "chimerys",
     }
+
+
+# ── Novel chimeric collision analysis ─────────────────────────────────────────
+
+def get_chimeric_collision_analysis(
+    parquet_path: str | Path,
+    sample_name: str | None = None,
+    rt_bin_sec: float = 2.0,     # seconds — scan-level RT window for grouping
+    mz_bin_da: float = 0.012,    # Da — scan-level MZ window for grouping
+    mobility_bins: int = 30,
+    max_scatter: int = 8000,
+) -> dict:
+    """Novel chimeric spectrum analysis leveraging timsTOF ion mobility.
+
+    Groups Chimerys PSMs by scan proxy (RT_bin × MZ_bin) to detect chimeric
+    spectra — spectra where multiple distinct peptides were co-identified from
+    overlapping precursors.  Returns:
+
+    1. collision_map  — per-PSM scatter with chimeric multiplicity count,
+       ready to plot in m/z × 1/K₀ space.  Chimeric PSMs reveal WHERE in the
+       4D timsTOF space the TIMS dimension fails to separate co-eluting precursors.
+
+    2. mobility_profile — per-1/K₀-bin chimeric fraction, quantifying TIMS
+       separation efficiency across the mobility axis.
+
+    3. stats — global chimeric rate, rescued peptide count (additional peptides
+       Chimerys found beyond the first identification per chimeric scan), and
+       scan-level multiplicity distribution.
+
+    This is a first-of-its-kind analysis: standard DDA search tools report a
+    single peptide per spectrum and cannot reveal chimeric co-isolation patterns.
+    Chimerys' multi-peptide-per-spectrum output makes this possible.
+    """
+    rows = _load_psms(parquet_path, sample_name)
+    if not rows:
+        return {}
+
+    # ── Group PSMs into scan proxies ─────────────────────────────────────────
+    # Each scan proxy = (RT_bin, MZ_bin).  PSMs sharing a bin that have
+    # different sequences were co-isolated and co-fragmented → chimeric.
+    from collections import defaultdict
+
+    scan_groups: dict[tuple, list[dict]] = defaultdict(list)
+    for r in rows:
+        if r["rt"] is None or r["mz"] is None:
+            continue
+        rt_key  = round(r["rt"]  / rt_bin_sec)    # r["rt"] already in seconds
+        mz_key  = round(r["mz"]  / mz_bin_da)
+        scan_groups[(rt_key, mz_key)].append(r)
+
+    # ── Annotate each PSM with chimeric count ────────────────────────────────
+    enriched: list[dict] = []
+    n_chimeric_scans  = 0
+    n_singleton_scans = 0
+    max_multiplicity  = 1
+    multiplicity_hist: dict[int, int] = {}
+
+    for group in scan_groups.values():
+        unique_seqs = {r["sequence"] for r in group if r["sequence"]}
+        mult        = len(unique_seqs)
+        max_multiplicity = max(max_multiplicity, mult)
+        multiplicity_hist[mult] = multiplicity_hist.get(mult, 0) + 1
+        if mult > 1:
+            n_chimeric_scans += 1
+        else:
+            n_singleton_scans += 1
+        for r in group:
+            enriched.append({**r, "chimeric_count": mult})
+
+    n_psms          = len(enriched)
+    n_chimeric_psms = sum(1 for r in enriched if r["chimeric_count"] > 1)
+    chimeric_rate   = n_chimeric_psms / n_psms if n_psms else 0.0
+    # Rescued = extra peptides found in chimeric scans beyond the first ID
+    n_rescued = sum(r["chimeric_count"] - 1 for r in enriched if r["chimeric_count"] > 1)
+    total_scans = n_singleton_scans + n_chimeric_scans
+    chimeric_scan_rate = n_chimeric_scans / total_scans if total_scans else 0.0
+
+    # ── Mobility profile ─────────────────────────────────────────────────────
+    mobile_rows = [r for r in enriched if r["mobility"] is not None]
+    mobility_profile: list[dict] = []
+    if mobile_rows:
+        mob_vals     = [r["mobility"] for r in mobile_rows]
+        mob_lo, mob_hi = min(mob_vals), max(mob_vals)
+        mob_step = (mob_hi - mob_lo) / mobility_bins if mob_hi > mob_lo else 0.01
+
+        bins_total: list[int]   = [0] * mobility_bins
+        bins_chim:  list[int]   = [0] * mobility_bins
+        for r in mobile_rows:
+            bi = min(int((r["mobility"] - mob_lo) / mob_step), mobility_bins - 1)
+            bins_total[bi] += 1
+            if r["chimeric_count"] > 1:
+                bins_chim[bi] += 1
+
+        for i in range(mobility_bins):
+            center = mob_lo + (i + 0.5) * mob_step
+            total  = bins_total[i]
+            chim   = bins_chim[i]
+            mobility_profile.append({
+                "bin_center":    round(center, 4),
+                "n_total":       total,
+                "n_chimeric":    chim,
+                "chimeric_rate": round(chim / total, 3) if total > 0 else 0.0,
+            })
+
+    # ── Collision map (downsampled scatter) ──────────────────────────────────
+    # Sort by intensity desc; take top max_scatter ensuring chimeric PSMs are
+    # well-represented (take all chimeric, then fill with singletons).
+    chimeric_pts   = [r for r in enriched if r["chimeric_count"] > 1 and r["mz"] is not None and r["mobility"] is not None]
+    singleton_pts  = [r for r in enriched if r["chimeric_count"] == 1 and r["mz"] is not None and r["mobility"] is not None]
+    chimeric_pts.sort(key=lambda r: r["intensity"], reverse=True)
+    singleton_pts.sort(key=lambda r: r["intensity"], reverse=True)
+
+    n_chim_show = min(len(chimeric_pts), max_scatter // 2)
+    n_sing_show = min(len(singleton_pts), max_scatter - n_chim_show)
+    scatter_rows = chimeric_pts[:n_chim_show] + singleton_pts[:n_sing_show]
+
+    collision_map = [
+        {
+            "mz":       round(r["mz"],       3),
+            "mobility": round(r["mobility"],  4),
+            "charge":   r["charge"],
+            "count":    r["chimeric_count"],
+        }
+        for r in scatter_rows
+    ]
+
+    return {
+        "available":        True,
+        "collision_map":    collision_map,
+        "mobility_profile": mobility_profile,
+        "stats": {
+            "n_psms":              n_psms,
+            "n_chimeric_psms":     n_chimeric_psms,
+            "chimeric_rate":       round(chimeric_rate, 4),
+            "max_multiplicity":    max_multiplicity,
+            "multiplicity_hist":   {str(k): v for k, v in sorted(multiplicity_hist.items())},
+            "n_singleton_scans":   n_singleton_scans,
+            "n_chimeric_scans":    n_chimeric_scans,
+            "chimeric_scan_rate":  round(chimeric_scan_rate, 4),
+            "n_rescued_peptides":  n_rescued,
+        },
+        "has_mobility": len(mobile_rows) > 0,
+        "source": "chimerys",
+    }
