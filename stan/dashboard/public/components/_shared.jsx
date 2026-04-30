@@ -1611,7 +1611,7 @@
                         <td title={`${idsLabel}: ${ids != null ? ids.toLocaleString() : EM_DASH}`}>
                           {fmtNum(ids)} <span style={{color:'var(--muted)', fontSize:'0.7rem'}}>{ids > 0 ? idsLabel : ''}</span>
                         </td>
-                        <td>{fmtNum(r.n_peptides)}</td>
+                        <td>{fmtNum(isDda(r.mode) ? r.n_peptides_dda : r.n_peptides)}</td>
                         <td>{fmtNum(r.n_proteins)}</td>
                         <td>{fmtSig(r.ms1_signal)}</td>
                         <td>{fmtFwhmSec(r.fwhm_rt_min)}</td>
@@ -1631,8 +1631,11 @@
                               style={{padding:'0.15rem 0.5rem',fontSize:'0.72rem',background: noMetrics ? 'var(--accent)' : 'var(--surface)',color: noMetrics ? 'var(--bg)' : 'var(--muted)',border:'1px solid var(--border)',borderRadius:'0.3rem',cursor:'pointer',fontWeight: noMetrics ? 700 : 400}}
                             >{noMetrics ? '▶ Process' : '↻ Re-run'}</button>
                           ) : null}
-                          {/* Recompute blank metrics from existing report */}
-                          {r.result_path && (r.ms1_signal == null || r.fwhm_rt_min == null || r.median_mass_acc_ms1_ppm == null) && (() => {
+                          {/* Recompute blank metrics from existing result file (DIA or DDA) */}
+                          {r.result_path && (() => {
+                            const missingDia = r.ms1_signal == null || r.fwhm_rt_min == null || r.median_mass_acc_ms1_ppm == null;
+                            const missingDda = isDda(r.mode) && (r.n_psms == null || r.n_proteins == null);
+                            if (!missingDia && !missingDda) return null;
                             const rs = recomputeStatus[String(r.id)];
                             return rs === 'done' ? (
                               <span style={{color:'var(--pass)',fontSize:'0.68rem',fontWeight:700}}>↺✓</span>
@@ -1642,7 +1645,7 @@
                               <button
                                 onClick={e => doRecompute(r.id, e)}
                                 disabled={rs === 'loading'}
-                                title="Recompute QC metrics from existing report.parquet"
+                                title="Recompute QC metrics from existing result file"
                                 style={{padding:'0.1rem 0.35rem',fontSize:'0.68rem',background:'rgba(34,211,238,0.12)',color:'#22d3ee',border:'1px solid rgba(34,211,238,0.3)',borderRadius:'0.25rem',cursor:'pointer',fontWeight:600}}
                               >{rs === 'loading' ? '…' : '↺ Fill'}</button>
                             );

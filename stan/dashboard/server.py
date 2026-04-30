@@ -4143,8 +4143,9 @@ async def api_recompute_metrics(run_id: str) -> dict:
         if not metrics:
             return {"ok": False, "error": "Metric extraction returned empty result."}
 
-        # Only update columns that are currently NULL or 0 in the run
+        # All extractable columns — DIA and DDA (each extractor only returns its own subset)
         fields = {
+            # DIA (DIA-NN)
             "n_precursors":              metrics.get("n_precursors"),
             "n_peptides":                metrics.get("n_peptides"),
             "n_proteins":                metrics.get("n_proteins"),
@@ -4161,6 +4162,16 @@ async def api_recompute_metrics(run_id: str) -> dict:
             "pct_charge_2":              metrics.get("pct_charge_2"),
             "pct_charge_3":              metrics.get("pct_charge_3"),
             "pct_charge_4plus":          metrics.get("pct_charge_4plus"),
+            # DDA (Sage / MSFragger)
+            "n_psms":                    metrics.get("n_psms"),
+            "n_peptides_dda":            metrics.get("n_peptides_dda"),
+            "median_hyperscore":         metrics.get("median_hyperscore"),
+            "pct_hyperscore_gt30":       metrics.get("pct_hyperscore_gt30"),
+            "ms2_scan_rate":             metrics.get("ms2_scan_rate"),
+            "median_delta_mass_ppm":     metrics.get("median_delta_mass_ppm"),
+            "pct_delta_mass_lt5ppm":     metrics.get("pct_delta_mass_lt5ppm"),
+            "median_peak_width_sec":     metrics.get("median_peak_width_sec"),
+            "median_points_across_peak": metrics.get("median_points_across_peak"),
         }
         # Filter to non-None new values
         updates = {k: v for k, v in fields.items() if v is not None}
