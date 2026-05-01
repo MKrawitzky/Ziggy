@@ -1350,6 +1350,49 @@ def _run_msfragger_thread(
                            error_msg="Java (FragPipe JRE) not found")
         return
 
+    # MSFragger DIA mode cannot read Bruker diaPASEF .d files directly —
+    # it needs mzML.  Convert first; DDA mode handles .d natively via timsdata.
+    input_path = raw_path
+    if data_type == 1 and (raw_path.suffix.lower() == ".d" or raw_path.is_dir()):
+        if not _find_msconvert() and not _has_timsconvert():
+            _upsert_comparison(run_id, engine_name, "not_installed",
+                               error_msg="msconvert or timsconvert required for diaPASEF .d → mzML")
+            logger.warning("MSFragger-DIA skipped for %s: no mzML converter found", raw_path.name)
+            return
+        # Include MS1 + MS2 for DIA (no --filter "msLevel 2" and no --ddaProcessing)
+        mzml_out_dir = output_dir / "mzml"
+        mzml_out_dir.mkdir(parents=True, exist_ok=True)
+        mzml_path = mzml_out_dir / (raw_path.stem + ".mzML")
+        if not mzml_path.exists():
+            msconvert = _find_msconvert()
+            if msconvert:
+                log_mz = mzml_out_dir / "msconvert.log"
+                cmd_mz = [
+                    str(msconvert), str(raw_path), "--mzML",
+                    "--filter", "zeroSamples removeExtra",
+                    "--zlib", "--32",
+                    "--outdir", str(mzml_out_dir),
+                ]
+                logger.info("MSFragger-DIA: converting %s → mzML", raw_path.name)
+                try:
+                    with open(log_mz, "w") as lf:
+                        subprocess.run(cmd_mz, check=True, stdout=lf,
+                                       stderr=subprocess.STDOUT, text=True, timeout=3600)
+                except Exception as exc:
+                    logger.warning("msconvert for MSFragger-DIA failed: %s", exc)
+            if not mzml_path.exists():
+                found = list(mzml_out_dir.glob("*.mzML"))
+                if found:
+                    mzml_path = found[0]
+                else:
+                    converted = _convert_d_to_mzml(raw_path, mzml_out_dir)
+                    if not converted:
+                        _upsert_comparison(run_id, engine_name, "failed",
+                                           error_msg="mzML conversion failed for diaPASEF")
+                        return
+                    mzml_path = converted
+        input_path = mzml_path
+
     params_path = _write_msfragger_params(
         output_dir, fasta_path, data_type=data_type, threads=threads,
         search_config=search_config,
@@ -1369,7 +1412,7 @@ def _run_msfragger_thread(
     ]
     if bruker_lib and Path(str(bruker_lib)).exists():
         cmd.append(f"-Djava.library.path={bruker_lib}")
-    cmd += ["-jar", str(jar), str(params_path), str(raw_path)]
+    cmd += ["-jar", str(jar), str(params_path), str(input_path)]
 
     log_path = output_dir / "msfragger.log"
     logger.info("MSFragger %s starting: %s", engine_name, raw_path.name)
@@ -1405,9 +1448,9 @@ def _run_msfragger_thread(
         return
 
     # MSFragger writes TSV output alongside the INPUT FILE, not in output_dir.
-    # Copy any TSVs from the raw file's parent into output_dir so the parser finds them.
-    raw_parent = raw_path.parent
-    for tsv in raw_parent.glob(f"{raw_path.stem}*.tsv"):
+    # Copy any TSVs from the input file's parent into output_dir so the parser finds them.
+    input_parent = input_path.parent
+    for tsv in input_parent.glob(f"{input_path.stem}*.tsv"):
         dest = output_dir / tsv.name
         if not dest.exists():
             try:
@@ -1416,9 +1459,9 @@ def _run_msfragger_thread(
                 pass
 
     stats = _parse_msfragger_tsv(output_dir)
-    # If output_dir still has no TSVs, fall back to parsing directly from raw_parent
+    # If output_dir still has no TSVs, fall back to parsing directly from input_parent
     if stats.get("n_psms") is None:
-        stats = _parse_msfragger_tsv(raw_parent)
+        stats = _parse_msfragger_tsv(input_parent)
 
     _upsert_comparison(
         run_id, engine_name, "done",
