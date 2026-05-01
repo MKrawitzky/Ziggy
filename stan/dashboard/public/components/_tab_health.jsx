@@ -39,12 +39,16 @@
         const pass = filteredRuns.filter(r => r.gate_result === 'pass').length;
         const warn = filteredRuns.filter(r => r.gate_result === 'warn').length;
         const fail = filteredRuns.filter(r => r.gate_result === 'fail').length;
-        const pctPass = total ? Math.round(pass / total * 100) : 0;
+        // Unrated = no gate_result stored (processed before thresholds were configured,
+        // or thresholds.yml not yet set up). Don't count them against the pass rate.
+        const unrated = total - pass - warn - fail;
+        const rated = total - unrated;
+        const pctPass = rated > 0 ? Math.round(pass / rated * 100) : null;
         const precs = filteredRuns.map(r => r.n_precursors || r.n_psms).filter(v => v > 0);
         const bestPrec = precs.length ? Math.max(...precs) : null;
         const meanPrec = precs.length ? Math.round(precs.reduce((a, b) => a + b, 0) / precs.length) : null;
         const lastRun = filteredRuns[filteredRuns.length - 1];
-        return { total, pass, warn, fail, pctPass, bestPrec, meanPrec, lastRun };
+        return { total, pass, warn, fail, unrated, rated, pctPass, bestPrec, meanPrec, lastRun };
       }, [filteredRuns]);
 
       // Compute Levey-Jennings statistics
@@ -263,15 +267,21 @@
             <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:'0.75rem',marginBottom:'1rem'}}>
               {[
                 { label: 'Total Runs',  value: summary.total,                    color: '#60a5fa' },
-                { label: 'Pass Rate',   value: `${summary.pctPass}%`,            color: summary.pctPass >= 80 ? '#22c55e' : summary.pctPass >= 60 ? '#eab308' : '#ef4444' },
+                {
+                  label: summary.rated > 0 ? `Pass Rate (${summary.rated} rated)` : 'Pass Rate',
+                  value: summary.pctPass != null ? `${summary.pctPass}%` : '—',
+                  color: summary.pctPass == null ? '#4a5568' : summary.pctPass >= 80 ? '#22c55e' : summary.pctPass >= 60 ? '#eab308' : '#ef4444',
+                  title: summary.unrated > 0 ? `${summary.unrated} run${summary.unrated !== 1 ? 's' : ''} have no gate result (processed before thresholds were configured)` : null,
+                },
                 { label: '✓ Pass',      value: summary.pass,                     color: '#22c55e' },
                 { label: '⚠ Warn',      value: summary.warn,                     color: '#eab308' },
                 { label: '✗ Fail',      value: summary.fail,                     color: '#ef4444' },
+                ...(summary.unrated > 0 ? [{ label: '○ Unrated', value: summary.unrated, color: '#4a5568', title: 'Runs processed before thresholds.yml was configured. Set up thresholds and re-run to rate these.' }] : []),
                 { label: 'Best Run',    value: summary.bestPrec ? summary.bestPrec.toLocaleString() : 'N/A', color: '#DAAA00' },
                 { label: 'Mean Prec.',  value: summary.meanPrec ? summary.meanPrec.toLocaleString() : 'N/A', color: '#a78bfa' },
                 { label: 'Last Run',    value: summary.lastRun ? summary.lastRun.run_date.substring(0,10) : 'N/A', color: '#a0b4cc' },
-              ].map(({ label, value, color }) => (
-                <div key={label} className="card" style={{textAlign:'center',padding:'0.75rem',margin:0}}>
+              ].map(({ label, value, color, title }) => (
+                <div key={label} className="card" style={{textAlign:'center',padding:'0.75rem',margin:0}} title={title || ''}>
                   <div style={{fontSize:'1.4rem',fontWeight:700,color,fontVariantNumeric:'tabular-nums'}}>{value}</div>
                   <div style={{fontSize:'0.75rem',color:'var(--muted)',marginTop:'0.25rem'}}>{label}</div>
                 </div>

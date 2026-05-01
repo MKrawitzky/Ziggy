@@ -580,7 +580,9 @@
         const {status, n_psms, n_peptides, n_proteins, n_precursors, error_msg} = entry;
         const primary = metric === 'precursors' ? (n_precursors ?? n_psms) : n_psms;
         if (status === 'not_applicable') return React.createElement('td',{style:{textAlign:'right',color:'var(--border)',fontSize:'0.72rem'},title:'Not compatible with this acquisition mode'},'N/A');
-        if (status === 'not_installed') return React.createElement('td',{style:{textAlign:'right',color:'#f59e0b',fontSize:'0.72rem'},title:error_msg||'Tool not installed'},'⚠ —');
+        if (status === 'not_installed') return React.createElement('td',{style:{textAlign:'right',color:'var(--muted)',fontSize:'0.72rem'},title:error_msg||'Tool not installed — click Compare to retry'},
+          React.createElement('span',{style:{opacity:0.7}},'—'),
+          React.createElement('span',{style:{fontSize:'0.6rem',color:'#f59e0b',marginLeft:'2px'}},'\u26a0'));
         if (status === 'pending') return React.createElement('td',{style:{textAlign:'right',color:'var(--muted)',fontSize:'0.75rem'}},
           React.createElement('span',{title:'queued'},'⋯'));
         if (status === 'running') return React.createElement('td',{style:{textAlign:'right'}},
@@ -750,6 +752,10 @@
                     'DIA-NN',React.createElement('br'),React.createElement('span',{style:{fontSize:'0.65rem',fontWeight:400}},'prec · pep · pg')),
                   React.createElement('th',{style:{textAlign:'right',color:'#a78bfa',paddingRight:'0.75rem',whiteSpace:'nowrap'}},
                     'MSFragger-DIA',React.createElement('br'),React.createElement('span',{style:{fontSize:'0.65rem',fontWeight:400}},'prec · pep · pg')),
+                  React.createElement('th',{style:{textAlign:'right',color:'#86efac',paddingRight:'0.75rem',whiteSpace:'nowrap'}},
+                    'Sage-DIA',React.createElement('br'),React.createElement('span',{style:{fontSize:'0.65rem',fontWeight:400}},'PSMs · pep · pg')),
+                  React.createElement('th',{style:{textAlign:'right',color:'#7dd3fc',paddingRight:'0.75rem',whiteSpace:'nowrap'}},
+                    'DIA-NN',React.createElement('br'),React.createElement('span',{style:{fontSize:'0.65rem',fontWeight:400,color:'#7dd3fc'}},'lib-free · pep · pg')),
                   React.createElement('th',{style:{textAlign:'right',color:'#34d399',paddingRight:'0.75rem',whiteSpace:'nowrap'}},
                     'Sage',React.createElement('br'),React.createElement('span',{style:{fontSize:'0.65rem',fontWeight:400}},'PSMs · pep · pg')),
                   React.createElement('th',{style:{textAlign:'right',color:'#fb923c',paddingRight:'0.75rem',whiteSpace:'nowrap'}},
@@ -805,6 +811,10 @@
                       ) : '—'),
                     isRowDia ? React.createElement(CompCell,{entry:comp.msfragger_dia,metric:'precursors',color:'#a78bfa'})
                               : React.createElement('td',{style:{textAlign:'right',color:'var(--border)'}},'—'),
+                    isRowDia ? React.createElement(CompCell,{entry:comp.sage_dia,metric:'psms',color:'#86efac'})
+                              : React.createElement('td',{style:{textAlign:'right',color:'var(--border)'}},'—'),
+                    isRowDia ? React.createElement(CompCell,{entry:comp.diann_libfree,metric:'psms',color:'#7dd3fc'})
+                              : React.createElement('td',{style:{textAlign:'right',color:'var(--border)'}},'—'),
                     // Sage primary
                     React.createElement('td',{style:{textAlign:'right',fontVariantNumeric:'tabular-nums',
                       color:!isRowDia?'#34d399':'var(--muted)',fontWeight:!isRowDia?600:400,paddingRight:'0.75rem'}},
@@ -836,7 +846,7 @@
             'Comparison searches start automatically after each primary search. Click any Type or Workflow cell to annotate. ',
             'MSFragger requires FragPipe · X!Tandem requires tandem.exe · Bruker .d auto-converted via timsconvert. ',
             'Chimerys results are read from locally-cached MSAID Platform parquets — download via Config tab. ',
-            'Andromeda requires MaxQuant 2.x standalone · PrOLuCID requires prolucid.jar + Java.'),
+            'Andromeda uses standalone Andromeda.exe (MaxQuant 2.x) or falls back to MaxQuantCmd.exe (MaxQuant 1.x). · PrOLuCID requires prolucid.jar + Java.'),
         ),
 
         // ══ Run Details View ══════════════════════════════════════════════

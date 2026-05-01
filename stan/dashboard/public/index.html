@@ -142,6 +142,25 @@
     tr:hover { background: rgba(255,230,0,0.06); }
     .empty { text-align: center; color: var(--muted); padding: 3rem; }
     @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    @keyframes neon-pulse {
+      0%, 100% { opacity: 1; filter: drop-shadow(0 0 6px currentColor); }
+      50%       { opacity: 0.55; filter: drop-shadow(0 0 22px currentColor) drop-shadow(0 0 40px currentColor); }
+    }
+    @keyframes glow-ripple {
+      0%   { transform: scale(1);   opacity: 0.7; }
+      100% { transform: scale(2.2); opacity: 0; }
+    }
+    @keyframes slide-in-up {
+      from { opacity: 0; transform: translateY(12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes story-pop {
+      0%   { transform: scale(0.7); opacity: 0; }
+      70%  { transform: scale(1.08); }
+      100% { transform: scale(1);   opacity: 1; }
+    }
+    .neon-pulse { animation: neon-pulse 2s ease-in-out infinite; }
+    .slide-in   { animation: slide-in-up 0.35s ease both; }
     .diagnosis { font-size: 0.85rem; color: #ffaa44; margin-top: 0.5rem; font-style: italic; }
     textarea {
       width: 100%; min-height: 300px;

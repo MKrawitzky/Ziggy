@@ -38,23 +38,22 @@
         let s = 0xCAFEBABE;
         const rng = () => { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (s >>> 0) / 4294967295; };
 
-        // ── Aladdin Sane — clean oval head (The Bends aesthetic) ─────────
-        // ── Ziggy Stardust + Aladdin Sane ────────────────────────────────
-        const cx = W * 0.5, cy = H * 0.63;   // face lower → room for hair above
-        const fw = Math.min(W * 0.138, 115);  // head half-width
-        const fh = Math.min(H * 0.305, 140);  // head half-height (~1.48 aspect)
+        // ── Cat Face — Aladdin Sane lightning bolt edition ───────────────
+        const cx = W * 0.5, cy = H * 0.68;   // face center (lower → room for ears)
+        const fw = Math.min(W * 0.148, 122);  // head half-width (cats = wide faces)
+        const fh = Math.min(H * 0.265, 120);  // head half-height
 
         // Aladdin Sane lightning bolt — starts upper-right, sweeps to lower-left (authentic)
         const bs = fh * 0.90;
         const bpoly = [
-          [cx + bs*.30, cy - bs*.62],   // top-right outer  (right temple/forehead)
-          [cx + bs*.07, cy - bs*.62],   // top-right inner
-          [cx - bs*.10, cy - bs*.01],   // kink left inner  (nose bridge level)
-          [cx + bs*.18, cy + bs*.01],   // kink right jut
-          [cx + bs*.02, cy + bs*.56],   // bottom-right outer
-          [cx - bs*.20, cy + bs*.56],   // bottom-left outer
-          [cx - bs*.12, cy + bs*.01],   // kink left outer
-          [cx + bs*.02, cy - bs*.52],   // ascending back
+          [cx + bs*.30, cy - bs*.62],
+          [cx + bs*.07, cy - bs*.62],
+          [cx - bs*.10, cy - bs*.01],
+          [cx + bs*.18, cy + bs*.01],
+          [cx + bs*.02, cy + bs*.56],
+          [cx - bs*.20, cy + bs*.56],
+          [cx - bs*.12, cy + bs*.01],
+          [cx + bs*.02, cy - bs*.52],
         ];
         const pip = (px, py, poly) => {
           let inside = false;
@@ -67,56 +66,49 @@
         const boltSplitX = (py) => {
           const fy = (py - cy) / bs;
           if (fy < -0.01) {
-            // Upper arm sweeps right-to-left — split along diagonal centerline
             const tt = Math.max(0, Math.min(1, (fy + 0.62) / 0.61));
-            return cx + bs * (0.185 - tt * 0.155); // +0.185 at top → +0.03 at kink
+            return cx + bs * (0.185 - tt * 0.155);
           }
-          // Lower arm — split moves left as bolt descends
           const tt = Math.max(0, Math.min(1, fy / 0.56));
           return cx + bs * (0.03 - tt * 0.14);
         };
 
-        // Clean oval with jaw taper (The Bends head shape)
+        // Cat head — round oval, wide cheeks, gentle jaw taper
         const inFace = (px, py) => {
           const dx = px - cx;
           const normY = (py - cy) / fh;
-          const wf = normY > 0.18 ? Math.max(0.30, 1.0 - (normY-0.18)*0.62) : 1.0;
+          const wf = normY > 0.28 ? Math.max(0.48, 1.0 - (normY-0.28)*0.42) : 1.0;
           return (dx / (fw * wf)) ** 2 + normY * normY < 1.0;
         };
 
-        // Ziggy flame-red spiky proto-mullet
-        const inHair = (px, py) => {
-          const hairCY = cy - fh * 1.42;
-          const hdx = (px - cx) / (fw * 1.55);
-          const hdy = (py - hairCY) / (fh * 0.56);
-          if (hdx*hdx + hdy*hdy < 1.0) return true;
-          const spikeBase = hairCY - fh * 0.48;
-          const spikes = [
-            {ox:cx-fw*0.62, w:fw*0.22, h:fh*0.70, lean:-0.28},
-            {ox:cx-fw*0.12, w:fw*0.20, h:fh*0.88, lean:-0.06},
-            {ox:cx+fw*0.28, w:fw*0.18, h:fh*0.75, lean: 0.12},
-            {ox:cx+fw*0.68, w:fw*0.15, h:fh*0.54, lean: 0.26},
-          ];
-          for (const sp of spikes) {
-            if (py > spikeBase || py < spikeBase - sp.h) continue;
-            const t = (spikeBase-py)/sp.h;
-            if (Math.abs(px-(sp.ox+sp.lean*(spikeBase-py))) < sp.w*(1-t*0.84)) return true;
-          }
-          return false;
+        // ── Cat ear triangles (outer + inner pink) ───────────────────────
+        const earL = [[cx-fw*0.82,cy-fh*1.54],[cx-fw*1.10,cy-fh*0.82],[cx-fw*0.20,cy-fh*0.90]];
+        const earR = [[cx+fw*0.82,cy-fh*1.54],[cx+fw*0.20,cy-fh*0.90],[cx+fw*1.10,cy-fh*0.82]];
+        const earShrink = (tri) => {
+          const mx=(tri[0][0]+tri[1][0]+tri[2][0])/3, my=(tri[0][1]+tri[1][1]+tri[2][1])/3;
+          return tri.map(([x,y])=>[mx+(x-mx)*0.50, my+(y-my)*0.50]);
         };
+        const earLIn=earShrink(earL), earRIn=earShrink(earR);
 
-        // Gold astral circle — forehead, above bolt
-        const goldC = { cx, cy: cy - fh*0.74, r: fw*0.128 };
+        // Gold forehead spot — between ears
+        const goldC = { cx, cy: cy - fh*0.70, r: fw*0.11 };
 
-        // Eye sockets — almond shapes
-        const eyeL = { cx:cx-fw*.33, cy:cy-fh*.25, rx:fw*.165, ry:fh*.068 };
-        const eyeR = { cx:cx+fw*.20, cy:cy-fh*.28, rx:fw*.155, ry:fh*.063 }; // inside bolt (Aladdin Sane)
+        // Cat eyes — large almond, slightly slanted, wider apart
+        const eyeL = { cx:cx-fw*.40, cy:cy-fh*.22, rx:fw*.225, ry:fh*.092 };
+        const eyeR = { cx:cx+fw*.26, cy:cy-fh*.25, rx:fw*.205, ry:fh*.085 };
+        const slitW = fw * 0.030; // slit pupil half-width
         const inEye = (px,py) =>
           (px-eyeL.cx)**2/eyeL.rx**2 + (py-eyeL.cy)**2/eyeL.ry**2 < 1.0 ||
           (px-eyeR.cx)**2/eyeR.rx**2 + (py-eyeR.cy)**2/eyeR.ry**2 < 1.0;
+        const inPupil = (px,py) =>
+          (Math.abs(px-eyeL.cx)<slitW && (py-eyeL.cy)**2<(eyeL.ry*.92)**2) ||
+          (Math.abs(px-eyeR.cx)<slitW && (py-eyeR.cy)**2<(eyeR.ry*.92)**2);
 
-        // Lip oval
-        const lip = { cx, cy:cy+fh*.56, rx:fw*.255, ry:fh*.070 };
+        // Cat nose — small upside-down triangle
+        const nosePoly = [[cx,cy+fh*.10],[cx-fw*.085,cy+fh*.20],[cx+fw*.085,cy+fh*.20]];
+
+        // Muzzle — slightly lighter oval around nose area
+        const muzzle = { cx, cy:cy+fh*.18, rx:fw*.30, ry:fh*.16 };
 
         const mk = (px,py,col,size,alpha,region,ex={}) => ({
           px,py,sx:0,sy:0,col,size,alpha,
@@ -126,29 +118,36 @@
 
         const parts = [];
 
-        // ── 1. ZIGGY FLAME-RED HAIR — spiky proto-mullet ─────────────────
-        for (let att=0,cnt=0; cnt<2500 && att<400000; att++) {
-          const px=cx+(rng()*2-1)*fw*2.1, py=cy-fh*0.38-rng()*fh*2.1;
-          if (!inHair(px,py)) continue;
-          // Tips brighter, roots deeper carmine
-          const normD=Math.max(0,Math.min(1,(cy-fh*0.85-py)/(fh*1.6)));
-          const c=normD>.55
-            ? ['#cc0000','#dd0000','#bb0000'][Math.floor(rng()*3)]
-            : ['#ee1111','#ff2222','#dd1111','#ee2200'][Math.floor(rng()*4)];
-          parts.push(mk(px,py,c, .50+rng()*.90, .45+rng()*.45, 'hair')); cnt++;
-        }
+        // ── 1. CAT EARS — outer grey fur + pink inner ─────────────────────
+        [[earL,earLIn],[earR,earRIn]].forEach(([outer,inner]) => {
+          const xs=outer.map(p=>p[0]),ys=outer.map(p=>p[1]);
+          const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+          for (let att=0,cnt=0; cnt<1400 && att<250000; att++) {
+            const px=x0+rng()*(x1-x0), py=y0+rng()*(y1-y0);
+            if (!pip(px,py,outer)) continue;
+            const isInner = pip(px,py,inner);
+            // Outer: warm grey; inner: bubble-gum pink
+            const c = isInner
+              ? ['#ff9bb0','#ffaabb','#ff88a8','#ffbbcc'][Math.floor(rng()*4)]
+              : ['#d4c8b8','#c8beae','#bfb5a5','#ccc2b2','#e0d8cc'][Math.floor(rng()*5)];
+            parts.push(mk(px,py,c, .38+rng()*.80, .50+rng()*.45, 'hair')); cnt++;
+          }
+        });
 
-        // ── 2. FACE SKIN — snow-white porcelain (rice-powder pale) ───────
-        for (let att=0,cnt=0; cnt<10000 && att<700000; att++) {
+        // ── 2. FACE SKIN — white/cream cat fur ────────────────────────────
+        for (let att=0,cnt=0; cnt<9000 && att<600000; att++) {
           const px=cx+(rng()*2-1)*fw*1.12, py=cy+(rng()*2-1)*fh;
           if (!inFace(px,py)) continue;
           if (inEye(px,py)) continue;
-          if (pip(px,py,bpoly)) continue;   // bolt pass below
-          // skip gold circle area
-          if (Math.hypot(px-goldC.cx, py-goldC.cy) < goldC.r*1.05) continue;
-          const col=['#f9f7ff','#fafbff','#f5f3fe','#fefeff'][Math.floor(rng()*4)];
-          parts.push(mk(px,py,col, .28+rng()*.44, .65+rng()*.28, 'face'));
-          cnt++;
+          if (pip(px,py,bpoly)) continue;
+          if (pip(px,py,nosePoly)) continue;
+          if (Math.hypot(px-goldC.cx,py-goldC.cy)<goldC.r*1.05) continue;
+          // Muzzle area slightly warmer/lighter
+          const inMuzz = (px-muzzle.cx)**2/muzzle.rx**2+(py-muzzle.cy)**2/muzzle.ry**2 < 1.0;
+          const col = inMuzz
+            ? ['#faf8f6','#fcfaf8','#f8f6f4'][Math.floor(rng()*3)]
+            : ['#f0eef8','#eeeeff','#f2f0fa','#fefeff'][Math.floor(rng()*4)];
+          parts.push(mk(px,py,col, .28+rng()*.44, .65+rng()*.28, 'face')); cnt++;
         }
 
         // ── 3. BOLT — cobalt-blue left / arterial-red right ──────────────
@@ -162,97 +161,103 @@
           parts.push(mk(px,py,col, .85+rng()*1.15, .82+rng()*.16, 'bolt')); cnt++;
         }
 
-        // ── 4. GOLD ASTRAL CIRCLE — forehead center ───────────────────────
-        for (let i=0;i<600;i++) {
+        // ── 4. GOLD FOREHEAD SPOT ─────────────────────────────────────────
+        for (let i=0;i<550;i++) {
           const a=rng()*Math.PI*2, r=Math.sqrt(rng());
           const isRim=r>0.68;
           const px=goldC.cx+Math.cos(a)*goldC.r*r;
           const py=goldC.cy+Math.sin(a)*goldC.r*r;
-          if (!inFace(px,py)) continue;
+          if (!inFace(px,py)&&!pip(px,py,earL)&&!pip(px,py,earR)) continue;
           parts.push(mk(px,py, isRim?'#FFD700':'#DAAA00',
             isRim?.70+rng()*1.0:.50+rng()*.70,
             isRim?.82+rng()*.16:.72+rng()*.22,
-            'bolt', {speed:1.0+rng()*1.2, wSpeed:.4+rng()*.5}));
+            'bolt', {speed:1.0+rng()*1.2,wSpeed:.4+rng()*.5}));
         }
 
-        // ── 5. RED PANDA EYE SMEARS — large theatrical red around sockets
-        [eyeL, eyeR].forEach((eye,ei) => {
-          for (let i=0;i<500;i++) {
-            const t=(rng()*2-1);
-            const ex=eye.cx+t*eye.rx*1.85+(ei===0?-1:1)*rng()*eye.rx*.4;
-            const ey=eye.cy+(rng()*2-1)*eye.ry*2.8;
-            if (Math.abs(ey-eye.cy)>eye.ry*2.6) continue;
-            if (!inFace(ex,ey)) continue;
-            const c=rng()<.6?'#cc0000':'#991111';
-            parts.push(mk(ex,ey,c, .38+rng()*.52, .32+rng()*.38, 'shadow',
-              {speed:.8+rng()*.9,wSpeed:.3+rng()*.5}));
-          }
-        });
-
-        // ── 6. EYES — solid dark (no iris detail, theatrical flat black) ──
+        // ── 5. EYE GLOW — amber/gold iris halo ───────────────────────────
         [eyeL, eyeR].forEach(eye => {
-          for (let i=0;i<800;i++) {
+          for (let i=0;i<420;i++) {
             const a=rng()*Math.PI*2, r=Math.sqrt(rng());
             const px=eye.cx+Math.cos(a)*eye.rx*r;
             const py=eye.cy+Math.sin(a)*eye.ry*r;
-            const edge=r>.76;
-            parts.push(mk(px,py, edge?'#18101e':'#060610',
-              edge?.42+rng()*.50:.58+rng()*.75,
-              edge?.72+rng()*.22:.90+rng()*.10,
-              'eye',{speed:.8+rng()*.8,wSpeed:.3+rng()*.4}));
+            const isSlit = Math.abs(px-eye.cx)<slitW;
+            // Iris: gold/amber; slit pupil: black
+            const c = isSlit ? '#080410' : r>0.72
+              ? ['#b45309','#d97706','#f59e0b'][Math.floor(rng()*3)]
+              : ['#92400e','#d97706','#fbbf24','#fcd34d'][Math.floor(rng()*4)];
+            const region = isSlit ? 'eye' : 'bolt';
+            parts.push(mk(px,py,c,
+              isSlit ? .60+rng()*.80 : .45+rng()*.65,
+              isSlit ? .88+rng()*.12 : .72+rng()*.25,
+              region, {speed:.8+rng()*.9,wSpeed:.3+rng()*.5}));
           }
         });
 
-        // ── 6b. BLUE EYESHADOW — electric blue arc above left eye ───────────
-        for (let i=0;i<500;i++) {
-          const ex = eyeL.cx + (rng()*2-1)*eyeL.rx*1.5;
-          const ey = eyeL.cy - eyeL.ry*0.4 - rng()*eyeL.ry*4.0;
-          if (!inFace(ex,ey)) continue;
-          if (pip(ex,ey,bpoly)) continue;
-          const blues=['#1d4ed8','#2563eb','#3b82f6','#60a5fa','#7c3aed'];
-          parts.push(mk(ex,ey,blues[Math.floor(rng()*blues.length)],
-            .38+rng()*.55, .30+rng()*.42, 'brow',
-            {speed:.8+rng()*1.2,wSpeed:.3+rng()*.5}));
+        // ── 6. CAT NOSE — pink triangle ───────────────────────────────────
+        for (let att=0,cnt=0; cnt<300 && att<80000; att++) {
+          const px=cx+(rng()*2-1)*fw*.12, py=cy+fh*.10+rng()*fh*.12;
+          if (!pip(px,py,nosePoly)) continue;
+          const c=['#ff6b8a','#ff7799','#ff9999','#ffaaaa'][Math.floor(rng()*4)];
+          parts.push(mk(px,py,c, .55+rng()*.80, .72+rng()*.25, 'lip')); cnt++;
         }
 
-        // ── 7. CHEEKBONE "BOLTS OF RED" — diagonal red slashes ───────────
-        [-1,1].forEach(side => {
-          for (let i=0;i<280;i++) {
-            const t=rng();  // 0=high cheek, 1=toward jaw
-            const bx=cx+side*(fw*.52+t*fw*.30)+(rng()-.5)*fw*.10;
-            const by=cy-fh*.08+t*fh*.50+(rng()-.5)*fh*.05;
-            if (!inFace(bx,by)||inEye(bx,by)) continue;
-            if (pip(bx,by,bpoly)) continue;  // don't draw over bolt
-            parts.push(mk(bx,by,'#cc1111', .40+rng()*.55, .38+rng()*.42, 'shadow'));
+        // ── 7. WHISKERS — direct path scatter ────────────────────────────
+        const whiskerDefs = [
+          // [ox, oy, angle (rad), length]   left side goes left (angle ~π), right goes right (~0)
+          [cx-fw*.08, cy+fh*.14, Math.PI+.18, fw*2.7],
+          [cx-fw*.08, cy+fh*.18, Math.PI+.04, fw*2.9],
+          [cx-fw*.08, cy+fh*.22, Math.PI-.08, fw*2.7],
+          [cx-fw*.08, cy+fh*.26, Math.PI-.22, fw*2.2],
+          [cx+fw*.08, cy+fh*.14, -.18, fw*2.7],
+          [cx+fw*.08, cy+fh*.18, -.04, fw*2.9],
+          [cx+fw*.08, cy+fh*.22,  .08, fw*2.7],
+          [cx+fw*.08, cy+fh*.26,  .22, fw*2.2],
+        ];
+        for (const [ox,oy,ang,len] of whiskerDefs) {
+          const nPts = Math.round(len * 0.8);
+          for (let i=0;i<nPts;i++) {
+            const t=rng();
+            const px=ox+Math.cos(ang)*t*len+(rng()-.5)*fh*.010;
+            const py=oy+Math.sin(ang)*t*len+(rng()-.5)*fh*.010;
+            // Fade opacity toward tips
+            const alpha = .55+rng()*.40-t*.28;
+            const c=rng()<.65?'#ffffff':'#eef0ff';
+            parts.push(mk(px,py,c, .22+rng()*.30, alpha, 'bolt',
+              {speed:.4+rng()*.6,wSpeed:.15+rng()*.35}));
+          }
+        }
+
+        // ── 8. TABBY FOREHEAD STRIPES — subtle M-mark ────────────────────
+        for (let stripe=0; stripe<3; stripe++) {
+          const sy = cy - fh*(0.62 + stripe*0.14);
+          for (let i=0;i<120;i++) {
+            const px = cx + (rng()*2-1)*fw*(0.24 - stripe*0.06);
+            const py = sy + (rng()-.5)*fh*.040;
+            if (!inFace(px,py)||pip(px,py,bpoly)) continue;
+            parts.push(mk(px,py,'#b0a8c4', .22+rng()*.35, .28+rng()*.25, 'brow'));
+          }
+        }
+
+        // ── 9. EYE SHADOW — subtle purple ring around each eye ───────────
+        [eyeL, eyeR].forEach(eye => {
+          for (let i=0;i<260;i++) {
+            const a=rng()*Math.PI*2;
+            const r=.85+rng()*.65;  // ring just outside iris
+            const px=eye.cx+Math.cos(a)*eye.rx*r;
+            const py=eye.cy+Math.sin(a)*eye.ry*r*0.9;
+            if (!inFace(px,py)) continue;
+            const c=['#7c3aed','#6d28d9','#a78bfa','#4c1d95'][Math.floor(rng()*4)];
+            parts.push(mk(px,py,c,.28+rng()*.38,.22+rng()*.28,'shadow',
+              {speed:.7+rng()*.9,wSpeed:.3+rng()*.5}));
           }
         });
 
-        // ── 8. LIPS — deep bold red ───────────────────────────────────────
-        for (let i=0;i<700;i++) {
-          const a=rng()*Math.PI*2, r=Math.sqrt(rng());
-          parts.push(mk(lip.cx+Math.cos(a)*lip.rx*r, lip.cy+Math.sin(a)*lip.ry*r,
-            rng()<.55?'#cc0000':'#e61515', .55+rng()*.80, .68+rng()*.28, 'lip'));
-        }
-
-        // ── 9. NECK ───────────────────────────────────────────────────────
-        for (let i=0;i<250;i++) {
-          const nx=cx+(rng()-.5)*fw*.38;
-          const ny=cy+fh*.93+rng()*fh*.36;
-          if (ny>cy+fh*1.30||Math.abs(nx-cx)>fw*.20) continue;
-          parts.push(mk(nx,ny,'#f0eef8', .28+rng()*.42, .58+rng()*.28, 'neck'));
-        }
-
-        // ── 9b. TEARDROP GEM — Brian Duffy's spontaneous glitter tear ────
-        // (placed at right shoulder/clavicle in the original Duffy photo)
-        const tearX = cx + fw*0.52, tearY = cy + fh*1.18;
+        // ── 10. NECK RUFF — soft fluffy chest ────────────────────────────
         for (let i=0;i<200;i++) {
-          const a=rng()*Math.PI*2;
-          const r=Math.sqrt(rng())*fw*0.062;
-          const px=tearX+Math.cos(a)*r, py=tearY+Math.sin(a)*r*1.6;
-          const gems=['#ffffff','#f0f8ff','#b8e0ff','#ffd700','#DAAA00','#e2f5ff'];
-          parts.push(mk(px,py,gems[Math.floor(rng()*gems.length)],
-            .55+rng()*.80, .72+rng()*.28, 'bolt',
-            {speed:1.5+rng()*2.5,wSpeed:.5+rng()*.9}));
+          const nx=cx+(rng()*2-1)*fw*.55;
+          const ny=cy+fh*.95+rng()*fh*.32;
+          if (ny>cy+fh*1.30||Math.abs(nx-cx)>fw*.52) continue;
+          parts.push(mk(nx,ny,'#e8e4f4',.28+rng()*.42,.48+rng()*.28,'neck'));
         }
 
         // ── Stars ─────────────────────────────────────────────────────────

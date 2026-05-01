@@ -326,6 +326,62 @@ def _has_timsconvert() -> bool:
     return shutil.which("timsconvert") is not None
 
 
+# ── Sage auto-detection ──────────────────────────────────────────────────────
+
+_SAGE_SEARCH_PATHS: list[Path] = [
+    Path.home() / "Desktop/sage/sage.exe",
+    Path.home() / "sage/sage.exe",
+    Path("C:/sage/sage.exe"),
+    Path("C:/tools/sage/sage.exe"),
+    Path("D:/sage/sage.exe"),
+    Path("E:/sage/sage.exe"),
+    Path("E:/tools/sage/sage.exe"),
+    # Linux/macOS style (for cross-platform dev)
+    Path.home() / "sage/sage",
+    Path("/usr/local/bin/sage"),
+]
+
+
+def _find_sage_exe(hint: str | None = None) -> Path | None:
+    """Return path to sage executable, or None if not found."""
+    if hint and Path(hint).exists():
+        return Path(hint)
+    for candidate in _SAGE_SEARCH_PATHS:
+        if candidate.exists():
+            return candidate
+    which = shutil.which("sage") or shutil.which("sage.exe")
+    if which:
+        return Path(which)
+    return None
+
+
+# ── DIA-NN auto-detection ────────────────────────────────────────────────────
+
+_DIANN_SEARCH_PATHS: list[Path] = [
+    Path("E:/DIANN/DiaNN.exe"),
+    Path("E:/DIANN/diann-linux"),
+    Path("C:/DIA-NN/DiaNN.exe"),
+    Path("C:/Program Files/DIA-NN/DiaNN.exe"),
+    Path("D:/DIANN/DiaNN.exe"),
+    Path("D:/DIA-NN/DiaNN.exe"),
+    Path.home() / "DIA-NN/DiaNN.exe",
+    Path.home() / "Desktop/DIA-NN/DiaNN.exe",
+]
+
+
+def _find_diann_exe(hint: str | None = None) -> Path | None:
+    """Return path to DiaNN.exe, or None if not found."""
+    if hint and Path(hint).exists():
+        return Path(hint)
+    for candidate in _DIANN_SEARCH_PATHS:
+        if candidate.exists():
+            return candidate
+    which = shutil.which("DiaNN") or shutil.which("diann") or shutil.which("DiaNN.exe")
+    if which:
+        return Path(which)
+    return None
+
+
 _MSCONVERT_SEARCH_PATHS: list[Path] = [
     Path("C:/ProteoWizard/msconvert.exe"),
     Path("C:/Program Files/ProteoWizard/msconvert.exe"),
@@ -988,6 +1044,8 @@ def _get_db_path() -> Path:
 # All comparison engines tracked in the UI, in display order.
 _ALL_COMPARISON_ENGINES = (
     "msfragger_dia",
+    "sage_dia",
+    "diann_libfree",
     "msfragger_dda",
     "xtandem",
     "comet",
@@ -998,7 +1056,7 @@ _ALL_COMPARISON_ENGINES = (
 )
 
 # Engines that only make sense for DIA data.
-_DIA_ONLY_ENGINES = {"msfragger_dia"}
+_DIA_ONLY_ENGINES = {"msfragger_dia", "sage_dia", "diann_libfree"}
 
 # Engines that only make sense for DDA data.
 _DDA_ONLY_ENGINES = {"msfragger_dda", "xtandem", "comet", "maxquant", "andromeda", "prolucid"}
@@ -1787,6 +1845,381 @@ def _dispatch_maxquant(
     logger.info("Dispatched comparison: maxquant for %s", raw_path.name)
 
 
+# ── Sage DIA engine ───────────────────────────────────────────────────────────
+
+import json as _json
+
+
+def _build_sage_dia_config(
+    fasta_path: str,
+    mzml_path: Path,
+    output_dir: Path,
+    search_config: dict | None = None,
+) -> Path:
+    """Write a Sage JSON config for DIA-mode searching and return its path.
+
+    Key DIA settings:
+    - ``wide_window: true``   — enables data-independent acquisition mode
+    - precursor_tol ppm ±50  — wide window to catch all isolation windows
+    - fragment_tol ppm 20    — standard timsTOF MS/MS accuracy
+    """
+    sc = search_config or _WORKFLOW_PRESETS[_DEFAULT_WORKFLOW]
+    specificity = sc.get("specificity", "specific")
+    missed      = sc.get("missed_cleavages", 2)
+    min_len     = sc.get("min_len", 7)
+    max_len     = sc.get("max_len", 30)
+    min_charge  = sc.get("min_charge", 2)
+    max_charge  = sc.get("max_charge", 4)
+
+    enzyme_key  = sc.get("enzyme", "Trypsin/P")
+    cleave_at   = "KR" if enzyme_key.startswith("Trypsin") else \
+                  "K"  if "LysC" in enzyme_key else \
+                  ""
+    restrict    = "P"  if enzyme_key.endswith("/P") else ""
+
+    if specificity == "non-specific":
+        cleave_at = ""; restrict = ""
+        semi = False
+    elif specificity == "semi":
+        semi = True
+    else:
+        semi = False
+
+    # Fixed mods
+    static_mods: dict[str, float] = {}
+    for m in sc.get("fixed_mods", []):
+        if "Carbamidomethyl" in m and "C" in m:
+            static_mods["C"] = 57.021464
+        elif "TMT6plex (K)" in m:
+            static_mods["K"] = 229.162932
+        elif "TMT6plex (N-term)" in m:
+            static_mods["^"] = 229.162932
+
+    # Variable mods
+    var_mods: list[dict] = []
+    for m in sc.get("var_mods", []):
+        if "Oxidation (M)" in m:
+            var_mods.append({"name": "Oxidation", "mass": 15.994915, "targets": ["M"], "position": "Anywhere", "max_mods": 3})
+        elif "Acetyl (Protein N-term)" in m:
+            var_mods.append({"name": "Acetyl", "mass": 42.010565, "targets": ["$"], "position": "ProteinN-term", "max_mods": 1})
+        elif "Phospho (STY)" in m:
+            var_mods.append({"name": "Phospho", "mass": 79.966331, "targets": ["S", "T", "Y"], "position": "Anywhere", "max_mods": 3})
+        elif "Deamidation (NQ)" in m:
+            var_mods.append({"name": "Deamidation", "mass": 0.984016, "targets": ["N", "Q"], "position": "Anywhere", "max_mods": 3})
+
+    config: dict = {
+        "database": {
+            "bucket_size": 32768,
+            "enzyme": {
+                "missed_cleavages": missed,
+                "min_len": min_len,
+                "max_len": max_len,
+                "cleave_at": cleave_at,
+                "restrict": restrict,
+                "semi_enzymatic": semi,
+                "c_terminal": True,
+            },
+            "peptide_min_mass": 500.0,
+            "peptide_max_mass": 5000.0,
+            "ion_kinds": ["b", "y"],
+            "min_ion_index": 2,
+            "static_mods": static_mods,
+            "variable_mods": var_mods,
+            "generate_decoys": True,
+            "fasta": str(fasta_path),
+        },
+        "precursor_tol": {"ppm": [-50, 50]},
+        "fragment_tol": {"ppm": [-20, 20]},
+        "isotope_errors": [-1, 3],
+        "deisotope": True,
+        "chimera": False,
+        "wide_window": True,
+        "min_peaks": 6,
+        "max_peaks": 150,
+        "min_matched_peaks": 4,
+        "max_fragment_charge": 2,
+        "report_psms": 1,
+        "predict_rt": True,
+        "min_precursor_charge": min_charge,
+        "max_precursor_charge": max_charge,
+        "mzml_paths": [str(mzml_path)],
+        "output_directory": str(output_dir),
+    }
+
+    config_path = output_dir / "sage_dia_config.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(_json.dumps(config, indent=2))
+    return config_path
+
+
+def _parse_sage_dia_tsv(output_dir: Path) -> dict[str, int | None]:
+    """Parse Sage TSV output (results.sage.tsv) at q_value < 0.01.
+
+    Sage DIA writes results.sage.tsv (not .parquet when --parquet is omitted).
+    Counts unique stripped peptide sequences and unique protein groups.
+    """
+    tsv = output_dir / "results.sage.tsv"
+    if not tsv.exists():
+        candidates = list(output_dir.glob("*.sage.tsv")) + list(output_dir.glob("results*.tsv"))
+        if not candidates:
+            return {"n_psms": None, "n_peptides": None, "n_proteins": None}
+        tsv = candidates[0]
+
+    n_psms = 0
+    peptides: set[str] = set()
+    proteins: set[str] = set()
+
+    try:
+        with open(tsv, newline="", encoding="utf-8", errors="replace") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            for row in reader:
+                try:
+                    q = float(row.get("spectrum_q", row.get("q_value", "1")) or 1)
+                except ValueError:
+                    q = 1.0
+                if q >= 0.01:
+                    continue
+                seq = row.get("peptide", row.get("stripped_peptide", "")).strip()
+                prot = row.get("proteins", "").strip()
+                # Sage uses '.' as a decoy prefix marker in protein names
+                if prot.startswith("rev_") or prot.startswith("DECOY_"):
+                    continue
+                n_psms += 1
+                if seq:
+                    # Strip modification brackets to get bare sequence
+                    bare = re.sub(r"\[[\d.+-]+\]", "", seq)
+                    peptides.add(bare)
+                if prot:
+                    proteins.add(prot.split(";")[0].strip())
+    except Exception:
+        logger.debug("_parse_sage_dia_tsv parse error", exc_info=True)
+        return {"n_psms": None, "n_peptides": None, "n_proteins": None}
+
+    return {
+        "n_psms":     n_psms          or None,
+        "n_peptides": len(peptides)   or None,
+        "n_proteins": len(proteins)   or None,
+    }
+
+
+def _run_sage_dia_thread(
+    run_id: str,
+    raw_path: Path,
+    output_dir: Path,
+    sage_exe: Path,
+    fasta_path: str,
+    threads: int,
+    search_config: dict | None = None,
+) -> None:
+    """Background thread: convert .d → mzML if needed, run Sage in DIA mode, write results."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _upsert_comparison(run_id, "sage_dia", "running")
+
+    # ── 1. Resolve input file ────────────────────────────────────────────────
+    suffix = raw_path.suffix.lower()
+    if suffix == ".d" or raw_path.is_dir():
+        if not _find_msconvert() and not _has_timsconvert():
+            _upsert_comparison(run_id, "sage_dia", "not_installed",
+                               error_msg="msconvert or timsconvert required for .d files")
+            return
+        # DIA mzML: keep both MS1 and MS2 (Sage DIA needs MS1 for precursor matching)
+        mzml_path = output_dir / (raw_path.stem + ".mzML")
+        if not mzml_path.exists():
+            output_dir.mkdir(parents=True, exist_ok=True)
+            msconvert = _find_msconvert()
+            if msconvert:
+                log_path = output_dir / "msconvert_dia.log"
+                cmd = [
+                    str(msconvert), str(raw_path), "--mzML",
+                    "--filter", "zeroSamples removeExtra",
+                    "--zlib", "--32",
+                    "--outdir", str(output_dir),
+                ]
+                try:
+                    with open(log_path, "w") as lf:
+                        subprocess.run(cmd, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                                       text=True, timeout=3600)
+                except Exception as exc:
+                    logger.warning("sage_dia msconvert failed: %s", exc)
+                found = list(output_dir.glob("*.mzML"))
+                if found:
+                    mzml_path = found[0]
+            if not mzml_path.exists():
+                converted = _convert_d_to_mzml(raw_path, output_dir)
+                if not converted:
+                    _upsert_comparison(run_id, "sage_dia", "failed",
+                                       error_msg="mzML conversion failed")
+                    return
+                mzml_path = converted
+        input_file = mzml_path
+    elif suffix in (".mzml", ".mzxml"):
+        input_file = raw_path
+    elif suffix == ".raw":
+        # Thermo .raw — attempt direct (Sage ≥0.14 can read .raw on Windows)
+        input_file = raw_path
+    else:
+        input_file = raw_path
+
+    # ── 2. Write Sage DIA config ─────────────────────────────────────────────
+    config_path = _build_sage_dia_config(fasta_path, input_file, output_dir, search_config)
+
+    # ── 3. Run Sage (no --parquet — we parse the TSV) ────────────────────────
+    cmd = [str(sage_exe), str(config_path)]
+    if threads > 0:
+        cmd += ["--threads", str(threads)]
+    log_path = output_dir / "sage_dia.log"
+    logger.info("Sage-DIA starting: %s", raw_path.name)
+
+    try:
+        with open(log_path, "w") as lf:
+            subprocess.run(
+                cmd, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                text=True, timeout=7200, cwd=str(output_dir),
+            )
+    except subprocess.CalledProcessError as e:
+        _upsert_comparison(run_id, "sage_dia", "failed",
+                           error_msg=f"exit {e.returncode}", result_path=str(output_dir))
+        logger.error("Sage-DIA failed (rc=%d): %s", e.returncode, raw_path.name)
+        return
+    except subprocess.TimeoutExpired:
+        _upsert_comparison(run_id, "sage_dia", "failed",
+                           error_msg="timeout (2h)", result_path=str(output_dir))
+        return
+    except Exception as exc:
+        _upsert_comparison(run_id, "sage_dia", "failed", error_msg=str(exc))
+        return
+
+    # ── 4. Parse and store results ───────────────────────────────────────────
+    stats = _parse_sage_dia_tsv(output_dir)
+    _upsert_comparison(run_id, "sage_dia", "done",
+                       result_path=str(output_dir), **stats)
+    logger.info("Sage-DIA done: %s — PSMs=%s  peptides=%s  proteins=%s",
+                raw_path.name, stats["n_psms"], stats["n_peptides"], stats["n_proteins"])
+
+
+# ── DIA-NN library-free engine ────────────────────────────────────────────────
+
+def _parse_diann_libfree_tsv(output_dir: Path) -> dict[str, int | None]:
+    """Parse DIA-NN library-free report.tsv at Q.Value < 0.01.
+
+    Counts unique Stripped.Sequence and unique Protein.Group values.
+    n_psms is reported as precursor count (unique peptide + charge combos).
+    """
+    report = output_dir / "report.tsv"
+    if not report.exists():
+        candidates = list(output_dir.glob("report*.tsv"))
+        if not candidates:
+            return {"n_psms": None, "n_peptides": None, "n_proteins": None}
+        report = candidates[0]
+
+    n_psms = 0
+    peptides: set[str] = set()
+    proteins: set[str] = set()
+
+    try:
+        with open(report, newline="", encoding="utf-8", errors="replace") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            for row in reader:
+                try:
+                    q = float(row.get("Q.Value", "1") or 1)
+                except ValueError:
+                    q = 1.0
+                if q >= 0.01:
+                    continue
+                seq  = row.get("Stripped.Sequence", "").strip()
+                prot = row.get("Protein.Group", "").strip()
+                if not seq:
+                    continue
+                n_psms += 1
+                peptides.add(seq)
+                if prot:
+                    proteins.add(prot)
+    except Exception:
+        logger.debug("_parse_diann_libfree_tsv parse error", exc_info=True)
+        return {"n_psms": None, "n_peptides": None, "n_proteins": None}
+
+    return {
+        "n_psms":     n_psms          or None,
+        "n_peptides": len(peptides)   or None,
+        "n_proteins": len(proteins)   or None,
+    }
+
+
+def _run_diann_libfree_thread(
+    run_id: str,
+    raw_path: Path,
+    output_dir: Path,
+    diann_exe: Path,
+    fasta_path: str,
+    threads: int,
+    search_config: dict | None = None,
+) -> None:
+    """Background thread: run DIA-NN in library-free mode (FASTA only, no --lib).
+
+    DIA-NN performs in silico spectral prediction internally when no library
+    is provided. Output is report.tsv in the output directory.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _upsert_comparison(run_id, "diann_libfree", "running")
+
+    sc = search_config or _WORKFLOW_PRESETS[_DEFAULT_WORKFLOW]
+    missed   = sc.get("missed_cleavages", 2)
+    min_len  = sc.get("min_len", 7)
+    max_len  = sc.get("max_len", 30)
+
+    report_path = output_dir / "report.tsv"
+
+    # Build DIA-NN command — no --lib flag means library-free mode
+    cmd = [
+        str(diann_exe),
+        "--f", str(raw_path),
+        "--fasta", fasta_path,
+        "--out", str(report_path),
+        "--threads", str(max(2, threads)),
+        "--missed-cleavages", str(missed),
+        "--min-pep-len", str(min_len),
+        "--max-pep-len", str(max_len),
+        "--cut", "K*,R*",       # tryptic cleavage
+        "--var-mods", "1",
+        "--unimod4",            # Carbamidomethyl (C) fixed
+        "--verbose", "1",
+        "--qvalue", "0.01",
+        "--matrices",           # generate peptide/protein matrices
+        "--no-prot-inf",        # skip protein inference (faster, use Protein.Group)
+    ]
+    if threads > 0:
+        pass  # already added above
+
+    log_path = output_dir / "diann_libfree.log"
+    logger.info("DIA-NN lib-free starting: %s", raw_path.name)
+
+    try:
+        with open(log_path, "w") as lf:
+            subprocess.run(
+                cmd, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                text=True, timeout=14400,  # 4h — lib-free is slow (in silico library build)
+                cwd=str(output_dir),
+            )
+    except subprocess.CalledProcessError as e:
+        _upsert_comparison(run_id, "diann_libfree", "failed",
+                           error_msg=f"exit {e.returncode}", result_path=str(output_dir))
+        logger.error("DIA-NN lib-free failed (rc=%d): %s", e.returncode, raw_path.name)
+        return
+    except subprocess.TimeoutExpired:
+        _upsert_comparison(run_id, "diann_libfree", "failed",
+                           error_msg="timeout (4h)", result_path=str(output_dir))
+        return
+    except Exception as exc:
+        _upsert_comparison(run_id, "diann_libfree", "failed", error_msg=str(exc))
+        return
+
+    stats = _parse_diann_libfree_tsv(output_dir)
+    _upsert_comparison(run_id, "diann_libfree", "done",
+                       result_path=str(output_dir), **stats)
+    logger.info("DIA-NN lib-free done: %s — precursors=%s  peptides=%s  proteins=%s",
+                raw_path.name, stats["n_psms"], stats["n_peptides"], stats["n_proteins"])
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def dispatch_comparison_searches(
@@ -1883,6 +2316,63 @@ def dispatch_comparison_searches(
             if not is_dia and eng == "msfragger_dia":
                 continue
             _upsert_comparison(run_id, eng, "not_installed", error_msg="FragPipe not found")
+
+    # ── Sage DIA (standalone — already installed for primary DDA searches) ────
+    if is_dia:
+        sage_exe = _find_sage_exe()
+        if sage_exe:
+            sage_fasta = fasta_path
+            if (not sage_fasta or not Path(sage_fasta).exists()) and fragpipe:
+                bundled = _fragpipe_paths(fragpipe).get("bundled_fasta")
+                if bundled and Path(str(bundled)).exists():
+                    sage_fasta = str(bundled)
+            if sage_fasta and Path(sage_fasta).exists():
+                t = threading.Thread(
+                    target=_run_sage_dia_thread,
+                    args=(run_id, raw_path, comparison_base / "sage_dia",
+                          sage_exe, sage_fasta, threads, search_config),
+                    daemon=True,
+                    name=f"comp-sage_dia-{run_id[:16]}",
+                )
+                t.start()
+                logger.info("Dispatched comparison: sage_dia for %s (thread: %s)",
+                            raw_path.name, t.name)
+            else:
+                logger.warning("No FASTA found — skipping Sage-DIA comparison for %s", run_id)
+                _upsert_comparison(run_id, "sage_dia", "failed", error_msg="No FASTA available")
+        else:
+            logger.debug("Sage not found — marking not_installed for %s", run_id)
+            _upsert_comparison(run_id, "sage_dia", "not_installed",
+                               error_msg="sage executable not found")
+
+    # ── DIA-NN library-free (same binary as primary DIA-NN search) ───────────
+    if is_dia:
+        diann_exe = _find_diann_exe()
+        if diann_exe:
+            diann_fasta = fasta_path
+            if (not diann_fasta or not Path(diann_fasta).exists()) and fragpipe:
+                bundled = _fragpipe_paths(fragpipe).get("bundled_fasta")
+                if bundled and Path(str(bundled)).exists():
+                    diann_fasta = str(bundled)
+            if diann_fasta and Path(diann_fasta).exists():
+                t = threading.Thread(
+                    target=_run_diann_libfree_thread,
+                    args=(run_id, raw_path, comparison_base / "diann_libfree",
+                          diann_exe, diann_fasta, threads, search_config),
+                    daemon=True,
+                    name=f"comp-diann_libfree-{run_id[:16]}",
+                )
+                t.start()
+                logger.info("Dispatched comparison: diann_libfree for %s (thread: %s)",
+                            raw_path.name, t.name)
+            else:
+                logger.warning("No FASTA found — skipping DIA-NN lib-free comparison for %s", run_id)
+                _upsert_comparison(run_id, "diann_libfree", "failed",
+                                   error_msg="No FASTA available")
+        else:
+            logger.debug("DIA-NN not found — marking not_installed for %s", run_id)
+            _upsert_comparison(run_id, "diann_libfree", "not_installed",
+                               error_msg="DiaNN.exe not found")
 
     # ── X!Tandem (standalone — does not need FragPipe) ───────────────────────
     if not is_dia:
@@ -1987,7 +2477,7 @@ def dispatch_comparison_searches(
         else:
             logger.debug("PrOLuCID not found — marking not_installed for %s", run_id)
             _upsert_comparison(run_id, "prolucid", "not_installed",
-                               error_msg="prolucid.jar not found")
+                               error_msg="prolucid.jar not found — download from github.com/Yates-lab")
 
 
 # ── Andromeda (standalone) ─────────────────────────────────────────────────────
@@ -2010,13 +2500,26 @@ _ANDROMEDA_SEARCH_PATHS: list[Path] = [
 
 
 def _find_andromeda() -> Path | None:
-    """Return path to standalone Andromeda.exe or None if not found."""
+    """Return path to standalone Andromeda.exe, or MaxQuantCmd.exe as fallback.
+
+    MaxQuant 1.x does not ship a standalone Andromeda executable; only MaxQuant
+    2.x does.  When the standalone binary is absent we fall back to MaxQuantCmd
+    and run a full MaxQuant job — Andromeda is MaxQuant's internal search
+    engine, so the PSM/peptide/protein counts are identical.  The caller
+    detects the fallback by checking whether the returned path ends with
+    'MaxQuantCmd.exe'.
+    """
     for p in _ANDROMEDA_SEARCH_PATHS:
         if p.is_file():
             return p
     found = shutil.which("Andromeda.exe") or shutil.which("Andromeda")
     if found:
         return Path(found)
+    # Fallback: MaxQuantCmd.exe (MaxQuant uses Andromeda internally)
+    mq = _find_maxquant()
+    if mq:
+        logger.info("Andromeda.exe not found — will route through MaxQuantCmd.exe (%s)", mq)
+        return mq
     return None
 
 
@@ -2187,10 +2690,47 @@ def _run_andromeda_thread(
     threads: int,
     search_config: dict | None = None,
 ) -> None:
-    """Background thread: run standalone Andromeda and write results to DB."""
+    """Background thread: run standalone Andromeda (or MaxQuantCmd fallback) and write results."""
     output_dir.mkdir(parents=True, exist_ok=True)
     _upsert_comparison(run_id, "andromeda", "running")
 
+    # Detect whether we're using the MaxQuantCmd fallback (MaxQuant 1.x, no standalone Andromeda).
+    # MaxQuant uses Andromeda internally so results are equivalent.
+    using_maxquant_fallback = andromeda_exe.name.lower() == "maxquantcmd.exe"
+
+    if using_maxquant_fallback:
+        # ── MaxQuant fallback path ───────────────────────────────────────────
+        logger.info("Andromeda (via MaxQuantCmd fallback) starting: %s", raw_path.name)
+        mqpar_path = _write_maxquant_params(output_dir, raw_path, fasta_path, threads,
+                                            search_config=search_config)
+        log_path = output_dir / "andromeda_mq.log"
+        cmd = [str(andromeda_exe), str(mqpar_path)]
+        try:
+            with open(log_path, "w") as lf:
+                subprocess.run(
+                    cmd, check=True, stdout=lf, stderr=subprocess.STDOUT,
+                    text=True, timeout=14400, cwd=str(output_dir),
+                )
+        except subprocess.CalledProcessError as e:
+            _upsert_comparison(run_id, "andromeda", "failed",
+                               error_msg=f"exit {e.returncode} (via MaxQuantCmd)",
+                               result_path=str(output_dir))
+            logger.error("Andromeda/MaxQuantCmd failed (rc=%d): %s", e.returncode, raw_path.name)
+            return
+        except subprocess.TimeoutExpired:
+            _upsert_comparison(run_id, "andromeda", "failed",
+                               error_msg="timeout (4h)", result_path=str(output_dir))
+            return
+        except Exception as exc:
+            _upsert_comparison(run_id, "andromeda", "failed", error_msg=str(exc))
+            return
+        stats = _parse_maxquant_output(output_dir)
+        _upsert_comparison(run_id, "andromeda", "done", result_path=str(output_dir), **stats)
+        logger.info("Andromeda/MaxQuant done: %s — PSMs=%s  pep=%s  pg=%s",
+                    raw_path.name, stats["n_psms"], stats["n_peptides"], stats["n_proteins"])
+        return
+
+    # ── Standalone Andromeda.exe path ────────────────────────────────────────
     # Convert .d to mzML if needed (Andromeda prefers mzML/mzXML)
     input_path = raw_path
     if raw_path.suffix.lower() == ".d":
