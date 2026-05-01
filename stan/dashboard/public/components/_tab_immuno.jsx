@@ -1,6 +1,7 @@
     /* ── Immunopeptidomics Tab ─────────────────────────────────────────── */
 
     function ImmunopeptidomicsTab() {
+      const wfCtx = React.useContext(WorkflowContext);
       const { data: allRuns, loading: runsLoading } = useFetch('/api/runs?limit=1000');
       const [selectedRun, setSelectedRun] = useState(null);
       const [searchTerm, setSearchTerm] = useState('');
@@ -8,6 +9,15 @@
       const [loading, setLoading] = useState(false);
       const [mhcClass, setMhcClass] = useState('all');   // 'all' | 'mhc1' | 'mhc2'
       const [chargeFilter, setChargeFilter] = useState('all');
+
+      // Pre-select run when jumped from Searches tab
+      useEffect(() => {
+        const j = wfCtx.jump;
+        if (!j || !allRuns) return;
+        if (j.workflow !== 'Immunopeptidomics') return;
+        const run = allRuns.find(r => r.id === j.runId);
+        if (run) setSelectedRun(run);
+      }, [wfCtx.jump, allRuns]);
       const [immunoWindowData, setImmunoWindowData] = useState(null);
       const [showImmunoWindowOverlay, setShowImmunoWindowOverlay] = useState(false);
       // View 3 — Raw MHC Ion Landscape (lazy-loaded on demand)
@@ -633,6 +643,8 @@
               </div>
             </div>
           </div>
+
+          <WorkflowRunPicker workflow="Immunopeptidomics" selectedRunId={selectedRun?.id} onSelect={setSelectedRun} />
 
           <div style={{display:'grid',gridTemplateColumns:'250px 1fr',gap:'1rem',alignItems:'start'}}>
             {/* Run list */}

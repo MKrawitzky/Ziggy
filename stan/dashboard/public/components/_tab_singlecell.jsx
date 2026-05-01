@@ -1751,13 +1751,21 @@
     // Main Tab
     // ═══════════════════════════════════════════════════════════════════════════
     function SingleCellTab() {
+      const wfCtx = React.useContext(WorkflowContext);
       const [panel, setPanel] = useState('arcs');
       const { data: allRuns } = useFetch('/api/runs');
 
+      // Runs tagged with "Single Cell" workflow (includes non-K562 single cell runs)
+      const workflowRuns = useMemo(()=>
+        (allRuns||[]).filter(r=>r.workflow==='Single Cell'),
+      [allRuns]);
+
       const k562Runs = useMemo(()=>{
         if(!allRuns) return [];
+        // Include K562 dilution series + any run tagged as Single Cell
+        const tagged = new Set((allRuns||[]).filter(r=>r.workflow==='Single Cell').map(r=>r.id));
         return allRuns
-          .filter(r=>r.run_name&&r.run_name.includes('K562'))
+          .filter(r=>(r.run_name&&r.run_name.includes('K562'))||tagged.has(r.id))
           .map(r=>({...r,inputPg:_scParseAmountPg(r.run_name)}))
           .filter(r=>r.inputPg!==null);
       },[allRuns]);
@@ -1790,6 +1798,11 @@
       ];
 
       return React.createElement('div',{style:{padding:16,display:'flex',flexDirection:'column',gap:14}},
+
+        // Workflow run picker (shown when runs are tagged as Single Cell)
+        workflowRuns.length > 0 && React.createElement(WorkflowRunPicker,{
+          workflow:'Single Cell', selectedRunId:null, onSelect:()=>{},
+        }),
 
         // Header
         React.createElement('div',{style:{

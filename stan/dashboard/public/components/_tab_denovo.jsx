@@ -1,7 +1,16 @@
     function DeNovoTab() {
+      const wfCtx = React.useContext(WorkflowContext);
       const { data: allRuns } = useFetch('/api/runs?limit=1000');
       const { data: engines } = useFetch('/api/denovo/engines');
       const [selectedRun,    setSelectedRun]    = useState(null);
+
+      // Pre-select run jumped from Searches tab
+      useEffect(() => {
+        const j = wfCtx.jump;
+        if (!j || !allRuns || j.workflow !== 'De Novo') return;
+        const run = allRuns.find(r => r.id === j.runId);
+        if (run) setSelectedRun(run);
+      }, [wfCtx.jump, allRuns]);
       const [engine,         setEngine]         = useState('auto');
       const [immunoMode,     setImmunoMode]     = useState(false);
       const [maxSpectra,     setMaxSpectra]     = useState(2000);
@@ -137,7 +146,9 @@
       );
 
       return (
-        <div style={{display:'flex',gap:'1rem',height:'calc(100vh - 160px)'}}>
+        <div>
+        <WorkflowRunPicker workflow="De Novo" selectedRunId={selectedRun?.id} onSelect={setSelectedRun} />
+        <div style={{display:'flex',gap:'1rem',height:'calc(100vh - 200px)'}}>
 
           {/* ── Left: run list + settings ─────────────────────────────────── */}
           <div style={{width:'260px',flexShrink:0,display:'flex',flexDirection:'column',gap:'0.75rem'}}>
@@ -560,6 +571,7 @@
               </>
             )}
           </div>
+        </div>
         </div>
       );
     }

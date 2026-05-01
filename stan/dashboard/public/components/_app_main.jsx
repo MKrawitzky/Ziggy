@@ -36,6 +36,15 @@
       const [pinnedRunIds, setPinnedRunIds] = useState(new Set());
       const [factIdx, setFactIdx] = useState(() => Math.floor(Math.random() * GLOBAL_FACTS.length));
 
+      // Workflow jump — set by SearchesTab "View →" button, consumed by omics tabs
+      const [workflowJump, setWorkflowJump] = useState(null);
+      const navigateToTab = useCallback((tabKey) => setTab(tabKey), []);
+      const workflowCtx = useMemo(() => ({
+        jump:     workflowJump,
+        setJump:  setWorkflowJump,
+        navigate: navigateToTab,
+      }), [workflowJump, navigateToTab]);
+
       React.useEffect(() => {
         const iv = setInterval(() => setFactIdx(i => (i + 1) % GLOBAL_FACTS.length), 7000);
         return () => clearInterval(iv);
@@ -79,6 +88,7 @@
         : 'Search';
 
       return (
+        <WorkflowContext.Provider value={workflowCtx}>
         <div className="container">
           <header>
             <h1><span>ZIGGY</span> &mdash; The Proteomics Rockstar</h1>
@@ -197,7 +207,7 @@
             {tab === 'histone'   && <HistoneTab />}
             {tab === 'meta'      && <MetaproteomicsTab />}
             {tab === 'denovo' && <DeNovoTab />}
-            {tab === 'searches' && <SearchesTab />}
+            {tab === 'searches' && <SearchesTab navigateTo={navigateToTab} />}
             {tab === 'search'   && <SearchAssistantTab />}
             {tab === 'sneaky' && <SneakyPeakyTab />}
             {tab === 'chimerys' && <ChimerysTab navigateTo={setTab} />}
@@ -212,6 +222,7 @@
             {tab === 'about' && <AboutTab />}
           </ErrorBoundary>
         </div>
+        </WorkflowContext.Provider>
       );
     }
 

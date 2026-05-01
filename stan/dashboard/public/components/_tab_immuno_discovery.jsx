@@ -1116,9 +1116,16 @@
 
     // ── Main: ImmunoDiscoveryTab ──────────────────────────────────────
     function ImmunoDiscoveryTab() {
+      const wfCtx = React.useContext(WorkflowContext);
       const { data: allRuns } = useFetch('/api/runs?limit=1000');
       const { data: atlasData, loading: atlasLoading } = useFetch('/api/hla-atlas/browse');
       const [activeTab, setActiveTab] = useState('explorer');
+      // Jump from Searches tab: switch to Mission Debrief and pre-select run
+      useEffect(() => {
+        const j = wfCtx.jump;
+        if (!j || !allRuns || j.workflow !== 'HLA Discovery') return;
+        setActiveTab('debrief');
+      }, [wfCtx.jump, allRuns]);
 
       const peptides = atlasData?.peptides || [];
       const matrix   = atlasData?.matrix   || null;
@@ -1151,6 +1158,8 @@
               </div>
             )}
           </div>
+
+          <WorkflowRunPicker workflow="HLA Discovery" selectedRunId={wfCtx.jump?.runId} onSelect={() => {}} />
 
           {/* Tab bar */}
           <div style={{display:'flex', gap:'0.5rem', marginBottom:'1rem', flexWrap:'wrap',

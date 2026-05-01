@@ -3,6 +3,99 @@
 
     const API = '';
 
+    // ── Workflow → Tab routing ────────────────────────────────────────────────
+    // Maps workflow annotation labels to their dashboard tab keys.
+    // Used by SearchesTab "View →" button and WorkflowRunPicker.
+    const WORKFLOW_TO_TAB = {
+      'Immunopeptidomics': 'immuno',
+      'HLA Discovery':     'discovery',
+      'Single Cell':       'singlecell',
+      'Phospho':           'phospho',
+      'De Novo':           'denovo',
+      'MIA':               'mia',
+      'Sneaky Peaky':      'sneaky',
+      'Chimerys':          'chimerys',
+      'Histones':          'histone',
+      'Chemoproteomics':   'chemo',
+      'Metaproteomics':    'meta',
+    };
+
+    // Global workflow context — lets SearchesTab push a run into any omics tab
+    // without prop-drilling through every intermediate component.
+    const WorkflowContext = React.createContext({
+      jump:      null,          // { runId, runName, workflow, mode } | null
+      setJump:   () => {},
+      navigate:  () => {},      // (tabKey) => void
+    });
+
+    // ── WorkflowRunPicker ─────────────────────────────────────────────────────
+    // Compact dropdown bar shown at the top of omics tabs.
+    // Displays all runs annotated with `workflow` and lets the user switch.
+    // `selectedRunId` / `onSelect(run)` drive the tab's internal selection.
+    function WorkflowRunPicker({ workflow, selectedRunId, onSelect }) {
+      const { data: allRuns } = useFetch('/api/runs?limit=1000');
+      const ctx = React.useContext(WorkflowContext);
+
+      const matchingRuns = useMemo(() =>
+        (allRuns || []).filter(r => r.workflow === workflow)
+          .sort((a, b) => new Date(b.run_date) - new Date(a.run_date)),
+        [allRuns, workflow]
+      );
+
+      if (!matchingRuns.length) return null;
+
+      const WORKFLOW_COLORS_MAP = {
+        'Immunopeptidomics':'#f97316','HLA Discovery':'#f97316','Single Cell':'#d946ef',
+        'Phospho':'#f43f5e','De Novo':'#a855f7','MIA':'#DAAA00','Sneaky Peaky':'#22d3ee',
+        'Chimerys':'#f472b6','Histones':'#34d399','Chemoproteomics':'#fb923c',
+        'Metaproteomics':'#38bdf8','Standard':'#60a5fa',
+      };
+      const wfColor = WORKFLOW_COLORS_MAP[workflow] || '#b899d4';
+
+      return React.createElement('div', {
+        style: {
+          display: 'flex', alignItems: 'center', gap: '0.6rem',
+          padding: '0.4rem 0.75rem', marginBottom: '0.75rem',
+          background: wfColor + '14', border: `1px solid ${wfColor}44`,
+          borderRadius: '0.4rem', flexWrap: 'wrap',
+        }
+      },
+        React.createElement('span', {
+          style: { fontSize: '0.68rem', fontWeight: 700, color: wfColor,
+                   textTransform: 'uppercase', letterSpacing: '0.08em', flexShrink: 0 }
+        }, `⬡ ${workflow}`),
+        React.createElement('select', {
+          value: selectedRunId || '',
+          onChange: e => {
+            const run = matchingRuns.find(r => r.id === e.target.value);
+            if (run) onSelect(run);
+          },
+          style: {
+            flex: 1, minWidth: 0, background: 'var(--surface)', color: 'var(--text)',
+            border: `1px solid ${wfColor}66`, borderRadius: '0.3rem',
+            padding: '0.25rem 0.4rem', fontSize: '0.78rem',
+          }
+        },
+          React.createElement('option', { value: '' }, `— select run (${matchingRuns.length} tagged) —`),
+          matchingRuns.map(r =>
+            React.createElement('option', { key: r.id, value: r.id },
+              `${r.run_name}  ·  ${r.run_date ? new Date(r.run_date).toLocaleDateString([], {month:'short',day:'numeric',year:'2-digit'}) : ''}  ·  ${r.mode || ''}`)
+          )
+        ),
+        ctx.jump?.runId === selectedRunId && React.createElement('span', {
+          style: { fontSize: '0.68rem', color: wfColor, flexShrink: 0 }
+        }, '← from Searches'),
+        React.createElement('button', {
+          onClick: () => ctx.setJump(null),
+          title: 'Clear workflow filter',
+          style: {
+            background: 'transparent', border: 'none', color: 'var(--muted)',
+            cursor: 'pointer', fontSize: '0.8rem', padding: '0 0.2rem', flexShrink: 0,
+          }
+        }, '×'),
+      );
+    }
+
     // Mode helpers — Bruker files use diaPASEF/ddaPASEF; older baseline runs
     // may have DIA/DDA.  Always use these helpers so both labels are handled.
     const isDia = (mode) => mode === 'DIA' || mode === 'diaPASEF';

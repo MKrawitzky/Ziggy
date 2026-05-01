@@ -546,11 +546,19 @@
     }
 
     function SneakyPeakyTab() {
+      const wfCtx = React.useContext(WorkflowContext);
       const { data: allRuns } = useFetch('/api/runs?limit=300');
 
       // ── State ──────────────────────────────────────────────────────────
       const [selA, setSelA]   = useState('');
       const [selB, setSelB]   = useState('');
+
+      // Pre-load jumped run as Run A from Searches tab
+      useEffect(() => {
+        const j = wfCtx.jump;
+        if (!j || j.workflow !== 'Sneaky Peaky') return;
+        setSelA(j.runId);
+      }, [wfCtx.jump]);
       const [selC, setSelC]   = useState('');
       const [mzTarget, setMzTarget] = useState('');
       const [mzTolPpm, setMzTolPpm] = useState(10);
@@ -863,6 +871,9 @@
 
       return (
         <div style={{padding:'0.5rem'}}>
+          <WorkflowRunPicker workflow="Sneaky Peaky"
+            selectedRunId={selA || null}
+            onSelect={r => setSelA(r.id)} />
 
           <ZiggyIonHero allRuns={runs} />
 

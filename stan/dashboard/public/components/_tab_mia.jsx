@@ -1,10 +1,18 @@
     /* ── MIA — Mobility Ion Analysis ────────────────────────────────── */
     function MiaTab({ onSpectrumJump, navigateTo }) {
+      const wfCtx = React.useContext(WorkflowContext);
       const { data: allRuns } = useFetch('/api/runs?limit=1000');
       const runs = Array.isArray(allRuns) ? allRuns : [];
 
       // ── State ──────────────────────────────────────────────────────────
       const [selectedRunIds, setSelectedRunIds] = useState(new Set());
+
+      // Pre-select run jumped from Searches tab
+      useEffect(() => {
+        const j = wfCtx.jump;
+        if (!j || j.workflow !== 'MIA') return;
+        setSelectedRunIds(new Set([j.runId]));
+      }, [wfCtx.jump]);
       const [seqQuery, setSeqQuery]   = useState('');
       const [mzQuery,  setMzQuery]    = useState('');
       const [mzPpm,    setMzPpm]      = useState(10);
@@ -139,6 +147,9 @@
 
       return (
         <div style={{padding:'0.5rem'}}>
+          <WorkflowRunPicker workflow="MIA"
+            selectedRunId={selectedRunIds.size === 1 ? [...selectedRunIds][0] : null}
+            onSelect={r => setSelectedRunIds(new Set([r.id]))} />
 
           {/* Header */}
           <div className="card" style={{marginBottom:'0.75rem',padding:'0.75rem 1rem',

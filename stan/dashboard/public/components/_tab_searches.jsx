@@ -3,11 +3,18 @@
     // ══════════════════════════════════════════════════════════════════════════
 
     const SAMPLE_TYPES  = ['', 'QC', 'Sample', 'Blank', 'Standard', 'Pool'];
-    const WORKFLOWS     = ['', 'Standard', 'Immunopeptidomics', 'Single Cell', 'Training', 'Phospho', 'Glyco', 'Crosslink'];
+    const WORKFLOWS     = [
+      '', 'Standard', 'Training', 'Glyco', 'Crosslink',
+      'Immunopeptidomics', 'HLA Discovery', 'Single Cell',
+      'Phospho', 'De Novo', 'MIA', 'Sneaky Peaky',
+      'Chimerys', 'Histones', 'Chemoproteomics', 'Metaproteomics',
+    ];
     const SAMPLE_COLORS = { QC:'#22d3ee', Sample:'#4ade80', Blank:'#94a3b8', Standard:'#DAAA00', Pool:'#a855f7' };
     const WORKFLOW_COLORS = {
-      Standard:'#60a5fa', Immunopeptidomics:'#f97316', 'Single Cell':'#d946ef',
-      Training:'#DAAA00', Phospho:'#f43f5e', Glyco:'#4ade80', Crosslink:'#a855f7',
+      Standard:'#60a5fa', Training:'#DAAA00', Glyco:'#4ade80', Crosslink:'#a855f7',
+      Immunopeptidomics:'#f97316', 'HLA Discovery':'#f97316', 'Single Cell':'#d946ef',
+      Phospho:'#f43f5e', 'De Novo':'#a855f7', MIA:'#DAAA00', 'Sneaky Peaky':'#22d3ee',
+      Chimerys:'#f472b6', Histones:'#34d399', Chemoproteomics:'#fb923c', Metaproteomics:'#38bdf8',
     };
     const ENGINE_COLOR = { diann:'#60a5fa', sage:'#34d399', unknown:'#a0b4cc' };
     const MODE_COLOR   = { DIA:'#00d4e0', diaPASEF:'#a78bfa', DDA:'#fbbf24', ddaPASEF:'#fb923c' };
@@ -457,7 +464,8 @@
     }
 
     // ── Main component ───────────────────────────────────────────────────────
-    function SearchesTab() {
+    function SearchesTab({ navigateTo }) {
+      const wfCtx = React.useContext(WorkflowContext);
       const [view, setView]         = React.useState('compare');
       const [searches, setSearches] = React.useState(null);
       const [loading, setLoading]   = React.useState(true);
@@ -795,10 +803,25 @@
                     React.createElement('td',{style:{paddingRight:'0.5rem'}},
                       React.createElement(AnnotateCell,{runId:s.id,field:'sample_type',
                         value:stype,options:SAMPLE_TYPES,colors:SAMPLE_COLORS,onSaved:onAnnotationSaved})),
-                    // Workflow — inline editable
-                    React.createElement('td',{style:{paddingRight:'0.75rem'}},
-                      React.createElement(AnnotateCell,{runId:s.id,field:'workflow',
-                        value:wflow,options:WORKFLOWS,colors:WORKFLOW_COLORS,onSaved:onAnnotationSaved})),
+                    // Workflow — inline editable + View → button for omics tabs
+                    React.createElement('td',{style:{paddingRight:'0.75rem',whiteSpace:'nowrap'}},
+                      React.createElement('span',{style:{display:'inline-flex',alignItems:'center',gap:'0.25rem'}},
+                        React.createElement(AnnotateCell,{runId:s.id,field:'workflow',
+                          value:wflow,options:WORKFLOWS,colors:WORKFLOW_COLORS,onSaved:onAnnotationSaved}),
+                        wflow && WORKFLOW_TO_TAB[wflow] && React.createElement('button',{
+                          title:`View in ${wflow} tab`,
+                          onClick: () => {
+                            wfCtx.setJump({ runId:s.id, runName:s.run_name, workflow:wflow, mode:s.mode });
+                            (navigateTo || wfCtx.navigate)(WORKFLOW_TO_TAB[wflow]);
+                          },
+                          style:{
+                            background:'transparent',border:'1px solid var(--border)',
+                            borderRadius:'0.25rem',padding:'0.05rem 0.3rem',
+                            color:WORKFLOW_COLORS[wflow]||'var(--accent)',
+                            cursor:'pointer',fontSize:'0.68rem',lineHeight:1.4,flexShrink:0,
+                          }
+                        },'→')
+                      )),
                     // DIA-NN primary
                     React.createElement('td',{style:{textAlign:'right',fontVariantNumeric:'tabular-nums',
                       color:isRowDia?'#60a5fa':'var(--muted)',fontWeight:isRowDia?600:400,paddingRight:'0.75rem'}},
