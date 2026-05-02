@@ -486,7 +486,7 @@
       React.useEffect(() => {
         const hasInFlight = (searches||[]).some(s => {
           const c = s.comparisons || {};
-          return Object.values(c).some(v => v.status === 'running' || v.status === 'pending');
+          return Object.values(c).some(v => v.status === 'running' || v.status === 'pending' || v.status === 'queued');
         });
         if (!hasInFlight) return;
         const t = setInterval(fetchData, 8000);
@@ -595,6 +595,7 @@
           React.createElement('span',{title:'queued'},'⋯'));
         if (status === 'running') return React.createElement('td',{style:{textAlign:'right'}},
           React.createElement('span',{style:{display:'inline-block',animation:'spin 1.2s linear infinite',color:'#60a5fa',fontSize:'0.85rem'},title:'running'},'↻'));
+        if (status === 'interrupted') return React.createElement('td',{style:{textAlign:'right',color:'#f97316',fontSize:'0.72rem'},title:error_msg||'Interrupted (server restart)'},'⏹');
         if (status === 'failed') return React.createElement('td',{style:{textAlign:'right',color:'#ef4444',fontSize:'0.75rem'},title:error_msg||'failed'},'✗');
         if (status === 'done') return React.createElement('td',{style:{textAlign:'right',fontVariantNumeric:'tabular-nums',fontWeight:600,color:color||'var(--text)'}},
           React.createElement('div',{title:`Primary: ${primary??0}  Pep: ${n_peptides??0}  PG: ${n_proteins??0}`},fmtN(primary)),
@@ -613,6 +614,22 @@
           color:showCols[k]?'var(--bg)':'var(--muted)',
           border:`1px solid ${showCols[k]?'var(--accent)':'var(--border)'}`},
       }, label);
+
+      const [resetState, setResetState] = React.useState('idle');  // idle | running | done | err
+      const resetStuckJobs = async () => {
+        if (!window.confirm('Reset all stuck/spinning comparison jobs to "interrupted"?\n\nUse this after a server restart when jobs are stuck spinning forever.')) return;
+        setResetState('running');
+        try {
+          const r = await fetch('/api/comparisons/reset-stuck', { method: 'POST' });
+          const d = await r.json();
+          setResetState(d.error ? 'err' : 'done');
+          setTimeout(fetchData, 400);
+          setTimeout(() => setResetState('idle'), 5000);
+        } catch {
+          setResetState('err');
+          setTimeout(() => setResetState('idle'), 3000);
+        }
+      };
 
       const [fixNamesDetail, setFixNamesDetail] = React.useState(null);
       const fixInstrumentNames = async () => {
@@ -681,6 +698,18 @@
             style:{padding:'0.3rem 0.7rem',borderRadius:'0.4rem',fontSize:'0.8rem',cursor:'pointer',
               background:'var(--surface)',color:'var(--muted)',border:'1px solid var(--border)'}},
             '↻'),
+          inFlight > 0 && React.createElement('button',{
+            onClick: resetStuckJobs,
+            disabled: resetState === 'running',
+            title:'Jobs spinning for hours? Use this after a server restart to clear stuck "running" comparison jobs.',
+            style:{padding:'0.3rem 0.7rem',borderRadius:'0.4rem',fontSize:'0.8rem',cursor:'pointer',
+              background: resetState==='done'?'rgba(34,197,94,0.15)':resetState==='err'?'rgba(239,68,68,0.15)':'rgba(239,68,68,0.1)',
+              color: resetState==='done'?'#4ade80':resetState==='err'?'#ef4444':'#f97316',
+              border:`1px solid ${resetState==='done'?'rgba(34,197,94,0.4)':resetState==='err'?'rgba(239,68,68,0.4)':'rgba(249,115,22,0.5)'}`}},
+            resetState==='running' ? '↻ Resetting…' :
+            resetState==='done'    ? '✓ Jobs reset' :
+            resetState==='err'     ? '✗ Error' :
+            '⚠ Reset stuck jobs'),
           React.createElement('button',{onClick:()=>setShowParamModal(true),
             title:'Configure mods, enzyme, FASTA, and library for comparison searches',
             style:{padding:'0.3rem 0.7rem',borderRadius:'0.4rem',fontSize:'0.8rem',cursor:'pointer',

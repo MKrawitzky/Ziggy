@@ -238,6 +238,19 @@ def _get_thresholds_watcher() -> ConfigWatcher | None:
 async def startup() -> None:
     """Initialize database on startup."""
     init_db()
+    # Any comparison rows that were left in 'running' state from a previous
+    # server session (crash / restart while jobs were active) will spin forever.
+    # Reset them to 'interrupted' so the UI stops showing them as in-progress.
+    try:
+        with _sqlite3_sa.connect(str(Path(__file__).parent / "runs.db")) as con:
+            con.execute(
+                "UPDATE search_comparisons SET status = 'interrupted', "
+                "error_msg = 'Server restarted while job was running' "
+                "WHERE status = 'running'"
+            )
+            con.commit()
+    except Exception:
+        pass  # non-fatal — DB may not have the table yet on first boot
 
 
 # ── API Routes ───────────────────────────────────────────────────────
@@ -3914,6 +3927,28 @@ async def api_process_status(run_id: str) -> dict:
     if job is None:
         return {"status": "idle"}
     return job
+
+
+@app.post("/api/comparisons/reset-stuck")
+async def api_reset_stuck_comparisons() -> dict:
+    """Reset all comparison engine rows stuck in 'running' or 'interrupted' state.
+
+    Call this when the server was restarted mid-job and the Searches tab shows
+    spinning arrows that never complete.  Marks them 'interrupted' so the UI
+    stops spinning and re-queue buttons become available again.
+    """
+    try:
+        with _sqlite3_sa.connect(str(Path(__file__).parent / "runs.db")) as con:
+            cur = con.execute(
+                "UPDATE search_comparisons SET status = 'interrupted', "
+                "error_msg = 'Manually reset (was stuck in running state)' "
+                "WHERE status IN ('running', 'pending')"
+            )
+            n = cur.rowcount
+            con.commit()
+        return {"reset": n, "message": f"Reset {n} stuck comparison job(s) to 'interrupted'."}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.post("/api/process-all-new")
