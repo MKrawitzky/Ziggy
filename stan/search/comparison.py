@@ -7,8 +7,8 @@ Searches tab as cells fill in.
 
 Engines
 -------
-msfragger_dda  MSFragger 3.7 in DDA mode (data_type=0) — native .d support
-msfragger_dia  MSFragger 3.7 in DIA mode (data_type=1) — for diaPASEF
+msfragger_dda  MSFragger 3.7 in DDA mode (data_type=0) — native .d support via Bruker SDK
+msfragger_dia  MSFragger 3.7 in DIA mode (data_type=1) — native diaPASEF .d support via Bruker SDK
 xtandem        X!Tandem — DDA search; .d files auto-converted via timsconvert
 
 FragPipe is auto-detected from common install locations. If not found,
@@ -248,12 +248,65 @@ def _find_fragpipe() -> Path | None:
     return None
 
 
+def _resolve_bruker_lib(fragpipe_dir: Path, msfragger_jar: Path | None) -> Path | None:
+    """Return a directory containing a Java-loadable timsdata.dll for MSFragger.
+
+    MSFragger loads the Bruker timsTOF SDK via System.loadLibrary("timsdata"),
+    which requires a file named exactly timsdata.dll (no version suffix) to be
+    present on java.library.path.
+
+    Search order:
+      1. ext/bruker/ next to the MSFragger jar — FragPipe ships a versioned dll
+         here (timsdata-2-21-0-4.dll).  If only the versioned file is present we
+         stage a copy named timsdata.dll in a sibling _bruker_sdk/ directory.
+      2. FragPipe bundled DIA-NN win/ folder — ships an unversioned timsdata.dll
+         that is perfectly loadable.
+    """
+    # 1. ext/bruker next to jar
+    if msfragger_jar:
+        ext_bruker = msfragger_jar.parent / "ext" / "bruker"
+        if ext_bruker.is_dir():
+            unversioned = ext_bruker / "timsdata.dll"
+            if unversioned.exists():
+                return ext_bruker
+            # Only versioned dll present — stage a correctly-named copy
+            versioned = next(ext_bruker.glob("timsdata-*.dll"), None)
+            if versioned:
+                stage_dir = msfragger_jar.parent / "_bruker_sdk"
+                staged    = stage_dir / "timsdata.dll"
+                if not staged.exists():
+                    try:
+                        stage_dir.mkdir(parents=True, exist_ok=True)
+                        import shutil as _shutil
+                        _shutil.copy2(str(versioned), str(staged))
+                        logger.info(
+                            "Bruker SDK: staged %s → %s for MSFragger",
+                            versioned.name, staged,
+                        )
+                    except Exception:
+                        logger.debug("Could not stage timsdata.dll", exc_info=True)
+                if staged.exists():
+                    return stage_dir
+
+    # 2. FragPipe bundled DIA-NN win/ folder
+    for diann_win in (fragpipe_dir / "tools").rglob("win"):
+        dll = diann_win / "timsdata.dll"
+        if dll.exists():
+            return diann_win
+
+    return None
+
+
 def _fragpipe_paths(fragpipe_dir: Path) -> dict[str, Path | None]:
     """Resolve paths to all tools inside a FragPipe installation."""
     # Newest MSFragger jar wins (sorted lexicographically)
     jars = sorted((fragpipe_dir / "MSFragger").glob("*/MSFragger-*.jar"))
     msfragger_jar: Path | None = jars[-1] if jars else None
-    bruker_lib: Path | None = msfragger_jar.parent / "ext/bruker" if msfragger_jar else None
+
+    # Resolve a java.library.path directory containing a loadable timsdata.dll.
+    # MSFragger DIA mode reads Bruker .d files natively via this SDK —
+    # no mzML conversion needed when the library is correctly found.
+    bruker_lib = _resolve_bruker_lib(fragpipe_dir, msfragger_jar)
 
     # FragPipe FASTA — already has rev_ decoys and pre-built pepindex
     bundled_fasta = fragpipe_dir / "FASTA/2023-05-26-decoys-reviewed-isoforms-contam-UP000005640.fas"
@@ -1350,48 +1403,11 @@ def _run_msfragger_thread(
                            error_msg="Java (FragPipe JRE) not found")
         return
 
-    # MSFragger DIA mode cannot read Bruker diaPASEF .d files directly —
-    # it needs mzML.  Convert first; DDA mode handles .d natively via timsdata.
+    # MSFragger reads Bruker diaPASEF .d files natively via the Bruker timsTOF
+    # SDK (timsdata.dll) — no mzML conversion needed.  The SDK directory is
+    # passed as -Djava.library.path below; _resolve_bruker_lib ensures the DLL
+    # is present with the correct unversioned filename Java expects.
     input_path = raw_path
-    if data_type == 1 and (raw_path.suffix.lower() == ".d" or raw_path.is_dir()):
-        if not _find_msconvert() and not _has_timsconvert():
-            _upsert_comparison(run_id, engine_name, "not_installed",
-                               error_msg="msconvert or timsconvert required for diaPASEF .d → mzML")
-            logger.warning("MSFragger-DIA skipped for %s: no mzML converter found", raw_path.name)
-            return
-        # Include MS1 + MS2 for DIA (no --filter "msLevel 2" and no --ddaProcessing)
-        mzml_out_dir = output_dir / "mzml"
-        mzml_out_dir.mkdir(parents=True, exist_ok=True)
-        mzml_path = mzml_out_dir / (raw_path.stem + ".mzML")
-        if not mzml_path.exists():
-            msconvert = _find_msconvert()
-            if msconvert:
-                log_mz = mzml_out_dir / "msconvert.log"
-                cmd_mz = [
-                    str(msconvert), str(raw_path), "--mzML",
-                    "--filter", "zeroSamples removeExtra",
-                    "--zlib", "--32",
-                    "--outdir", str(mzml_out_dir),
-                ]
-                logger.info("MSFragger-DIA: converting %s → mzML", raw_path.name)
-                try:
-                    with open(log_mz, "w") as lf:
-                        subprocess.run(cmd_mz, check=True, stdout=lf,
-                                       stderr=subprocess.STDOUT, text=True, timeout=3600)
-                except Exception as exc:
-                    logger.warning("msconvert for MSFragger-DIA failed: %s", exc)
-            if not mzml_path.exists():
-                found = list(mzml_out_dir.glob("*.mzML"))
-                if found:
-                    mzml_path = found[0]
-                else:
-                    converted = _convert_d_to_mzml(raw_path, mzml_out_dir)
-                    if not converted:
-                        _upsert_comparison(run_id, engine_name, "failed",
-                                           error_msg="mzML conversion failed for diaPASEF")
-                        return
-                    mzml_path = converted
-        input_path = mzml_path
 
     params_path = _write_msfragger_params(
         output_dir, fasta_path, data_type=data_type, threads=threads,
