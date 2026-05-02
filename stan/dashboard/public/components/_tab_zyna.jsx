@@ -159,12 +159,29 @@ function ZynaTab() {
           {activeView === 'scatter' && (
             <ZynaPrecursorScatter scatter={tier3Data.precursor_scatter} />
           )}
-          {activeView === 'compare' && (
-            <>
-              <ZynaBeforeAfter pairAnalysis={tier3Data.pair_analysis} />
-              <ZynaFlawsCard />
-            </>
-          )}
+          {activeView === 'compare' && (() => {
+            // Find the chimeric window whose two best precursors have the largest K0 gap
+            let bestPair = null, bestGap = 0;
+            for (const w of (tier3Data.window_cells || [])) {
+              if (!w.chimeric) continue;
+              const precs = (w.precursors || []).filter(p => p.im != null);
+              for (let i = 0; i < precs.length; i++) {
+                for (let j = i + 1; j < precs.length; j++) {
+                  const gap = Math.abs(precs[i].im - precs[j].im);
+                  if (gap > bestGap) {
+                    bestGap = gap;
+                    bestPair = { precA: precs[i], precB: precs[j], gap, window: w };
+                  }
+                }
+              }
+            }
+            return (
+              <>
+                <ZynaBeforeAfter pairAnalysis={tier3Data.pair_analysis} chimericPair={bestPair} />
+                <ZynaFlawsCard />
+              </>
+            );
+          })()}
 
           {/* 4D Advantage callout */}
           <ZynaTimsRescueCard stats={tier3Data.stats} />
@@ -951,10 +968,28 @@ function ZynaIntroPanel() {
 
 
 // ── Before vs After animated comparison ──────────────────────────────────────
-function ZynaBeforeAfter({ pairAnalysis }) {
+function ZynaBeforeAfter({ pairAnalysis, chimericPair }) {
   const canvasRef = React.useRef(null);
   const phaseRef  = React.useRef(0);
   const rafRef    = React.useRef(null);
+
+  // Real K0 centers from actual chimeric pair, fall back to demo if no IM data
+  const K0_A   = chimericPair?.precA?.im  ?? _ZK0_A;
+  const K0_B   = chimericPair?.precB?.im  ?? _ZK0_B;
+  const K0_MID = (K0_A + K0_B) / 2;
+  const isReal = chimericPair != null;
+
+  // Build ion list with K0 positions anchored to the real (or demo) centers
+  // dk0 offsets represent realistic TIMS peak spread — valid for any K0 center
+  const allIons = [
+    ..._ZIONS_A.map(ion => ({...ion, k0: K0_A + ion.dk0, side: 'A'})),
+    ..._ZIONS_B.map(ion => ({...ion, k0: K0_B + ion.dk0, side: 'B'})),
+  ];
+
+  // Reasonable m/z display range around the real precursor m/z values
+  const mzA  = chimericPair?.precA?.mz ?? 650;
+  const mzB  = chimericPair?.precB?.mz ?? 780;
+  const mzMid = (mzA + mzB) / 2;
 
   React.useEffect(() => {
     const canvas = canvasRef.current;
@@ -966,7 +1001,10 @@ function ZynaBeforeAfter({ pairAnalysis }) {
 
     const HW = W / 2;
     const MZ_LO = 300, MZ_HI = 1100;
-    const K0_LO = 0.68, K0_HI = 1.35;
+    // K0 display range: bracket both centers with padding
+    const k0Pad  = Math.max(0.15, Math.abs(K0_B - K0_A) * 0.6);
+    const K0_LO  = Math.min(K0_A, K0_B) - k0Pad;
+    const K0_HI  = Math.max(K0_A, K0_B) + k0Pad;
     const SIGMA  = 0.03;
 
     function smoothstep(t) {
@@ -1032,7 +1070,7 @@ function ZynaBeforeAfter({ pairAnalysis }) {
       ctx.fillText('Intensity', 0, 0); ctx.restore();
 
       // All ions as GREY — Chimerys can't separate them
-      _ZALL_IONS.forEach(ion => {
+      allIons.forEach(ion => {
         const x = lsx(ion.mz);
         const y = lsy(ion.int);
         const pulse = 0.3 + 0.12 * Math.sin(phaseRef.current * 1.8 + ion.mz * 0.006);
@@ -1085,52 +1123,56 @@ function ZynaBeforeAfter({ pairAnalysis }) {
         ctx.fillStyle = '#374151'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
         ctx.fillText(v, x, RP.t + RPH + 13);
       });
-      ctx.textAlign = 'right';
-      [0.8, 0.9, 1.0, 1.1, 1.2].forEach(v => {
-        const y = rsy(v);
-        ctx.fillStyle = '#374151'; ctx.font = '9px monospace';
-        ctx.fillText(v.toFixed(1), rx + RP.l - 4, y + 3);
-        ctx.strokeStyle = 'rgba(61,16,96,0.15)'; ctx.lineWidth = 0.5;
-        ctx.beginPath(); ctx.moveTo(rx + RP.l, y); ctx.lineTo(rx + RP.l + RPW, y); ctx.stroke();
-      });
       ctx.fillStyle = '#374151'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
       ctx.fillText('m/z', rx + RP.l + RPW / 2, H - 10);
       ctx.save(); ctx.translate(rx + 14, RP.t + RPH / 2); ctx.rotate(-Math.PI / 2);
       ctx.fillText('1/K₀ (V·s/cm²)', 0, 0); ctx.restore();
 
+      // Y-axis ticks: use real K0 range
+      ctx.textAlign = 'right';
+      const k0Step = (K0_HI - K0_LO) / 4;
+      for (let i = 0; i <= 4; i++) {
+        const v = K0_LO + i * k0Step;
+        const y = rsy(v);
+        ctx.fillStyle = '#374151'; ctx.font = '9px monospace';
+        ctx.fillText(v.toFixed(2), rx + RP.l - 4, y + 3);
+        ctx.strokeStyle = 'rgba(61,16,96,0.15)'; ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(rx + RP.l, y); ctx.lineTo(rx + RP.l + RPW, y); ctx.stroke();
+      }
+
       // K0 separation bands (emerge as sep increases)
       const ba = Math.max(0, (sep - 0.25) / 0.75);
       if (ba > 0) {
         // Peptide A band (violet)
-        const yAh = rsy(_ZK0_A + 2 * SIGMA), yAl = rsy(_ZK0_A - 2 * SIGMA);
+        const yAh = rsy(K0_A + 2 * SIGMA), yAl = rsy(K0_A - 2 * SIGMA);
         ctx.fillStyle = `rgba(217,70,239,${ba * 0.10})`;
         ctx.fillRect(rx + RP.l, yAh, RPW, yAl - yAh);
         ctx.strokeStyle = `rgba(217,70,239,${ba * 0.3})`; ctx.lineWidth = 0.8;
         ctx.setLineDash([3, 5]);
-        ctx.beginPath(); ctx.moveTo(rx + RP.l, rsy(_ZK0_A));
-        ctx.lineTo(rx + RP.l + RPW, rsy(_ZK0_A)); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(rx + RP.l, rsy(K0_A));
+        ctx.lineTo(rx + RP.l + RPW, rsy(K0_A)); ctx.stroke();
 
         // Peptide B band (cyan)
-        const yBh = rsy(_ZK0_B + 2 * SIGMA), yBl = rsy(_ZK0_B - 2 * SIGMA);
+        const yBh = rsy(K0_B + 2 * SIGMA), yBl = rsy(K0_B - 2 * SIGMA);
         ctx.fillStyle = `rgba(34,211,238,${ba * 0.10})`;
         ctx.fillRect(rx + RP.l, yBh, RPW, yBl - yBh);
         ctx.strokeStyle = `rgba(34,211,238,${ba * 0.3})`;
-        ctx.beginPath(); ctx.moveTo(rx + RP.l, rsy(_ZK0_B));
-        ctx.lineTo(rx + RP.l + RPW, rsy(_ZK0_B)); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(rx + RP.l, rsy(K0_B));
+        ctx.lineTo(rx + RP.l + RPW, rsy(K0_B)); ctx.stroke();
         ctx.setLineDash([]);
 
-        // Band labels
+        // Band labels with real K0 values
         ctx.fillStyle = `rgba(217,70,239,${ba * 0.9})`; ctx.font = 'bold 9px monospace';
         ctx.textAlign = 'right';
-        ctx.fillText(`Peptide A  1/K₀=${_ZK0_A}`, rx + RP.l + RPW - 4, rsy(_ZK0_A) - 4);
+        ctx.fillText(`Precursor A  1/K₀ = ${K0_A.toFixed(3)}`, rx + RP.l + RPW - 4, rsy(K0_A) - 4);
         ctx.fillStyle = `rgba(34,211,238,${ba * 0.9})`;
-        ctx.fillText(`Peptide B  1/K₀=${_ZK0_B}`, rx + RP.l + RPW - 4, rsy(_ZK0_B) - 4);
+        ctx.fillText(`Precursor B  1/K₀ = ${K0_B.toFixed(3)}`, rx + RP.l + RPW - 4, rsy(K0_B) - 4);
       }
 
       // Animated ions: start at K0_MID, separate toward correct K0
-      _ZALL_IONS.forEach(ion => {
+      allIons.forEach(ion => {
         const x = rsx(ion.mz);
-        const curK0 = _ZK0_MID + (ion.k0 - _ZK0_MID) * sep;
+        const curK0 = K0_MID + (ion.k0 - K0_MID) * sep;
         const y = rsy(curK0);
         // Interpolate colour: grey → violet/cyan
         const [tr, tg, tb] = ion.side === 'A' ? [217, 70, 239] : [34, 211, 238];
@@ -1158,27 +1200,37 @@ function ZynaBeforeAfter({ pairAnalysis }) {
 
     draw();
     return () => cancelAnimationFrame(rafRef.current);
-  }, []);
+  }, [K0_A, K0_B]);
 
-  const rescued  = pairAnalysis?.n_rescuable_ids   || 0;
+  const rescued  = pairAnalysis?.n_rescuable_ids    || 0;
   const partial  = pairAnalysis?.n_pairs_partial    || 0;
   const hard     = pairAnalysis?.n_pairs_overlapping || 0;
   const total    = pairAnalysis?.n_total_pairs      || 0;
 
+  // Caption line describing data source
+  const captionLine = isReal
+    ? `Real precursor pair from your run — m/z ${chimericPair.precA.mz.toFixed(2)} (1/K₀ ${K0_A.toFixed(3)}) vs m/z ${chimericPair.precB.mz.toFixed(2)} (1/K₀ ${K0_B.toFixed(3)}) · ΔK₀ = ${chimericPair.gap.toFixed(3)} · fragment m/z positions are illustrative (raw MS2 frames need Tier 1)`
+    : 'Demo K₀ values — no chimeric window with ion mobility data found in this run · run a diaPASEF file with DIA-NN report for real values';
+
   return (
     <div style={{ marginBottom: '1rem' }}>
       <div style={{
-        background: '#0e0018', border: '1px solid #3d1060',
+        background: '#0e0018',
+        border: `1px solid ${isReal ? 'rgba(34,211,238,0.3)' : '#3d1060'}`,
         borderRadius: '0.5rem', padding: '0.6rem',
       }}>
         <canvas ref={canvasRef}
                 style={{ width: '100%', height: '390px', display: 'block' }} />
         <div style={{
-          color: '#374151', fontSize: '0.7rem', marginTop: '0.4rem',
+          color: isReal ? '#22d3ee' : '#374151',
+          fontSize: '0.7rem', marginTop: '0.4rem',
           textAlign: 'center', fontStyle: 'italic',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
         }}>
-          Conceptual illustration — demonstrates the ion mobility separation principle.
-          Real K₀ assignments come from actual PASEF MS2 frames in Zyna Tier 1.
+          <span style={{ color: isReal ? '#22c55e' : '#475569', fontStyle: 'normal', fontWeight: 700 }}>
+            {isReal ? '◈ REAL DATA' : '○ DEMO DATA'}
+          </span>
+          {captionLine}
         </div>
       </div>
 
