@@ -695,6 +695,397 @@
       );
     }
 
+    // ── Intra-run RT Drift Panel ─────────────────────────────────────────────────
+    // Shows how Δ1/K₀ (IM − Predicted.IM) evolves through a run's retention time.
+    // flat = uniform environmental shift  •  slope = drift mid-run  •  step = event
+    function MobCalRtDrift({ runId }) {
+      const cvRef     = React.useRef(null);
+      const animRef   = React.useRef(null);
+      const phaseRef  = React.useRef(0);
+      const [data,    setData]    = React.useState(null);
+      const [loading, setLoading] = React.useState(false);
+      const [error,   setError]   = React.useState('');
+      const [hovBin,  setHovBin]  = React.useState(null);
+
+      React.useEffect(() => {
+        if (!runId) return;
+        setLoading(true); setError(''); setData(null);
+        fetch(API + `/api/runs/${runId}/mobility-rt-drift?n_bins=50`)
+          .then(r => r.json())
+          .then(d => { if (d.error) setError(d.message || d.error); else setData(d); })
+          .catch(e => setError('Network error: ' + e.message))
+          .finally(() => setLoading(false));
+      }, [runId]);
+
+      // Animation loop — redraw at 30 fps for scan + pulse effects
+      React.useEffect(() => {
+        if (!data) return;
+        let running = true;
+        const loop = (ts) => {
+          if (!running) return;
+          phaseRef.current = ts / 1000;
+          draw();
+          animRef.current = requestAnimationFrame(loop);
+        };
+        animRef.current = requestAnimationFrame(loop);
+        return () => { running = false; cancelAnimationFrame(animRef.current); };
+      }, [data, hovBin]);
+
+      const draw = () => {
+        const cv = cvRef.current;
+        if (!cv || !data) return;
+        const ctx = cv.getContext('2d');
+        const W = cv.width, H = cv.height;
+        const phase = phaseRef.current;
+
+        const PAD = {l:70, r:90, t:48, b:106};
+        const PH = 32; // histogram strip height at bottom
+        const plotH = H - PAD.t - PAD.b - PH - 8;
+        const plotW = W - PAD.l - PAD.r;
+        const plotY0 = PAD.t;           // top of main plot
+        const histY0 = plotY0 + plotH + 8 + PH - PH; // start of histogram strip
+        const histActualY = plotY0 + plotH + 8;
+
+        const { rt_bins_min: rtBins, median_delta: med, p05_delta: p05,
+                p95_delta: p95, n_per_bin: nBins, charge_medians: cm,
+                run_rt_max: rtMax, run_rt_min: rtMin,
+                drift_slope_vs_per_cm2_per_min: slope,
+                intra_run_range_vs_per_cm2: drange } = data;
+        const N = rtBins.length;
+
+        // Y axis range
+        const validMeds = med.filter(v => v != null);
+        const validAll  = [...(p05.filter(Boolean)), ...(p95.filter(Boolean))];
+        const WARN = 0.025, ALERT = 0.050;
+        let yLo = Math.min(-WARN * 1.3, ...validAll) - 0.005;
+        let yHi = Math.max( WARN * 1.3, ...validAll) + 0.005;
+        const yRange = yHi - yLo;
+        yLo -= yRange * 0.05; yHi += yRange * 0.05;
+
+        const toX = rt  => PAD.l + (rt  - rtMin) / (rtMax - rtMin) * plotW;
+        const toY = val => plotY0 + plotH - (val - yLo) / (yHi - yLo) * plotH;
+
+        // ── Background ──────────────────────────────────────────────────────────
+        ctx.fillStyle = '#06000f'; ctx.fillRect(0, 0, W, H);
+
+        // Outer glow frame
+        const grad = ctx.createLinearGradient(0, 0, 0, H);
+        grad.addColorStop(0, 'rgba(34,211,238,0.06)');
+        grad.addColorStop(0.5, 'rgba(0,0,0,0)');
+        grad.addColorStop(1, 'rgba(34,211,238,0.03)');
+        ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+
+        // ── Grid ────────────────────────────────────────────────────────────────
+        ctx.strokeStyle = 'rgba(255,255,255,0.035)'; ctx.lineWidth = 0.5;
+        const yTicks = [-0.08,-0.06,-0.04,-0.02,0,0.02,0.04,0.06,0.08].filter(v => v>=yLo && v<=yHi);
+        yTicks.forEach(v => {
+          const y = toY(v);
+          ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(W-PAD.r, y); ctx.stroke();
+          ctx.fillStyle = '#475569'; ctx.font = '8px system-ui'; ctx.textAlign = 'right';
+          ctx.fillText((v>=0?'+':'')+v.toFixed(2), PAD.l-5, y+3);
+          // Right axis — pressure estimate
+          const mbar = Math.round(Math.abs(v) / 0.025 * 15);
+          ctx.fillStyle = '#334155'; ctx.textAlign = 'left';
+          ctx.fillText(v===0?'0 mb':(v>0?'+':'-')+mbar+' mb', W-PAD.r+4, y+3);
+        });
+        // RT grid
+        const rtSpan = rtMax - rtMin;
+        const rtStep = rtSpan > 80 ? 20 : rtSpan > 40 ? 10 : rtSpan > 20 ? 5 : 2;
+        for (let rt = Math.ceil(rtMin/rtStep)*rtStep; rt <= rtMax; rt += rtStep) {
+          const x = toX(rt);
+          ctx.strokeStyle = 'rgba(255,255,255,0.035)'; ctx.lineWidth = 0.5;
+          ctx.beginPath(); ctx.moveTo(x, plotY0); ctx.lineTo(x, plotY0+plotH); ctx.stroke();
+          ctx.fillStyle = '#475569'; ctx.font = '8.5px system-ui'; ctx.textAlign = 'center';
+          ctx.fillText(rt + ' min', x, plotY0 + plotH + 13);
+        }
+
+        // ── WARN / ALERT bands ───────────────────────────────────────────────────
+        const bandPairs = [
+          [ALERT,  '#ef444415'],
+          [-ALERT, '#ef444415'],
+          [WARN,   '#f9731612'],
+          [-WARN,  '#f9731612'],
+        ];
+        // Draw full-width bands between threshold lines
+        ctx.fillStyle = '#ef444410';
+        const yAlert = toY(ALERT), yNAlert = toY(-ALERT);
+        if (yNAlert > plotY0 && yAlert < plotY0+plotH) {
+          ctx.fillRect(PAD.l, Math.max(plotY0, yAlert), plotW, Math.min(plotH, yNAlert - yAlert));
+        }
+        // Warn band above alert
+        ctx.fillStyle = '#f9731608';
+        const yWarn = toY(WARN), yNWarn = toY(-WARN);
+        if (yNWarn > plotY0 && yNAlert > plotY0) {
+          ctx.fillRect(PAD.l, Math.max(plotY0, yAlert), plotW, Math.min(plotH, yWarn - yAlert));
+          ctx.fillRect(PAD.l, Math.max(plotY0, yNWarn), plotW, Math.min(plotH, yNAlert - yNWarn));
+        }
+
+        // Threshold dashed lines
+        [[0, '#22d3ee', 1.5, [6,4]], [WARN,'#f97316',0.8,[4,5]], [-WARN,'#f97316',0.8,[4,5]],
+         [ALERT,'#ef4444',0.7,[2,5]], [-ALERT,'#ef4444',0.7,[2,5]]].forEach(([v, col, lw, dash]) => {
+          if (v < yLo || v > yHi) return;
+          const y = toY(v);
+          ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.setLineDash(dash);
+          ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(W-PAD.r, y); ctx.stroke();
+          ctx.setLineDash([]);
+        });
+
+        // ── Confidence band (p05–p95) ────────────────────────────────────────────
+        const bandPath = new Path2D();
+        let started = false;
+        for (let i = 0; i < N; i++) {
+          if (p95[i] == null) { started = false; continue; }
+          const x = toX(rtBins[i]), y = toY(p95[i]);
+          started ? bandPath.lineTo(x, y) : (bandPath.moveTo(x, y), started = true);
+        }
+        for (let i = N-1; i >= 0; i--) {
+          if (p05[i] == null) continue;
+          bandPath.lineTo(toX(rtBins[i]), toY(p05[i]));
+        }
+        bandPath.closePath();
+        ctx.fillStyle = 'rgba(34,211,238,0.08)'; ctx.fill(bandPath);
+        ctx.strokeStyle = 'rgba(34,211,238,0.15)'; ctx.lineWidth = 0.7; ctx.setLineDash([2,3]);
+        ctx.stroke(bandPath); ctx.setLineDash([]);
+
+        // ── Charge-state lines ───────────────────────────────────────────────────
+        const CHARGE_COLS = { '2':'#60a5fa', '3':'#4ade80', '4':'#fb923c' };
+        ['4','3','2'].forEach(z => {
+          const cmed = cm[z];
+          ctx.strokeStyle = CHARGE_COLS[z] + '55'; ctx.lineWidth = 1.2; ctx.setLineDash([3,4]);
+          ctx.beginPath(); let s2 = false;
+          for (let i=0;i<N;i++) {
+            if (cmed[i]==null) { s2=false; continue; }
+            const x=toX(rtBins[i]), y=toY(cmed[i]);
+            s2 ? ctx.lineTo(x,y) : (ctx.moveTo(x,y), s2=true);
+          }
+          ctx.stroke(); ctx.setLineDash([]);
+        });
+
+        // ── Main median line — glow layers ───────────────────────────────────────
+        const drawMedianLine = (lineWidth, alpha) => {
+          ctx.lineWidth = lineWidth;
+          ctx.beginPath(); let started3 = false;
+          for (let i=0;i<N;i++) {
+            if (med[i]==null) { started3=false; continue; }
+            const severity = Math.min(1, Math.abs(med[i]) / ALERT);
+            const r = Math.round(34  + (239-34)  * severity);
+            const g = Math.round(211 + (68-211)  * severity);
+            const b = Math.round(238 + (68-238)  * severity);
+            ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
+            const x = toX(rtBins[i]), y = toY(med[i]);
+            if (!started3) { ctx.stroke(); ctx.beginPath(); ctx.moveTo(x,y); started3=true; }
+            else { ctx.lineTo(x,y); }
+          }
+          ctx.stroke();
+        };
+        drawMedianLine(8, 0.07);
+        drawMedianLine(4, 0.15);
+        drawMedianLine(1.8, 0.9);
+
+        // ── Hover bin highlight ──────────────────────────────────────────────────
+        if (hovBin != null && hovBin >= 0 && hovBin < N && med[hovBin] != null) {
+          const x = toX(rtBins[hovBin]);
+          const severity = Math.min(1, Math.abs(med[hovBin]) / ALERT);
+          const r = Math.round(34  + (239-34)  * severity);
+          const g = Math.round(211 + (68-211)  * severity);
+          const b = Math.round(238 + (68-238)  * severity);
+          ctx.strokeStyle = `rgba(${r},${g},${b},0.6)`; ctx.lineWidth=1; ctx.setLineDash([3,3]);
+          ctx.beginPath(); ctx.moveTo(x, plotY0); ctx.lineTo(x, plotY0+plotH); ctx.stroke();
+          ctx.setLineDash([]);
+          // Dot
+          ctx.beginPath(); ctx.arc(x, toY(med[hovBin]), 5, 0, Math.PI*2);
+          ctx.fillStyle = `rgba(${r},${g},${b},0.9)`; ctx.fill();
+          // Tooltip
+          const tw=210, th=88;
+          const tx = Math.min(x+10, W-PAD.r-tw-4);
+          const ty = Math.max(plotY0+4, toY(med[hovBin])-th-8);
+          ctx.fillStyle='rgba(6,0,15,0.96)'; ctx.strokeStyle=`rgba(${r},${g},${b},0.5)`; ctx.lineWidth=1;
+          ctx.beginPath(); ctx.roundRect(tx,ty,tw,th,5); ctx.fill(); ctx.stroke();
+          ctx.fillStyle=`rgb(${r},${g},${b})`; ctx.font='bold 9px system-ui'; ctx.textAlign='left';
+          ctx.fillText(`RT ${rtBins[hovBin].toFixed(1)} min`, tx+7, ty+14);
+          ctx.fillStyle='#e2e8f0'; ctx.font='8.5px system-ui';
+          ctx.fillText(`Median Δ1/K₀: ${med[hovBin]>=0?'+':''}${med[hovBin].toFixed(5)} Vs/cm²`, tx+7, ty+28);
+          if (p05[hovBin]!=null) ctx.fillText(`5th–95th: ${p05[hovBin].toFixed(4)} → ${p95[hovBin].toFixed(4)}`, tx+7, ty+42);
+          ctx.fillText(`Precursors in bin: ${nBins[hovBin].toLocaleString()}`, tx+7, ty+56);
+          const mbarEst = Math.round(Math.abs(med[hovBin]) / 0.025 * 15);
+          ctx.fillStyle=`rgb(${r},${g},${b})`; ctx.font='bold 8px monospace';
+          ctx.fillText(`Est. ΔP: ~${mbarEst} mbar`, tx+7, ty+74);
+        }
+
+        // ── Animated scan line ───────────────────────────────────────────────────
+        const scanFrac = (phase * 0.12) % 1;
+        const scanX2 = PAD.l + scanFrac * plotW;
+        const scanGrad = ctx.createLinearGradient(scanX2-40, 0, scanX2+2, 0);
+        scanGrad.addColorStop(0, 'rgba(34,211,238,0)');
+        scanGrad.addColorStop(1, 'rgba(34,211,238,0.12)');
+        ctx.fillStyle = scanGrad;
+        ctx.fillRect(scanX2-40, plotY0, 42, plotH);
+        ctx.strokeStyle = 'rgba(34,211,238,0.25)'; ctx.lineWidth = 0.8;
+        ctx.beginPath(); ctx.moveTo(scanX2, plotY0); ctx.lineTo(scanX2, plotY0+plotH); ctx.stroke();
+
+        // Pulsing dot at last valid median
+        let lastI = N-1;
+        while (lastI > 0 && med[lastI] == null) lastI--;
+        if (med[lastI] != null) {
+          const px = toX(rtBins[lastI]), py = toY(med[lastI]);
+          const pulse = 0.5 + 0.5 * Math.sin(phase * 4);
+          const severity = Math.min(1, Math.abs(med[lastI]) / ALERT);
+          const r=Math.round(34+(239-34)*severity), g=Math.round(211+(68-211)*severity), b=Math.round(238+(68-238)*severity);
+          ctx.beginPath(); ctx.arc(px, py, 6 + pulse*4, 0, Math.PI*2);
+          ctx.strokeStyle = `rgba(${r},${g},${b},${0.4*pulse})`; ctx.lineWidth=1.5; ctx.stroke();
+          ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI*2);
+          ctx.fillStyle = `rgb(${r},${g},${b})`; ctx.fill();
+        }
+
+        // ── Precursor histogram strip ────────────────────────────────────────────
+        const maxN = Math.max(...nBins);
+        const hStrip = PH - 4;
+        const hY0 = histActualY;
+        ctx.fillStyle='rgba(34,211,238,0.05)'; ctx.fillRect(PAD.l, hY0, plotW, hStrip);
+        for (let i=0;i<N;i++) {
+          if (!nBins[i]) continue;
+          const bx = toX(rtBins[i]);
+          const bw = plotW / N - 0.5;
+          const bh = (nBins[i] / maxN) * hStrip;
+          const severity = med[i]!=null ? Math.min(1, Math.abs(med[i]) / ALERT) : 0;
+          const r=Math.round(34+(249-34)*severity), g=Math.round(211+(115-211)*severity), b=Math.round(238+(22-238)*severity);
+          ctx.fillStyle = `rgba(${r},${g},${b},0.55)`;
+          ctx.fillRect(bx - bw/2, hY0 + hStrip - bh, bw, bh);
+        }
+        // histogram label
+        ctx.fillStyle='#334155'; ctx.font='7.5px system-ui'; ctx.textAlign='left';
+        ctx.fillText('Precursors/bin', PAD.l+2, hY0+9);
+
+        // ── Axes ─────────────────────────────────────────────────────────────────
+        ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(PAD.l, plotY0); ctx.lineTo(PAD.l, plotY0+plotH); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(PAD.l, plotY0+plotH); ctx.lineTo(W-PAD.r, plotY0+plotH); ctx.stroke();
+
+        ctx.fillStyle='#64748b'; ctx.font='9.5px system-ui'; ctx.textAlign='center';
+        ctx.fillText('Retention Time (min)', PAD.l + plotW/2, plotY0+plotH+26);
+        ctx.save(); ctx.translate(14, plotY0+plotH/2); ctx.rotate(-Math.PI/2);
+        ctx.fillText('Δ 1/K₀  Vs/cm²', 0, 0); ctx.restore();
+        ctx.save(); ctx.translate(W-12, plotY0+plotH/2); ctx.rotate(Math.PI/2);
+        ctx.fillStyle='#334155'; ctx.font='9px system-ui'; ctx.textAlign='center';
+        ctx.fillText('ΔP estimate', 0, 0); ctx.restore();
+
+        // ── Title & stability stats ───────────────────────────────────────────────
+        ctx.fillStyle='#94a3b8'; ctx.font='bold 9.5px system-ui'; ctx.textAlign='left';
+        ctx.fillText('Intra-run Ion Mobility Drift  ·  binned by retention time', PAD.l, 18);
+
+        // Slope badge
+        if (slope != null) {
+          const slopeMbarMin = (slope / 0.025 * 15);
+          const sCol = Math.abs(slope) < 0.0002 ? '#22c55e' : Math.abs(slope) < 0.0005 ? '#f97316' : '#ef4444';
+          ctx.fillStyle = sCol + '22';
+          ctx.beginPath(); ctx.roundRect(W-PAD.r-160, 6, 155, 20, 4); ctx.fill();
+          ctx.fillStyle = sCol; ctx.font = '8px monospace'; ctx.textAlign = 'right';
+          ctx.fillText(`Slope: ${slope>=0?'+':''}${slope.toFixed(6)} Vs/cm²/min`, W-PAD.r-5, 19);
+        }
+
+        // Charge legend
+        ['2','3','4'].forEach((z, i) => {
+          const col = CHARGE_COLS[z];
+          const lx = PAD.l + 4 + i*62;
+          ctx.beginPath(); ctx.moveTo(lx, plotY0-8); ctx.lineTo(lx+18, plotY0-8);
+          ctx.strokeStyle=col+'88'; ctx.lineWidth=1.4; ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
+          ctx.fillStyle='#64748b'; ctx.font='8px system-ui'; ctx.textAlign='left';
+          ctx.fillText(`z+${z}`, lx+22, plotY0-5);
+        });
+        ctx.fillStyle='#94a3b8'; ctx.font='8px system-ui';
+        const lx3 = PAD.l + 4 + 3*62;
+        ctx.beginPath(); ctx.moveTo(lx3, plotY0-8); ctx.lineTo(lx3+18, plotY0-8);
+        ctx.strokeStyle='#22d3ee99'; ctx.lineWidth=2; ctx.stroke();
+        ctx.fillStyle='#94a3b8'; ctx.textAlign='left';
+        ctx.fillText('median', lx3+22, plotY0-5);
+      };
+
+      const handleMouseMove = e => {
+        const cv = cvRef.current; if (!cv || !data) return;
+        const rect = cv.getBoundingClientRect();
+        const mx = (e.clientX - rect.left) * (cv.width / rect.width);
+        const { rt_bins_min: rtBins, run_rt_min: rtMin, run_rt_max: rtMax } = data;
+        const PAD_L = 70, PAD_R = 90;
+        const plotW = cv.width - PAD_L - PAD_R;
+        const fracX = (mx - PAD_L) / plotW;
+        if (fracX < 0 || fracX > 1) { setHovBin(null); return; }
+        const hovRt = rtMin + fracX * (rtMax - rtMin);
+        // Find nearest bin
+        let best = null, bestD = Infinity;
+        rtBins.forEach((rt, i) => {
+          const d = Math.abs(rt - hovRt);
+          if (d < bestD) { bestD = d; best = i; }
+        });
+        setHovBin(best);
+      };
+
+      if (!runId) return (
+        <div style={{padding:'2rem', textAlign:'center', color:'#64748b', fontSize:'0.85rem'}}>
+          Select a timsTOF run above to view intra-run drift
+        </div>
+      );
+      if (loading) return <div style={{padding:'2rem', textAlign:'center', color:'#22d3ee'}}>Loading RT drift data…</div>;
+      if (error) return (
+        <div style={{padding:'0.75rem', background:'rgba(239,68,68,0.08)', border:'1px solid rgba(239,68,68,0.3)',
+          borderRadius:'0.4rem', color:'#fca5a5', fontSize:'0.78rem'}}>{error}</div>
+      );
+      if (!data) return null;
+
+      const { drift_slope_vs_per_cm2_per_min: slope, intra_run_range_vs_per_cm2: drange,
+              run_rt_max: rtMax, run_rt_min: rtMin, median_delta: med } = data;
+      const validMeds = med.filter(v => v != null);
+      const overallMed = validMeds.length
+        ? validMeds.slice().sort((a,b)=>a-b)[Math.floor(validMeds.length/2)] : null;
+      const WARN=0.025, ALERT=0.050;
+      const mbarSlope = slope != null ? Math.abs(slope)/0.025*15 : null;
+      const slopeLabel = mbarSlope == null ? '—'
+        : mbarSlope < 1 ? 'Stable' : mbarSlope < 3 ? 'Slight' : 'Drifting';
+      const slopeCol = mbarSlope == null ? '#64748b'
+        : mbarSlope < 1 ? '#22c55e' : mbarSlope < 3 ? '#f97316' : '#ef4444';
+
+      return (
+        <div>
+          <div style={{display:'flex', gap:'0.5rem', flexWrap:'wrap', marginBottom:'0.75rem', alignItems:'stretch'}}>
+            {[
+              {label:'Run duration',     val: `${(rtMax-rtMin).toFixed(1)} min`, col:'#94a3b8'},
+              {label:'Overall median Δ', val: overallMed!=null ? (overallMed>=0?'+':'')+overallMed.toFixed(4)+' Vs/cm²' : '—',
+               col: overallMed==null?'#64748b': Math.abs(overallMed)>ALERT?'#ef4444': Math.abs(overallMed)>WARN?'#f97316':'#22c55e'},
+              {label:'Intra-run range',  val: drange!=null ? drange.toFixed(4)+' Vs/cm²' : '—',
+               col: drange==null?'#64748b': drange>WARN?'#f97316':'#22c55e'},
+              {label:'Drift rate',       val: slope!=null ? (slope>=0?'+':'')+slope.toFixed(6)+' Vs/cm²/min' : '—', col: slopeCol},
+              {label:'Drift character',  val: slopeLabel, col: slopeCol},
+              {label:'Est. ΔP rate',     val: mbarSlope!=null ? `~${mbarSlope.toFixed(1)} mbar/min` : '—', col: slopeCol},
+            ].map(s => (
+              <div key={s.label} style={{background:'rgba(0,0,0,0.45)', border:`1px solid ${s.col}22`,
+                borderRadius:'0.4rem', padding:'0.45rem 0.65rem', textAlign:'center', flex:'1 1 120px'}}>
+                <div style={{fontSize:'0.92rem', fontWeight:800, color:s.col, lineHeight:1.1}}>{s.val}</div>
+                <div style={{fontSize:'0.67rem', color:'#64748b', marginTop:'0.15rem'}}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{fontSize:'0.72rem', color:'#64748b', lineHeight:1.6, marginBottom:'0.6rem',
+            padding:'0.4rem 0.7rem', background:'rgba(34,211,238,0.04)', borderRadius:'0.35rem',
+            borderLeft:'3px solid rgba(34,211,238,0.3)'}}>
+            <strong style={{color:'#22d3ee'}}>How to read this:</strong>{' '}
+            Each point = median Δ1/K₀ (observed − predicted ion mobility) for all precursors in a ~1-min RT bin.
+            The shaded band = 5th–95th percentile spread.
+            Dashed lines = z+2/z+3/z+4 charge-state medians — should all track together if drift is pressure-driven.
+            The animated bar on the right estimates the barometric pressure change from the calibration baseline.{' '}
+            <strong style={{color:'#DAAA00'}}>A flat line = stable instrument.
+            A slope = your instrument breathing through a pressure front.</strong>
+          </div>
+
+          <canvas ref={cvRef} width={900} height={440}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={() => setHovBin(null)}
+            style={{width:'100%', display:'block', borderRadius:'0.5rem',
+              boxShadow:'0 0 24px rgba(34,211,238,0.08)', cursor:'crosshair'}}/>
+        </div>
+      );
+    }
+
+
     // ── Calibrant QC Panel ───────────────────────────────────────────────────────
     // Reads Bruker's own reference 1/K₀ values from analysis.tdf and compares
     // to what the instrument actually measured post-calibration.
@@ -1038,6 +1429,7 @@
       const VIEWS = [
         ['calibrant',  '★ Calibrant QC'],
         ['massdrift',  '◬ Mass Drift'],
+        ['rtdrift',   '⚡ RT Drift'],
         ['method',    '⚙ Method'],
         ['scatter',   '◎ Obs vs Pred'],
         ['histogram', '▦ Shift Dist'],
@@ -1193,6 +1585,13 @@
                 labelled circles = calibrant ions
               </div>
               <MobCalMassDrift runId={selectedRunId}/>
+            </div>
+          )}
+
+          {/* Intra-run RT drift */}
+          {view === 'rtdrift' && (
+            <div className="card" style={{padding:'0.75rem', background:'rgba(0,0,0,0.5)'}}>
+              <MobCalRtDrift runId={selectedRunId}/>
             </div>
           )}
 

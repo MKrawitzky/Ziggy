@@ -4093,6 +4093,138 @@ async def api_mobility_calibration(run_id: str, max_points: int = 4000) -> dict:
                 "traceback": traceback.format_exc()[-800:]}
 
 
+@app.get("/api/runs/{run_id}/mobility-rt-drift")
+async def api_mobility_rt_drift(run_id: str, n_bins: int = 50) -> dict:
+    """Intra-run ion mobility drift: Δ1/K₀ (= IM − Predicted.IM) binned by RT.
+
+    Shows how the systematic 1/K₀ offset evolves through a single run:
+      flat  → uniform pressure shift (stable during run)
+      slope → drift mid-run (pressure front passing, instrument warm-up)
+      step  → instrument event (source clean, gas burst, etc.)
+
+    Returns per-bin medians + 5th/95th percentiles + per-charge-state medians.
+    """
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    report_path = _resolve_report_path(run)
+    if not report_path:
+        return {"error": "no_report", "message": "No DIA-NN report.parquet found for this run."}
+
+    try:
+        import polars as pl
+
+        schema = pl.read_parquet_schema(report_path)
+        needed = ["RT", "IM", "Predicted.IM", "Precursor.Charge", "Q.Value"]
+        available = [c for c in needed if c in schema]
+
+        if "IM" not in available or "Predicted.IM" not in available:
+            return {"error": "no_predicted_im",
+                    "message": "Predicted.IM not in report. DIA-NN ≥ 1.9 required."}
+        if "RT" not in available:
+            return {"error": "no_rt", "message": "RT column not in report."}
+
+        df = pl.read_parquet(report_path, columns=available)
+
+        if "Q.Value" in df.columns:
+            df = df.filter(pl.col("Q.Value") <= 0.01)
+
+        df = df.filter(
+            pl.col("IM").is_not_null() & pl.col("Predicted.IM").is_not_null() &
+            (pl.col("IM") > 0.3) & (pl.col("Predicted.IM") > 0.3) &
+            pl.col("RT").is_not_null()
+        )
+
+        if df.height < 20:
+            return {"error": "no_data", "message": "Not enough precursors with RT + IM data."}
+
+        df = df.with_columns(
+            (pl.col("IM") - pl.col("Predicted.IM")).alias("delta_im")
+        )
+
+        rt_list = df["RT"].to_list()
+        rt_min_run = float(min(rt_list))
+        rt_max_run = float(max(rt_list))
+        span = rt_max_run - rt_min_run
+        if span < 0.01:
+            span = 1.0
+        bin_w = span / n_bins
+
+        bin_indices = [min(int((rt - rt_min_run) / bin_w), n_bins - 1) for rt in rt_list]
+        df = df.with_columns(pl.Series("_bin", bin_indices))
+
+        rt_bins_mid, median_delta, p05_delta, p95_delta, n_per_bin = [], [], [], [], []
+        charge_medians = {"2": [], "3": [], "4": []}
+
+        for bi in range(n_bins):
+            subset = df.filter(pl.col("_bin") == bi)
+            rt_mid = round(rt_min_run + (bi + 0.5) * bin_w, 3)
+            rt_bins_mid.append(rt_mid)
+            n_per_bin.append(subset.height)
+
+            if subset.height < 3:
+                median_delta.append(None)
+                p05_delta.append(None)
+                p95_delta.append(None)
+                for z in charge_medians:
+                    charge_medians[z].append(None)
+                continue
+
+            deltas = sorted(subset["delta_im"].to_list())
+            n = len(deltas)
+            median_delta.append(round(deltas[n // 2], 5))
+            p05_delta.append(round(deltas[max(0, int(n * 0.05))], 5))
+            p95_delta.append(round(deltas[min(n - 1, int(n * 0.95))], 5))
+
+            for z_int, z_str in [(2, "2"), (3, "3"), (4, "4")]:
+                if "Precursor.Charge" in df.columns:
+                    z_sub = subset.filter(pl.col("Precursor.Charge") == z_int)
+                    if z_sub.height >= 3:
+                        zd = sorted(z_sub["delta_im"].to_list())
+                        charge_medians[z_str].append(round(zd[len(zd) // 2], 5))
+                    else:
+                        charge_medians[z_str].append(None)
+                else:
+                    charge_medians[z_str].append(None)
+
+        # Intra-run drift stats: slope of linear fit through non-null medians
+        valid = [(rt_bins_mid[i], median_delta[i]) for i in range(n_bins)
+                 if median_delta[i] is not None]
+        drift_slope = None
+        drift_range = None
+        if len(valid) >= 4:
+            xs = [v[0] for v in valid]
+            ys = [v[1] for v in valid]
+            n_v = len(xs)
+            sx = sum(xs); sy = sum(ys)
+            sxy = sum(x * y for x, y in zip(xs, ys))
+            sx2 = sum(x * x for x in xs)
+            denom = n_v * sx2 - sx * sx
+            if abs(denom) > 1e-12:
+                drift_slope = round((n_v * sxy - sx * sy) / denom, 7)
+            drift_range = round(max(ys) - min(ys), 5)
+
+        return {
+            "rt_bins_min": rt_bins_mid,
+            "median_delta": median_delta,
+            "p05_delta": p05_delta,
+            "p95_delta": p95_delta,
+            "n_per_bin": n_per_bin,
+            "charge_medians": charge_medians,
+            "run_rt_max": round(rt_max_run, 2),
+            "run_rt_min": round(rt_min_run, 2),
+            "n_bins": n_bins,
+            "drift_slope_vs_per_cm2_per_min": drift_slope,
+            "intra_run_range_vs_per_cm2": drift_range,
+        }
+
+    except Exception as exc:
+        import traceback
+        return {"error": "extraction_failed", "message": str(exc),
+                "traceback": traceback.format_exc()[-800:]}
+
+
 @app.get("/api/runs/{run_id}/4d-features")
 async def api_4d_features(run_id: str) -> dict:
     """Novel 4D timsTOF feature analyses — impossible on Orbitrap.
