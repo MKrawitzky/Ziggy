@@ -712,7 +712,11 @@
         setLoading(true); setError(''); setData(null);
         fetch(API + `/api/runs/${runId}/mobility-rt-drift?n_bins=50`)
           .then(r => r.json())
-          .then(d => { if (d.error) setError(d.message || d.error); else setData(d); })
+          .then(d => {
+            if (d.error || d.detail) setError(d.message || d.error || d.detail);
+            else if (!Array.isArray(d.median_delta)) setError('Unexpected response — restart the server to load the new endpoint.');
+            else setData(d);
+          })
           .catch(e => setError('Network error: ' + e.message))
           .finally(() => setLoading(false));
       }, [runId]);
@@ -1029,7 +1033,7 @@
         <div style={{padding:'0.75rem', background:'rgba(239,68,68,0.08)', border:'1px solid rgba(239,68,68,0.3)',
           borderRadius:'0.4rem', color:'#fca5a5', fontSize:'0.78rem'}}>{error}</div>
       );
-      if (!data) return null;
+      if (!data || !Array.isArray(data.median_delta)) return null;
 
       const { drift_slope_vs_per_cm2_per_min: slope, intra_run_range_vs_per_cm2: drange,
               run_rt_max: rtMax, run_rt_min: rtMin, median_delta: med } = data;
