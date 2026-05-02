@@ -438,11 +438,23 @@
         }
         const ax = anchors.map(a => a.ref_mz);
         const ay = anchors.map(a => a.ref_k0);
-        const n  = ax.length;
-        let sx=0, sy=0, sxy=0, sx2=0;
-        for (let i=0;i<n;i++) { sx+=ax[i]; sy+=ay[i]; sxy+=ax[i]*ay[i]; sx2+=ax[i]*ax[i]; }
-        const fitA = (n*sxy - sx*sy) / (n*sx2 - sx*sx);
-        const fitB = (sy - fitA*sx) / n;
+        const nA = ax.length;
+        if (nA === 0) return (
+          <div style={{padding:'1.5rem',textAlign:'center',color:'#64748b',fontSize:'0.82rem'}}>
+            No calibrant anchors found in TDF. The 3 ESI-L ions (m/z 622 · 922 · 1221) may fall outside this method's TIMS acquisition window. Check <strong style={{color:'#22d3ee'}}>⚙ Method</strong> → IMS Calibration → Mobility range.
+          </div>
+        );
+        let sx=0,sy=0,sxy=0,sx2=0;
+        for(let i=0;i<nA;i++){sx+=ax[i];sy+=ay[i];sxy+=ax[i]*ay[i];sx2+=ax[i]*ax[i];}
+        let fitA, fitB;
+        if (nA >= 2) {
+          const denom = nA*sx2 - sx*sx;
+          fitA = Math.abs(denom) > 1e-12 ? (nA*sxy-sx*sy)/denom : 0;
+          fitB = (sy - fitA*sx) / nA;
+        } else {
+          fitA = 0;
+          fitB = ay[0]; // single anchor: flat line at its measured k0
+        }
         const predicted = mz => fitA * mz + fitB;
 
         // ── Ion data → compute Δ per ion ──────────────────────────────────────
@@ -692,6 +704,155 @@
             })}
           </div>
         </div>
+      );
+    }
+
+    // ── Mission Control Banner ────────────────────────────────────────────────────
+    // Space Oddity themed animated header — "Ground Control to Major Tom"
+    function MobCalMissionBanner({ calData, calibrantData, loading }) {
+      const cvRef    = React.useRef(null);
+      const starsRef = React.useRef(null);
+      const animRef  = React.useRef(null);
+
+      const WARN = 0.025, ALERT = 0.050;
+      const medShift = calData?.stats?.median_shift;
+
+      // Determine status from both DIA-NN calibration AND Bruker calibrant QC
+      const calibrantMaxDrift = React.useMemo(() => {
+        if (!calibrantData?.compounds) return null;
+        const targets = calibrantData.compounds.filter(c => c.is_target && c.drift != null);
+        return targets.length ? Math.max(...targets.map(c => Math.abs(c.drift))) : null;
+      }, [calibrantData]);
+
+      const status = loading ? 'LOADING'
+        : (!calData && !calibrantData) ? 'STANDBY'
+        : ((medShift != null && Math.abs(medShift) >= ALERT) || (calibrantMaxDrift != null && calibrantMaxDrift >= ALERT)) ? 'CRITICAL'
+        : ((medShift != null && Math.abs(medShift) >= WARN)  || (calibrantMaxDrift != null && calibrantMaxDrift >= WARN))  ? 'WARNING'
+        : 'NOMINAL';
+
+      React.useEffect(() => {
+        const cv = cvRef.current; if (!cv) return;
+        const W = cv.width, H = cv.height;
+        const ctx = cv.getContext('2d');
+
+        if (!starsRef.current) {
+          starsRef.current = Array.from({length: 160}, () => ({
+            x: Math.random() * W, y: Math.random() * H,
+            r: Math.random() * 1.3 + 0.2,
+            tw: Math.random() * Math.PI * 2,
+            ts: Math.random() * 1.8 + 0.4,
+          }));
+        }
+
+        const COLS = {
+          LOADING:  [100,116,139],
+          STANDBY:  [100,116,139],
+          NOMINAL:  [34,197,94],
+          WARNING:  [249,115,22],
+          CRITICAL: [239,68,68],
+        };
+
+        const MSGS = {
+          LOADING:  ['T-MINUS  ·  INITIALISING SYSTEMS', 'COMPUTING TELEMETRY…'],
+          STANDBY:  ['GROUND CONTROL', 'AWAITING TRANSMISSION   · · ·'],
+          NOMINAL:  ['THIS IS MAJOR TOM TO GROUND CONTROL', 'ALL SYSTEMS NOMINAL'],
+          WARNING:  ['GROUND CONTROL TO MAJOR TOM', 'MOBILITY DRIFT DETECTED'],
+          CRITICAL: ['HOUSTON,  WE HAVE  A  PROBLEM', 'RECALIBRATE TIMS IMMEDIATELY'],
+        };
+
+        let running = true;
+        const draw = (ts) => {
+          if (!running) return;
+          const t = ts / 1000;
+          ctx.clearRect(0, 0, W, H);
+          ctx.fillStyle = '#06000f'; ctx.fillRect(0, 0, W, H);
+
+          const [cr, cg, cb] = COLS[status] || COLS.STANDBY;
+
+          // Radial glow
+          const rg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, 340);
+          rg.addColorStop(0, `rgba(${cr},${cg},${cb},0.09)`);
+          rg.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = rg; ctx.fillRect(0, 0, W, H);
+
+          // Stars
+          starsRef.current.forEach(s => {
+            const a = 0.15 + 0.65 * Math.abs(Math.sin(t * s.ts + s.tw));
+            ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+            ctx.fillStyle = `rgba(255,255,255,${a})`; ctx.fill();
+          });
+
+          const cy2 = H / 2;
+
+          // Animated comm lines (dashed, flowing inward)
+          const dashOff = -(t * 20) % 14;
+          ctx.setLineDash([5,9]); ctx.lineDashOffset = dashOff;
+          ctx.strokeStyle = `rgba(${cr},${cg},${cb},0.22)`; ctx.lineWidth = 0.9;
+          ctx.beginPath(); ctx.moveTo(85, cy2); ctx.lineTo(310, cy2); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(590, cy2); ctx.lineTo(815, cy2); ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Left beacon
+          const blink = status === 'CRITICAL' ? (Math.sin(t * 5) > 0 ? 1 : 0.12) : 0.9;
+          [22, 15].forEach((radius) => {
+            ctx.beginPath(); ctx.arc(50, cy2, radius + (status === 'CRITICAL' ? 2.5 * Math.abs(Math.sin(t*4)) : 0), 0, Math.PI*2);
+            ctx.strokeStyle = `rgba(${cr},${cg},${cb},${blink * 0.25})`; ctx.lineWidth = 1.2; ctx.stroke();
+          });
+          ctx.beginPath(); ctx.arc(50, cy2, 7, 0, Math.PI*2);
+          ctx.fillStyle = `rgba(${cr},${cg},${cb},${blink})`; ctx.fill();
+          ctx.fillStyle = `rgba(${cr},${cg},${cb},0.45)`; ctx.font = '7px system-ui'; ctx.textAlign = 'center';
+          ctx.fillText(status, 50, cy2 + 21);
+
+          // Right signal waveform
+          const amp = status === 'NOMINAL' ? 7 : status === 'WARNING' ? 10 : status === 'CRITICAL' ? 13 * (0.65 + 0.35 * Math.abs(Math.sin(t*7))) : 2.5;
+          for (let i = 0; i < 40; i++) {
+            const wx = 833 + i * 1.85;
+            const wy = cy2 + amp * Math.sin(i * 0.52 + t * 4.5);
+            ctx.beginPath(); ctx.arc(wx, wy, 0.85, 0, Math.PI*2);
+            ctx.fillStyle = `rgba(${cr},${cg},${cb},0.7)`; ctx.fill();
+          }
+          ctx.fillStyle = `rgba(${cr},${cg},${cb},0.35)`; ctx.font = '7px system-ui'; ctx.textAlign = 'center';
+          ctx.fillText('TX / RX', 853, cy2 + 21);
+
+          // ZIGGY ID
+          ctx.fillStyle = 'rgba(100,116,139,0.4)'; ctx.font = '7px system-ui';
+          ctx.textAlign = 'left'; ctx.fillText('ZIGGY MISSION CONTROL  ·  ION MOBILITY SUBSYSTEM', 85, 12);
+
+          // Center messages
+          const [line1, line2] = MSGS[status] || MSGS.STANDBY;
+          const blinkMain = status === 'CRITICAL' ? (Math.sin(t * 3.5) > 0 ? 1 : 0.3) : 1;
+          ctx.textAlign = 'center';
+          ctx.fillStyle = `rgba(${cr},${cg},${cb},0.5)`; ctx.font = '8.5px system-ui';
+          ctx.fillText(line1, W/2, cy2 - 13);
+          ctx.fillStyle = `rgba(${cr},${cg},${cb},${blinkMain})`; ctx.font = 'bold 19px system-ui';
+          ctx.fillText(line2, W/2, cy2 + 10);
+
+          // Telemetry line
+          let tele = '';
+          if (medShift != null) {
+            const estP = Math.round(Math.abs(medShift) / 0.025 * 15);
+            tele = `Δ1/K₀ = ${medShift >= 0?'+':''}${medShift.toFixed(4)} Vs/cm²   ·   ΔP ≈ ${estP} mbar   ·   ${calData.n_precursors?.toLocaleString()||'—'} precursors`;
+          } else if (calibrantMaxDrift != null) {
+            const estP = Math.round(calibrantMaxDrift / 0.025 * 15);
+            tele = `Max calibrant |Δ| = ${calibrantMaxDrift.toFixed(5)} Vs/cm²   ·   ΔP ≈ ${estP} mbar`;
+          } else if (status === 'STANDBY') {
+            tele = 'Select a timsTOF run to begin mission briefing';
+          }
+          if (tele) {
+            ctx.font = '8px monospace'; ctx.fillStyle = `rgba(${cr},${cg},${cb},0.48)`;
+            ctx.fillText(tele, W/2, cy2 + 29);
+          }
+
+          animRef.current = requestAnimationFrame(draw);
+        };
+
+        animRef.current = requestAnimationFrame(draw);
+        return () => { running = false; cancelAnimationFrame(animRef.current); };
+      }, [calData, calibrantData, status]);
+
+      return (
+        <canvas ref={cvRef} width={900} height={100}
+          style={{width:'100%', display:'block', borderRadius:'0.5rem 0.5rem 0 0'}}/>
       );
     }
 
@@ -1420,18 +1581,261 @@
       );
     }
 
+    // ── Calibrant Trend (multi-run timeseries) ────────────────────────────────────
+    // Three ESI-L anchor ions over time — parallel = pressure, diverging = hardware
+    function MobCalCalibrantTrend() {
+      const cvRef    = React.useRef(null);
+      const animRef  = React.useRef(null);
+      const phaseRef = React.useRef(0);
+      const [data,    setData]    = React.useState(null);
+      const [loading, setLoading] = React.useState(true);
+      const [error,   setError]   = React.useState('');
+      const [hovRun,  setHovRun]  = React.useState(null);
+
+      React.useEffect(() => {
+        setLoading(true);
+        fetch(API + '/api/calibrant-trend?limit=40')
+          .then(r => r.json())
+          .then(d => {
+            if (d.error || d.detail) setError(d.message || d.error || d.detail);
+            else if (!Array.isArray(d.runs)) setError('Unexpected response — restart server.');
+            else setData(d);
+          })
+          .catch(e => setError('Network error: ' + e.message))
+          .finally(() => setLoading(false));
+      }, []);
+
+      React.useEffect(() => {
+        if (!data) return;
+        let running = true;
+        const loop = (ts) => {
+          if (!running) return;
+          phaseRef.current = ts / 1000;
+          draw();
+          animRef.current = requestAnimationFrame(loop);
+        };
+        animRef.current = requestAnimationFrame(loop);
+        return () => { running = false; cancelAnimationFrame(animRef.current); };
+      }, [data, hovRun]);
+
+      const ANCHORS = [
+        { key:'m622',  nom:622,  col:[34,211,238],   label:'m/z 622'  },
+        { key:'m922',  nom:922,  col:[218,170,0],     label:'m/z 922'  },
+        { key:'m1221', nom:1221, col:[217,70,239],    label:'m/z 1221' },
+      ];
+      const WARN = 0.025, ALERT = 0.050;
+
+      const draw = () => {
+        const cv = cvRef.current; if (!cv || !data) return;
+        const ctx = cv.getContext('2d');
+        const W = cv.width, H = cv.height;
+        const t = phaseRef.current;
+        const runs = data.runs || [];
+        const N = runs.length; if (!N) return;
+
+        const PAD = {l:65, r:32, t:44, b:76};
+        const plotW = W - PAD.l - PAD.r;
+        const plotH = H - PAD.t - PAD.b;
+
+        const allD = [];
+        ANCHORS.forEach(a => runs.forEach(r => { const d = r[a.key]?.drift; if (d != null) allD.push(d); }));
+        const yRad = Math.max(ALERT*1.7, ...(allD.map(Math.abs))) + 0.003;
+        const yLo = -yRad, yHi = yRad;
+
+        const toX = i => PAD.l + (i / Math.max(N-1,1)) * plotW;
+        const toY = v => PAD.t + plotH - (v - yLo) / (yHi - yLo) * plotH;
+
+        ctx.fillStyle = '#06000f'; ctx.fillRect(0, 0, W, H);
+        const bg = ctx.createLinearGradient(0,0,0,H);
+        bg.addColorStop(0,'rgba(34,211,238,0.04)'); bg.addColorStop(1,'rgba(0,0,0,0)');
+        ctx.fillStyle=bg; ctx.fillRect(0,0,W,H);
+
+        // ALERT / WARN bands
+        const yA=toY(ALERT), yNA=toY(-ALERT), yW=toY(WARN), yNW=toY(-WARN);
+        ctx.fillStyle='rgba(239,68,68,0.06)';
+        ctx.fillRect(PAD.l, Math.max(PAD.t,yA), plotW, Math.min(plotH, yNA-yA));
+        ctx.fillStyle='rgba(249,115,22,0.05)';
+        if (yW > PAD.t) ctx.fillRect(PAD.l, Math.max(PAD.t,yA), plotW, Math.min(plotH,yW-yA));
+        if (yNW < PAD.t+plotH) ctx.fillRect(PAD.l, Math.max(PAD.t,yNW), plotW, Math.min(plotH,yNA-yNW));
+
+        // Grid
+        const yTicks = [-0.08,-0.06,-0.04,-0.02,0,0.02,0.04,0.06,0.08].filter(v=>v>=yLo&&v<=yHi);
+        yTicks.forEach(v => {
+          const y=toY(v);
+          ctx.strokeStyle='rgba(255,255,255,0.035)'; ctx.lineWidth=0.5;
+          ctx.beginPath(); ctx.moveTo(PAD.l,y); ctx.lineTo(W-PAD.r,y); ctx.stroke();
+          ctx.fillStyle='#475569'; ctx.font='8px system-ui'; ctx.textAlign='right';
+          ctx.fillText((v>=0?'+':'')+v.toFixed(2), PAD.l-4, y+3);
+        });
+
+        // Threshold lines
+        [[0,'#22d3ee',1.2,[6,4]],[WARN,'#f97316',0.8,[4,5]],[-WARN,'#f97316',0.8,[4,5]],
+         [ALERT,'#ef4444',0.7,[2,5]],[-ALERT,'#ef4444',0.7,[2,5]]].forEach(([v,col,lw,dash]) => {
+          const y=toY(v); if (y<PAD.t-2||y>PAD.t+plotH+2) return;
+          ctx.strokeStyle=col; ctx.lineWidth=lw; ctx.setLineDash(dash);
+          ctx.beginPath(); ctx.moveTo(PAD.l,y); ctx.lineTo(W-PAD.r,y); ctx.stroke(); ctx.setLineDash([]);
+        });
+
+        // Vertical run lines
+        runs.forEach((_,i) => {
+          ctx.strokeStyle='rgba(255,255,255,0.022)'; ctx.lineWidth=0.4;
+          ctx.beginPath(); ctx.moveTo(toX(i),PAD.t); ctx.lineTo(toX(i),PAD.t+plotH); ctx.stroke();
+        });
+
+        // Scan
+        const sx = PAD.l + ((t * 0.07) % 1) * plotW;
+        const sg = ctx.createLinearGradient(sx-28,0,sx+2,0);
+        sg.addColorStop(0,'rgba(34,211,238,0)'); sg.addColorStop(1,'rgba(34,211,238,0.07)');
+        ctx.fillStyle=sg; ctx.fillRect(sx-28,PAD.t,30,plotH);
+
+        // Lines + dots for each anchor
+        ANCHORS.forEach(anchor => {
+          const [r,g,b] = anchor.col;
+          [5,1.8].forEach((lw,pass) => {
+            const alpha = pass===0?0.1:0.88;
+            ctx.strokeStyle=`rgba(${r},${g},${b},${alpha})`; ctx.lineWidth=lw;
+            ctx.beginPath(); let s=false;
+            runs.forEach((run,i) => {
+              const d=run[anchor.key]?.drift; if (d==null){s=false;return;}
+              const x=toX(i),y=toY(d);
+              s?ctx.lineTo(x,y):(ctx.moveTo(x,y),s=true);
+            });
+            ctx.stroke();
+          });
+          runs.forEach((run,i) => {
+            const d=run[anchor.key]?.drift; if (d==null) return;
+            ctx.beginPath(); ctx.arc(toX(i),toY(d),2.8,0,Math.PI*2);
+            ctx.fillStyle=`rgba(${r},${g},${b},0.85)`; ctx.fill();
+          });
+        });
+
+        // Hover
+        if (hovRun!=null && hovRun>=0 && hovRun<N) {
+          const x=toX(hovRun);
+          ctx.strokeStyle='rgba(255,255,255,0.18)'; ctx.lineWidth=1; ctx.setLineDash([3,3]);
+          ctx.beginPath(); ctx.moveTo(x,PAD.t); ctx.lineTo(x,PAD.t+plotH); ctx.stroke(); ctx.setLineDash([]);
+          const run=runs[hovRun];
+          const tw=205,th=92+ANCHORS.length*15;
+          const tx=Math.min(x+8,W-PAD.r-tw-4), ty=PAD.t+4;
+          ctx.fillStyle='rgba(6,0,15,0.97)'; ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=1;
+          ctx.beginPath(); ctx.roundRect(tx,ty,tw,th,5); ctx.fill(); ctx.stroke();
+          ctx.fillStyle='#e2e8f0'; ctx.font='bold 8.5px system-ui'; ctx.textAlign='left';
+          const nm=run.run_name.length>26?run.run_name.slice(0,23)+'…':run.run_name;
+          ctx.fillText(nm, tx+7, ty+14);
+          ANCHORS.forEach((anch,ai) => {
+            const [r,g,b]=anch.col;
+            const d=run[anch.key]?.drift;
+            const dCol=d==null?'#475569':Math.abs(d)>ALERT?'#ef4444':Math.abs(d)>WARN?'#f97316':`rgb(${r},${g},${b})`;
+            ctx.fillStyle=dCol; ctx.font='8px monospace';
+            ctx.fillText(`${anch.label}: ${d!=null?(d>=0?'+':'')+d.toFixed(5)+' Vs/cm²':'—'}`, tx+7, ty+32+ai*16);
+          });
+          if (run.std_pct!=null) {
+            ctx.fillStyle='#64748b'; ctx.font='7.5px system-ui';
+            ctx.fillText(`Std dev: ${(run.std_pct*100).toFixed(4)} %`, tx+7, ty+th-10);
+          }
+        }
+
+        // X labels
+        const step=Math.max(1,Math.round(N/7));
+        runs.forEach((r,i) => {
+          if (i%step!==0&&i!==N-1) return;
+          const x=toX(i), nm=r.run_name.length>13?r.run_name.slice(0,11)+'…':r.run_name;
+          ctx.save(); ctx.translate(x,PAD.t+plotH+6); ctx.rotate(Math.PI/4);
+          ctx.fillStyle='#475569'; ctx.font='7.5px system-ui'; ctx.textAlign='left';
+          ctx.fillText(nm,0,0); ctx.restore();
+        });
+
+        // Legend
+        ANCHORS.forEach((a,i) => {
+          const [r,g,b]=a.col; const lx=PAD.l+4+i*90;
+          ctx.beginPath(); ctx.moveTo(lx,PAD.t-14); ctx.lineTo(lx+18,PAD.t-14);
+          ctx.strokeStyle=`rgb(${r},${g},${b})`; ctx.lineWidth=2; ctx.stroke();
+          ctx.beginPath(); ctx.arc(lx+9,PAD.t-14,2.8,0,Math.PI*2);
+          ctx.fillStyle=`rgb(${r},${g},${b})`; ctx.fill();
+          ctx.fillStyle='#94a3b8'; ctx.font='8px system-ui'; ctx.textAlign='left';
+          ctx.fillText(a.label, lx+22, PAD.t-10);
+        });
+
+        // Title + axes
+        ctx.fillStyle='#94a3b8'; ctx.font='bold 9.5px system-ui'; ctx.textAlign='left';
+        ctx.fillText(`Calibrant Drift Timeline  ·  ${N} timsTOF runs  ·  ESI-L anchor ions`, PAD.l, 16);
+        ctx.strokeStyle='rgba(255,255,255,0.1)'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(PAD.l,PAD.t); ctx.lineTo(PAD.l,PAD.t+plotH); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(PAD.l,PAD.t+plotH); ctx.lineTo(W-PAD.r,PAD.t+plotH); ctx.stroke();
+        ctx.save(); ctx.translate(14,PAD.t+plotH/2); ctx.rotate(-Math.PI/2);
+        ctx.fillStyle='#64748b'; ctx.font='9px system-ui'; ctx.textAlign='center';
+        ctx.fillText('Δ 1/K₀  (meas − ref)  Vs/cm²',0,0); ctx.restore();
+      };
+
+      const handleMove = e => {
+        const cv=cvRef.current; if (!cv||!data) return;
+        const runs=data.runs||[]; if (!runs.length) return;
+        const rect=cv.getBoundingClientRect();
+        const mx=(e.clientX-rect.left)*(cv.width/rect.width);
+        const PAD_L=65,PAD_R=32, plotW=cv.width-PAD_L-PAD_R;
+        const frac=(mx-PAD_L)/plotW;
+        if (frac<0||frac>1){setHovRun(null);return;}
+        setHovRun(Math.max(0,Math.min(runs.length-1,Math.round(frac*(runs.length-1)))));
+      };
+
+      if (loading) return <div style={{padding:'2rem',textAlign:'center',color:'#22d3ee'}}>Loading calibrant trend…</div>;
+      if (error)   return <div style={{padding:'0.75rem',background:'rgba(239,68,68,0.08)',border:'1px solid rgba(239,68,68,0.3)',borderRadius:'0.4rem',color:'#fca5a5',fontSize:'0.78rem'}}>{error}</div>;
+      if (!data||!data.runs?.length) return <div style={{padding:'2rem',textAlign:'center',color:'#64748b',fontSize:'0.85rem'}}>No timsTOF runs with calibrant data found — make sure the .d folders are accessible.</div>;
+
+      const runs=data.runs; const N=runs.length; const latest=runs[N-1];
+      const latestDrifts=ANCHORS.map(a=>latest[a.key]?.drift).filter(v=>v!=null);
+      const driftSpread=latestDrifts.length>=2?Math.max(...latestDrifts)-Math.min(...latestDrifts):null;
+      const isParallel=driftSpread!=null&&driftSpread<0.012;
+      const maxLatest=latestDrifts.length?Math.max(...latestDrifts.map(Math.abs)):null;
+      const latestCol=maxLatest==null?'#64748b':maxLatest>ALERT?'#ef4444':maxLatest>WARN?'#f97316':'#22c55e';
+
+      return (
+        <div>
+          <div style={{display:'flex',gap:'0.45rem',flexWrap:'wrap',marginBottom:'0.7rem'}}>
+            {[
+              {label:'Runs tracked',    val:`${N} runs`, col:'#94a3b8'},
+              {label:'Latest m/z 622',  val:latest.m622?(latest.m622.drift>=0?'+':'')+latest.m622.drift.toFixed(5)+' Vs/cm²':'—',
+               col:latest.m622?Math.abs(latest.m622.drift)>ALERT?'#ef4444':Math.abs(latest.m622.drift)>WARN?'#f97316':'#22d3ee':'#64748b'},
+              {label:'Latest m/z 922',  val:latest.m922?(latest.m922.drift>=0?'+':'')+latest.m922.drift.toFixed(5)+' Vs/cm²':'—',
+               col:latest.m922?Math.abs(latest.m922.drift)>ALERT?'#ef4444':Math.abs(latest.m922.drift)>WARN?'#f97316':'#DAAA00':'#64748b'},
+              {label:'Latest m/z 1221', val:latest.m1221?(latest.m1221.drift>=0?'+':'')+latest.m1221.drift.toFixed(5)+' Vs/cm²':'—',
+               col:latest.m1221?Math.abs(latest.m1221.drift)>ALERT?'#ef4444':Math.abs(latest.m1221.drift)>WARN?'#f97316':'#d946ef':'#64748b'},
+              {label:'Drift character', val:isParallel?'✓ Parallel — pressure':driftSpread!=null?'⚠ Diverging — hardware?':'—',
+               col:isParallel?'#22c55e':'#f97316'},
+            ].map(s=>(
+              <div key={s.label} style={{background:'rgba(0,0,0,0.45)',border:`1px solid ${s.col}22`,borderRadius:'0.4rem',padding:'0.4rem 0.6rem',textAlign:'center',flex:'1 1 110px'}}>
+                <div style={{fontSize:'0.85rem',fontWeight:800,color:s.col,lineHeight:1.1}}>{s.val}</div>
+                <div style={{fontSize:'0.67rem',color:'#64748b',marginTop:'0.1rem'}}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{fontSize:'0.72rem',color:'#64748b',lineHeight:1.6,marginBottom:'0.6rem',padding:'0.4rem 0.7rem',background:'rgba(34,211,238,0.04)',borderRadius:'0.35rem',borderLeft:'3px solid rgba(34,211,238,0.3)'}}>
+            <strong style={{color:'#22d3ee'}}>How to read this:</strong>{' '}
+            Three lines = the 3 Agilent ESI-L calibrant anchor ions (m/z 622 teal · 922 gold · 1221 violet) plotted as drift from Bruker reference 1/K₀ values over time.{' '}
+            <strong style={{color:'#DAAA00'}}>Parallel movement = barometric pressure</strong> — all ions shift the same amount, safe to apply a global correction.{' '}
+            <strong style={{color:'#d946ef'}}>Lines diverging = mass-dependent hardware drift</strong> — the calibration line is tilting, check IMS calibration and funnel pressure.
+          </div>
+          <canvas ref={cvRef} width={900} height={340}
+            onMouseMove={handleMove} onMouseLeave={()=>setHovRun(null)}
+            style={{width:'100%',display:'block',borderRadius:'0.5rem',boxShadow:'0 0 20px rgba(34,211,238,0.07)',cursor:'crosshair'}}/>
+        </div>
+      );
+    }
+
     // ── Main Mobility Calibration Tab ────────────────────────────────────────────
     function MobilityCalibrationTab() {
       const { data: allRuns } = useFetch('/api/runs?limit=500');
       const runs = Array.isArray(allRuns) ? allRuns : [];
       const [selectedRunId, setSelectedRunId] = React.useState('');
       const [calData, setCalData] = React.useState(null);
+      const [calibrantData, setCalibrantData] = React.useState(null);
       const [loading, setLoading] = React.useState(false);
       const [error, setError] = React.useState('');
       const [view, setView] = React.useState('calibrant');
 
       const VIEWS = [
         ['calibrant',  '★ Calibrant QC'],
+        ['caltrend',   '∿ Cal Trend'],
         ['massdrift',  '◬ Mass Drift'],
         ['rtdrift',   '⚡ RT Drift'],
         ['method',    '⚙ Method'],
@@ -1460,6 +1864,14 @@
 
       React.useEffect(() => { if (selectedRunId) load(selectedRunId); }, [selectedRunId]);
 
+      React.useEffect(() => {
+        if (!selectedRunId) { setCalibrantData(null); return; }
+        fetch(API + `/api/runs/${selectedRunId}/calibrant-drift`)
+          .then(r => r.json())
+          .then(d => { if (!d.error) setCalibrantData(d); })
+          .catch(() => {});
+      }, [selectedRunId]);
+
       const WARN = calData?.thresholds?.warn || 0.025;
       const ALERT = calData?.thresholds?.alert || 0.050;
       const medShift = calData?.stats?.median_shift;
@@ -1474,44 +1886,32 @@
 
       return (
         <div>
-          {/* Header */}
-          <div className="card" style={{marginBottom:'1rem', background:'linear-gradient(135deg,rgba(14,0,24,0.98),rgba(1,15,35,0.92))', border:'1px solid rgba(34,211,238,0.2)'}}>
-            <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-start', flexWrap:'wrap', gap:'0.5rem'}}>
-              <div>
-                <h3 style={{marginBottom:'0.25rem', background:'linear-gradient(90deg,#22d3ee,#DAAA00)', WebkitBackgroundClip:'text', WebkitTextFillColor:'transparent'}}>
-                  Ion Mobility Calibration QC
-                </h3>
-                <p style={{color:'#94a3b8', fontSize:'0.76rem', lineHeight:1.5, maxWidth:'680px'}}>
-                  Two complementary layers: <span style={{color:'#DAAA00'}}>★ Calibrant QC</span> reads
-                  Bruker's reference 1/K₀ values directly from the TDF — no search result needed, measures
-                  hardware calibration state at acquisition time. <span style={{color:'#22d3ee'}}>◎ Obs vs Pred</span>{' '}
-                  compares DIA-NN measured vs predicted 1/K₀ across peptides, detecting environmental drift.{' '}
-                  <span style={{color:'#DAAA00'}}>15 mbar pressure change → ±0.025 Vs/cm²</span> (Müller et al. J. Proteome Res. 2025).
-                </p>
+          {/* Mission Control Header */}
+          <div style={{marginBottom:'1rem', borderRadius:'0.6rem', overflow:'hidden', border:'1px solid rgba(34,211,238,0.18)'}}>
+            <MobCalMissionBanner calData={calData} calibrantData={calibrantData} loading={loading}/>
+            <div style={{background:'rgba(6,0,15,0.98)', padding:'0.6rem 0.9rem', borderTop:'1px solid rgba(34,211,238,0.1)'}}>
+              <div style={{display:'flex', gap:'0.5rem', alignItems:'center', flexWrap:'wrap'}}>
+                <select value={selectedRunId} onChange={e => setSelectedRunId(e.target.value)}
+                  style={{flex:1, maxWidth:'480px', padding:'0.35rem 0.55rem', background:'var(--bg)', border:'1px solid rgba(34,211,238,0.25)', borderRadius:'0.35rem', color:'#e2e8f0', fontSize:'0.82rem', fontFamily:'system-ui'}}>
+                  <option value="">— select a timsTOF run (.d) —</option>
+                  {timsTofRuns.map(r => <option key={r.id} value={r.id}>{r.run_name}</option>)}
+                </select>
+                {loading && <span style={{color:'#22d3ee', fontSize:'0.78rem', fontFamily:'monospace', letterSpacing:'0.05em'}}>COMPUTING…</span>}
+                {!loading && timsTofRuns.length === 0 && (
+                  <span style={{color:'#64748b', fontSize:'0.78rem', fontStyle:'italic'}}>No timsTOF (.d) runs found.</span>
+                )}
+                <a href="https://pubs.acs.org/doi/10.1021/acs.jproteome.4c00932" target="_blank" rel="noreferrer"
+                  style={{marginLeft:'auto', fontSize:'0.68rem', color:'#22d3ee', whiteSpace:'nowrap', opacity:0.7}}>
+                  📄 Müller et al. JPR 2025
+                </a>
               </div>
-              <a href="https://pubs.acs.org/doi/10.1021/acs.jproteome.4c00932" target="_blank" rel="noreferrer"
-                style={{fontSize:'0.7rem', color:'#22d3ee', whiteSpace:'nowrap', alignSelf:'flex-start'}}>
-                📄 Müller et al. JPR 2025
-              </a>
-            </div>
-
-            {/* Run selector */}
-            <div style={{display:'flex', gap:'0.5rem', alignItems:'center', marginTop:'0.75rem', flexWrap:'wrap'}}>
-              <select value={selectedRunId} onChange={e => setSelectedRunId(e.target.value)}
-                style={{flex:1, maxWidth:'480px', padding:'0.35rem 0.55rem', background:'var(--bg)', border:'1px solid var(--border)', borderRadius:'0.35rem', color:'#e2e8f0', fontSize:'0.82rem'}}>
-                <option value="">— select a timsTOF run (.d) —</option>
-                {timsTofRuns.map(r => <option key={r.id} value={r.id}>{r.run_name}</option>)}
-              </select>
-              {loading && <span style={{color:'#22d3ee', fontSize:'0.8rem'}}>Computing…</span>}
-              {!loading && timsTofRuns.length === 0 && (
-                <span style={{color:'#64748b', fontSize:'0.78rem', fontStyle:'italic'}}>No timsTOF (.d) runs found in database.</span>
-              )}
             </div>
           </div>
 
           {/* Stats banner */}
           {calData && (
-            <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(130px,1fr))', gap:'0.45rem', marginBottom:'1rem'}}>
+            <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(130px,1fr))', gap:'0.4rem', marginBottom:'0.85rem',
+              padding:'0.5rem', background:'rgba(0,0,0,0.4)', borderRadius:'0.4rem', border:'1px solid rgba(34,211,238,0.08)'}}>
               {[
                 {label:'Median Δ 1/K₀', val: (medShift >= 0 ? '+' : '') + medShift.toFixed(4) + ' Vs/cm²',
                   col: shiftAlert ? '#ef4444' : shiftWarn ? '#f97316' : '#22c55e'},
@@ -1533,12 +1933,13 @@
 
           {/* Alert banner */}
           {calData && (shiftWarn || shiftAlert) && (
-            <div style={{padding:'0.55rem 0.9rem', marginBottom:'0.8rem', borderRadius:'0.4rem',
+            <div style={{padding:'0.6rem 1rem', marginBottom:'0.85rem', borderRadius:'0.4rem',
               background: shiftAlert ? 'rgba(239,68,68,0.1)' : 'rgba(249,115,22,0.08)',
-              border: `1px solid ${shiftAlert ? 'rgba(239,68,68,0.4)' : 'rgba(249,115,22,0.35)'}`,
-              fontSize:'0.78rem', lineHeight:1.6}}>
-              <strong style={{color: shiftAlert ? '#ef4444' : '#f97316'}}>
-                {shiftAlert ? '⚠ Significant mobility shift detected' : '⚑ Moderate mobility shift detected'}
+              border: `1px solid ${shiftAlert ? 'rgba(239,68,68,0.5)' : 'rgba(249,115,22,0.4)'}`,
+              fontSize:'0.78rem', lineHeight:1.6,
+              boxShadow: shiftAlert ? '0 0 20px rgba(239,68,68,0.15)' : '0 0 14px rgba(249,115,22,0.1)'}}>
+              <strong style={{color: shiftAlert ? '#ef4444' : '#f97316', fontFamily:'monospace', letterSpacing:'0.05em', fontSize:'0.82rem'}}>
+                {shiftAlert ? '⚠  HOUSTON, WE HAVE A PROBLEM' : '⚑  GROUND CONTROL TO MAJOR TOM'}
               </strong>
               <span style={{color:'#94a3b8', marginLeft:'0.5rem'}}>
                 Median Δ = {(medShift >= 0 ? '+' : '') + medShift.toFixed(4)} Vs/cm²
@@ -1556,21 +1957,31 @@
               color:'#fca5a5', fontSize:'0.78rem'}}>{error}</div>
           )}
 
-          {/* Sub-view selector */}
-          <div style={{display:'flex', gap:'0.35rem', marginBottom:'0.75rem', flexWrap:'wrap'}}>
+          {/* Sub-view selector — mission control style */}
+          <div style={{display:'flex', gap:'0.3rem', marginBottom:'0.75rem', flexWrap:'wrap', alignItems:'center'}}>
             {VIEWS.map(([k, lbl]) => (
               <button key={k} onClick={() => setView(k)}
-                style={{padding:'0.3rem 0.75rem', borderRadius:'0.35rem', border:'none', cursor:'pointer',
-                  fontWeight:600, fontSize:'0.8rem',
-                  background: view === k ? 'var(--accent)' : 'var(--surface)',
-                  color: view === k ? 'var(--bg)' : 'var(--muted)'}}>
+                style={{padding:'0.28rem 0.7rem', borderRadius:'0.25rem', cursor:'pointer',
+                  fontWeight:700, fontSize:'0.75rem', letterSpacing:'0.04em', textTransform:'uppercase',
+                  border: view === k ? 'none' : '1px solid rgba(255,255,255,0.07)',
+                  background: view === k ? '#DAAA00' : 'rgba(0,0,0,0.55)',
+                  color: view === k ? '#0e0018' : '#64748b',
+                  transition:'all 0.12s',
+                  boxShadow: view === k ? '0 0 10px rgba(218,170,0,0.3)' : 'none'}}>
                 {lbl}
               </button>
             ))}
-            <span style={{marginLeft:'auto', alignSelf:'center', fontSize:'0.72rem', color:'#64748b', fontStyle:'italic'}}>
-              Warn ≥ 0.025 · Alert ≥ 0.050 Vs/cm²
+            <span style={{marginLeft:'auto', fontSize:'0.7rem', color:'#334155', fontFamily:'monospace'}}>
+              WARN ≥ 0.025 · ALERT ≥ 0.050 Vs/cm²
             </span>
           </div>
+
+          {/* Calibrant Trend (no run required) */}
+          {view === 'caltrend' && (
+            <div className="card" style={{padding:'0.75rem', background:'rgba(0,0,0,0.5)'}}>
+              <MobCalCalibrantTrend/>
+            </div>
+          )}
 
           {/* Calibrant QC — primary, no DIA-NN required */}
           {view === 'calibrant' && (

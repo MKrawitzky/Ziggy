@@ -6151,6 +6151,94 @@ async def api_calibrant_drift(run_id: str) -> dict:
                 "traceback": traceback.format_exc()[-600:]}
 
 
+@app.get("/api/calibrant-trend")
+async def api_calibrant_trend(limit: int = 40) -> dict:
+    """Timeseries of Bruker calibrant 1/K₀ drift for the 3 ESI-L anchor ions across runs.
+
+    Returns meas_k0 - ref_k0 (drift) for m/z 622, 922, 1221 across recent timsTOF runs.
+    Parallel drift = barometric pressure. Divergence = mass-dependent hardware issue.
+    """
+    import struct, sqlite3 as _sq3
+
+    all_runs = get_runs(limit=limit * 5)
+    tims_runs = [r for r in all_runs
+                 if (r.get('raw_path') or '').rstrip('/\\').endswith('.d')][:limit]
+
+    _TARGETS = [(622.0, 'm622'), (922.0, 'm922'), (1221.0, 'm1221')]
+    _TOL = 6.0
+
+    def read_anchors(run):
+        raw = run.get('raw_path', '')
+        if not raw:
+            return None
+        tdf = Path(raw) / 'analysis.tdf'
+        if not tdf.exists():
+            return None
+        try:
+            con = _sq3.connect(str(tdf))
+            rows = con.execute("SELECT Key, Value FROM CalibrationInfo").fetchall()
+            con.close()
+        except Exception:
+            return None
+
+        def _dbl(blob):
+            if isinstance(blob, bytes):
+                n = len(blob) // 8
+                return [struct.unpack_from('<d', blob, i*8)[0] for i in range(n)]
+            return []
+
+        kv = {}
+        for key, val in rows:
+            if key == 'ReferencePeakMasses':
+                kv['masses'] = _dbl(val)
+            elif key == 'ReferencePeakMobilities':
+                kv['ref'] = _dbl(val)
+            elif key == 'MobilitiesCorrectedCalibration':
+                kv['meas'] = _dbl(val)
+            elif key == 'MobilityCalibrationDateTime':
+                kv['calib_dt'] = val
+            elif key == 'MobilityStandardDeviationPercent':
+                try:
+                    kv['std_pct'] = float(val)
+                except (TypeError, ValueError):
+                    pass
+
+        masses = kv.get('masses', [])
+        ref    = kv.get('ref', [])
+        meas   = kv.get('meas', [])
+
+        entry = {
+            'run_id':      str(run['id']),
+            'run_name':    run.get('run_name', ''),
+            'acquired_at': run.get('acquired_at', ''),
+            'calib_dt':    kv.get('calib_dt'),
+            'std_pct':     kv.get('std_pct'),
+        }
+
+        for tmz, key in _TARGETS:
+            idx = next((i for i, m in enumerate(masses) if abs(m - tmz) <= _TOL), None)
+            if idx is not None and idx < len(ref) and idx < len(meas):
+                r, m2 = ref[idx], meas[idx]
+                entry[key] = {
+                    'ref_mz':  round(masses[idx], 3),
+                    'ref_k0':  round(r,  6),
+                    'meas_k0': round(m2, 6),
+                    'drift':   round(m2 - r, 6),
+                }
+            else:
+                entry[key] = None
+        return entry
+
+    results = []
+    for run in tims_runs:
+        r = read_anchors(run)
+        if r:
+            results.append(r)
+    results.reverse()  # oldest first
+
+    return {'runs': results, 'n_runs': len(results)}
+
+
 @app.get("/api/runs/{run_id}/method-config")
 async def api_method_config(run_id: str) -> dict:
     """Parse the Bruker acquisition method file from a timsTOF .d folder.
