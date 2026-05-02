@@ -167,7 +167,6 @@
                   ['denovo',  'De Novo'],
                   ['mia',     'MIA'],
                   ['sneaky',  'Sneaky Peaky'],
-                  ['chimerys', 'Chimerys'],
                   ['zyna',    '✦ Zyna'],
                 ].map(([k, label]) =>
                   <div key={k} className={`tab ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)}>{label}</div>
@@ -211,7 +210,6 @@
             {tab === 'searches' && <SearchesTab navigateTo={navigateToTab} />}
             {tab === 'search'   && <SearchAssistantTab />}
             {tab === 'sneaky' && <SneakyPeakyTab />}
-            {tab === 'chimerys' && <ChimerysTab navigateTo={setTab} />}
             {tab === 'zyna'     && <ZynaTab />}
             {tab === 'mia'        && <MiaTab onSpectrumJump={handleSpectrumJump} navigateTo={setTab} />}
             {tab === 'singlecell' && <SingleCellTab />}

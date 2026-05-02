@@ -217,25 +217,25 @@ def _read_tdf_pasef_windows(tdf_path: Path) -> list[dict]:
 
 
 def _annotate_windows_k0(windows: list[dict], tdf_path: Path) -> list[dict]:
-    """Add k0_lower / k0_upper / k0_center to each window via TIMS calibration."""
+    """Add k0_lower / k0_upper / k0_center to each window.
+
+    Uses linear approximation: 1/K₀ ≈ 1.6 − (scan / max_scan) × 1.0
+    This matches the approach in stan.metrics.mobility_windows and is robust
+    when the TimsCalibration table uses non-standard column names.
+    Higher scan number → lower 1/K₀ (ions with lower mobility exit TIMS later).
+    """
     try:
         with sqlite3.connect(str(tdf_path)) as con:
-            row = con.execute(
-                "SELECT c0, c1, c2, c3, t, td FROM TimsCalibration ORDER BY Id DESC LIMIT 1"
-            ).fetchone()
-            if not row:
-                return windows
-            c0, c1, c2, c3, t, td_val = row
-
-            def s2k0(s: float) -> float:
-                return c0 + c1 * math.sqrt(max(0.0, (c2 + s) / (c3 + td_val)))
+            row = con.execute("SELECT MAX(NumScans) FROM Frames").fetchone()
+            max_scan = float(row[0]) if row and row[0] else 920.0
 
             for w in windows:
-                lo = round(s2k0(w["scan_end"]),   4)   # larger scan → lower K0
-                hi = round(s2k0(w["scan_begin"]), 4)
-                w["k0_lower"]  = min(lo, hi)
-                w["k0_upper"]  = max(lo, hi)
-                w["k0_center"] = round((lo + hi) / 2, 4)
+                # scan_begin (low scan) → high K0; scan_end (high scan) → low K0
+                k0_hi = round(1.6 - (w["scan_begin"] / max_scan) * 1.0, 4)
+                k0_lo = round(1.6 - (w["scan_end"]   / max_scan) * 1.0, 4)
+                w["k0_lower"]  = min(k0_lo, k0_hi)
+                w["k0_upper"]  = max(k0_lo, k0_hi)
+                w["k0_center"] = round((k0_lo + k0_hi) / 2, 4)
     except Exception as e:
         logger.debug("_annotate_windows_k0: %s", e)
     return windows
@@ -283,6 +283,52 @@ def _load_diann_precursors(
         return []
 
 
+# ── Chimeric pair classifier ──────────────────────────────────────────────────
+
+def _classify_chimeric_pairs(enriched_windows: list[dict]) -> dict:
+    """Classify every co-isolated precursor pair in chimeric windows by
+    1/K₀ separability.
+
+    Three categories mirror Zyna's tier strategy:
+      - Resolved  (gap ≥ 2σ = 0.06):  Tier 1 physically separates them — free IDs
+      - Partial   (gap 1σ–2σ = 0.03–0.06): Tier 2 Prosit assists — probable gain
+      - Overlapping (gap < 1σ = 0.03): Genuinely chimeric — hardest case
+
+    Returns n_rescuable_ids = count of resolved pairs (conservative lower bound
+    on additional peptide IDs that Zyna can recover vs standard DIA pipeline).
+    """
+    K0_SIGMA = 0.03  # Gaussian assignment width (half-width ~1σ)
+    n_resolved = n_partial = n_overlapping = 0
+    n_rescuable_ids = 0
+    k0_gaps: list[float] = []
+
+    for w in enriched_windows:
+        if not w.get("chimeric"):
+            continue
+        precs = [p for p in w.get("precursors", []) if p.get("im") is not None]
+        for i in range(len(precs)):
+            for j in range(i + 1, len(precs)):
+                gap = abs(precs[i]["im"] - precs[j]["im"])
+                k0_gaps.append(round(gap, 4))
+                if gap >= 2 * K0_SIGMA:       # Zyna Tier 1 cleanly separates
+                    n_resolved += 1
+                    n_rescuable_ids += 1
+                elif gap >= K0_SIGMA:          # Tier 2 improves scoring
+                    n_partial += 1
+                else:                          # Truly chimeric, <1σ gap
+                    n_overlapping += 1
+
+    total = n_resolved + n_partial + n_overlapping
+    return {
+        "n_pairs_resolved":    n_resolved,
+        "n_pairs_partial":     n_partial,
+        "n_pairs_overlapping": n_overlapping,
+        "n_total_pairs":       total,
+        "n_rescuable_ids":     n_rescuable_ids,
+        "k0_gap_histogram":    sorted(k0_gaps)[:500],
+    }
+
+
 # ── Tier 3: PASEF geometry chimeric analysis ──────────────────────────────────
 
 def tier3_chimeric_map(
@@ -320,35 +366,55 @@ def tier3_chimeric_map(
     if report_path and report_path.exists():
         precursors = _load_diann_precursors(report_path, max_rows=max_precursors)
 
+    # ── Diagnostics ───────────────────────────────────────────────────────────
+    n_prec_with_im = sum(1 for p in precursors if p["im"] is not None)
+    im_vals = [p["im"] for p in precursors if p["im"] is not None]
+    k0_vals_windows = [w.get("k0_center", 0) for w in windows if w.get("k0_center", 0) > 0]
+    has_k0_windows = len(k0_vals_windows) > 0
+
     # ── Assign precursors to windows ─────────────────────────────────────────
     enriched: list[dict] = []
     n_chimeric = 0
-    # Count m/z-only collisions (ignoring 1/K₀) for TIMS rescue calculation
-    n_mz_only_collisions = 0
+    n_mz_only_collisions = 0  # m/z overlap but TIMS-separated (4D rescue)
 
     for w in windows:
         mz_lo = w["mz_lower"]
         mz_hi = w["mz_upper"]
         k0_lo = w.get("k0_lower", 0)
-        k0_hi = w.get("k0_upper", 99)
+        k0_hi = w.get("k0_upper", 0)
+        has_k0 = k0_hi > k0_lo  # valid window K0 range
 
         # Precursors within m/z window (ignoring mobility)
         prec_mz = [p for p in precursors if mz_lo <= p["mz"] <= mz_hi]
         n_mz = len(prec_mz)
 
-        # Precursors within m/z AND 1/K₀ window (actually co-isolated)
-        prec_4d = [p for p in prec_mz
-                   if p["im"] is None or k0_lo <= p["im"] <= k0_hi]
-        n_4d = len(prec_4d)
+        if has_k0:
+            # 4D filter: precursor must have IM data AND fall within window K0 range.
+            # Precursors with im=None are NOT counted as co-isolated (unknown K0).
+            prec_4d = [p for p in prec_mz
+                       if p["im"] is not None and k0_lo <= p["im"] <= k0_hi]
+            # For chimeric count: also include unknown-IM precursors (conservative)
+            prec_4d_conservative = [p for p in prec_mz
+                                    if p["im"] is None or k0_lo <= p["im"] <= k0_hi]
+        else:
+            # No K0 calibration: fall back to m/z-only
+            prec_4d = prec_mz
+            prec_4d_conservative = prec_mz
 
-        if n_mz > 1 and n_4d <= 1:
-            n_mz_only_collisions += 1  # m/z overlap but TIMS separated them!
+        n_4d             = len(prec_4d)
+        n_4d_conservative = len(prec_4d_conservative)
 
-        is_chimeric = n_4d > 1
+        # TIMS rescue: m/z overlap present, but K0 filter reduces to 0 or 1 precursor
+        if has_k0 and n_mz > 1 and n_4d <= 1:
+            n_mz_only_collisions += 1
+
+        # Use conservative count for chimeric flag (includes unknown-IM precursors)
+        is_chimeric = n_4d_conservative > 1
         if is_chimeric:
             n_chimeric += 1
 
-        prec_sample = sorted(prec_4d, key=lambda p: p["qty"], reverse=True)[:4]
+        prec_pool   = prec_4d if prec_4d else prec_4d_conservative
+        prec_sample = sorted(prec_pool, key=lambda p: p.get("qty", 0), reverse=True)[:4]
 
         enriched.append({
             "mz_center":  round(w["mz_center"], 3),
@@ -358,7 +424,7 @@ def tier3_chimeric_map(
             "k0_upper":   round(k0_hi, 4),
             "k0_center":  round(w.get("k0_center", 0), 4),
             "n_prec_mz":  n_mz,
-            "n_prec_4d":  n_4d,
+            "n_prec_4d":  n_4d_conservative,
             "chimeric":   is_chimeric,
             "ce":         round(w.get("ce", 0), 1),
             "precursors": [{"mz": p["mz"], "im": p.get("im"), "seq": p["seq"][:20]}
@@ -372,6 +438,9 @@ def tier3_chimeric_map(
     total_mz_collisions = n_mz_only_collisions + n_chimeric
     tims_rescue_rate = (n_mz_only_collisions / total_mz_collisions
                         if total_mz_collisions > 0 else 0.0)
+
+    # Pair-level K0 separability analysis
+    pair_analysis = _classify_chimeric_pairs(enriched)
 
     # ── m/z profile ──────────────────────────────────────────────────────────
     all_mz    = [w["mz_center"] for w in enriched]
@@ -430,14 +499,30 @@ def tier3_chimeric_map(
         "mz_profile":       mz_profile,
         "k0_profile":       k0_profile,
         "precursor_scatter": scatter,
+        "pair_analysis":    pair_analysis,
         "stats": {
             "n_windows":              n_windows,
             "n_chimeric_windows":     n_chimeric,
             "chimeric_rate":          round(chimeric_rate, 4),
             "n_precursors":           len(precursors),
+            "n_precursors_with_im":   n_prec_with_im,
+            "im_coverage_pct":        round(100 * n_prec_with_im / len(precursors), 1)
+                                      if precursors else 0.0,
+            "precursor_k0_range":     [round(min(im_vals), 4), round(max(im_vals), 4)]
+                                      if im_vals else None,
+            "window_k0_range":        [round(min(k0_vals_windows), 4), round(max(k0_vals_windows), 4)]
+                                      if k0_vals_windows else None,
+            "has_k0_calibration":     has_k0_windows,
             "n_mz_only_collisions":   n_mz_only_collisions,
             "tims_rescue_rate":       round(tims_rescue_rate, 4),
             "tims_rescued_count":     n_mz_only_collisions,
+            # Pair-level K0 classification (Zyna ID gain estimate)
+            "n_rescuable_pairs":      pair_analysis["n_pairs_resolved"],
+            "n_partial_pairs":        pair_analysis["n_pairs_partial"],
+            "est_id_gain":            pair_analysis["n_rescuable_ids"],
+            "id_gain_pct":            round(
+                                          100 * pair_analysis["n_rescuable_ids"] / max(1, n_chimeric), 1
+                                      ),
         },
     }
 

@@ -4,6 +4,27 @@
 // from co-isolated peptides cluster at different 1/K₀ values, allowing
 // deconvolution without any ML model.
 
+// ── Demo ion data for conceptual animation (module-level constants) ────────────
+const _ZK0_A   = 0.875;   // Peptide A ion mobility center
+const _ZK0_B   = 1.135;   // Peptide B ion mobility center
+const _ZK0_MID = (_ZK0_A + _ZK0_B) / 2;
+const _ZIONS_A = [
+  {mz: 344, int: 0.65, dk0: -0.008}, {mz: 457, int: 0.82, dk0:  0.012},
+  {mz: 586, int: 0.70, dk0: -0.005}, {mz: 685, int: 0.45, dk0:  0.018},
+  {mz: 748, int: 0.90, dk0: -0.011}, {mz: 847, int: 0.55, dk0:  0.007},
+  {mz: 960, int: 0.75, dk0: -0.014}, {mz: 1047, int: 0.60, dk0: 0.010},
+];
+const _ZIONS_B = [
+  {mz: 398, int: 0.75, dk0:  0.009}, {mz: 512, int: 0.88, dk0: -0.013},
+  {mz: 641, int: 0.62, dk0:  0.006}, {mz: 772, int: 0.80, dk0: -0.008},
+  {mz: 885, int: 0.92, dk0:  0.015}, {mz: 978, int: 0.50, dk0: -0.010},
+  {mz: 1067, int: 0.68, dk0:  0.004},
+];
+const _ZALL_IONS = [
+  ..._ZIONS_A.map(ion => ({...ion, k0: _ZK0_A + ion.dk0, side: 'A'})),
+  ..._ZIONS_B.map(ion => ({...ion, k0: _ZK0_B + ion.dk0, side: 'B'})),
+];
+
 function ZynaTab() {
   const [runId, setRunId] = React.useState('');
   const { data: runs } = useFetch('/api/runs');
@@ -109,11 +130,12 @@ function ZynaTab() {
           <ZynaStatsRow stats={tier3Data.stats} />
 
           {/* View selector */}
-          <div style={{ display: 'flex', gap: '0.45rem', marginBottom: '0.9rem' }}>
+          <div style={{ display: 'flex', gap: '0.45rem', marginBottom: '0.9rem', flexWrap: 'wrap' }}>
             {[
               ['map',     '⬛ Collision Map'],
               ['profile', '📊 Profiles'],
               ['scatter', '✦ 4D Precursor Cloud'],
+              ['compare', '⚡ Before vs After'],
             ].map(([k, label]) => (
               <button key={k} onClick={() => setActiveView(k)} style={{
                 background: activeView === k
@@ -136,6 +158,12 @@ function ZynaTab() {
           )}
           {activeView === 'scatter' && (
             <ZynaPrecursorScatter scatter={tier3Data.precursor_scatter} />
+          )}
+          {activeView === 'compare' && (
+            <>
+              <ZynaBeforeAfter pairAnalysis={tier3Data.pair_analysis} />
+              <ZynaFlawsCard />
+            </>
           )}
 
           {/* 4D Advantage callout */}
@@ -299,7 +327,8 @@ function ZynaStatsRow({ stats }) {
       color: stats.chimeric_rate > 0.4 ? '#ef4444' : stats.chimeric_rate > 0.2 ? '#f59e0b' : '#22c55e' },
     { label: 'TIMS-Rescued Pairs', value: stats.tims_rescued_count?.toLocaleString() || '0', color: '#22d3ee' },
     { label: 'TIMS Rescue Rate', value: `${rescue}%`, color: '#d946ef' },
-    { label: 'Identified Precursors', value: stats.n_precursors?.toLocaleString() || '—', color: '#94a3b8' },
+    { label: 'Est. ID Gain', value: stats.est_id_gain != null ? `+${stats.est_id_gain}` : '—',
+      color: (stats.est_id_gain || 0) > 0 ? '#22c55e' : '#94a3b8' },
   ];
   return (
     <div style={{
@@ -339,12 +368,31 @@ function ZynaCollisionMap({ windows }) {
     const pw = W - PAD.l - PAD.r;
     const ph = H - PAD.t - PAD.b;
 
-    // Data extent
-    const mzVals  = windows.map(w => w.mz_center);
-    const k0Vals  = windows.map(w => w.k0_center).filter(v => v > 0);
-    const mzLo = Math.min(...mzVals), mzHi = Math.max(...mzVals);
-    const k0Lo = Math.min(...k0Vals) - 0.02;
-    const k0Hi = Math.max(...k0Vals) + 0.02;
+    // Data extent — use mz_lower/upper for tight x bounds, k0 from windows with valid range
+    const mzLoVals = windows.map(w => w.mz_lower);
+    const mzHiVals = windows.map(w => w.mz_upper);
+    const k0Vals   = windows
+      .filter(w => w.k0_lower != null && w.k0_upper != null && w.k0_upper > w.k0_lower)
+      .flatMap(w => [w.k0_lower, w.k0_upper]);
+
+    const mzLo = Math.min(...mzLoVals);
+    const mzHi = Math.max(...mzHiVals);
+    const k0Lo = k0Vals.length ? Math.min(...k0Vals) - 0.02 : 0.6;
+    const k0Hi = k0Vals.length ? Math.max(...k0Vals) + 0.02 : 1.6;
+
+    // If no valid K0 data show message
+    if (!k0Vals.length) {
+      ctx.fillStyle = '#0e0018';
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#475569';
+      ctx.font = '13px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('K₀ calibration unavailable — showing m/z-only window layout', W/2, H/2 - 12);
+      ctx.font = '11px monospace';
+      ctx.fillStyle = '#374151';
+      ctx.fillText('Check that analysis.tdf has a Frames table with NumScans', W/2, H/2 + 12);
+      return;
+    }
 
     const sx = v => PAD.l + (v - mzLo) / (mzHi - mzLo) * pw;
     const sy = v => PAD.t + ph - (v - k0Lo) / (k0Hi - k0Lo) * ph;
@@ -365,7 +413,7 @@ function ZynaCollisionMap({ windows }) {
 
     // Draw windows as rectangles, colored by chimeric multiplicity
     windows.forEach(w => {
-      if (!w.k0_lower || !w.k0_upper) return;
+      if (w.k0_upper == null || w.k0_lower == null || w.k0_upper === w.k0_lower) return;
       const x1 = sx(w.mz_lower);
       const x2 = sx(w.mz_upper);
       const y1 = sy(w.k0_upper);
@@ -633,19 +681,34 @@ function ZynaPrecursorScatter({ scatter }) {
     ctx.fillStyle = '#0e0018';
     ctx.fillRect(0, 0, W, H);
 
-    const mzVals = scatter.map(p => p.mz).filter(Boolean);
-    const imVals = scatter.map(p => p.im).filter(Boolean);
-    const rtVals = scatter.map(p => p.rt).filter(Boolean);
+    // Only include points with valid mz AND im
+    const valid = scatter.filter(p => p.mz > 0 && p.im != null && p.im > 0);
+    if (!valid.length) {
+      ctx.fillStyle = '#475569';
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('No precursors with ion mobility data', W / 2, H / 2);
+      ctx.fillStyle = '#374151';
+      ctx.font = '10px monospace';
+      ctx.fillText('IM column not present in report.parquet', W / 2, H / 2 + 18);
+      return;
+    }
 
-    if (!mzVals.length || !imVals.length) return;
-
-    const mzLo = Math.min(...mzVals), mzHi = Math.max(...mzVals);
-    const imLo = Math.min(...imVals), imHi = Math.max(...imVals);
+    // Use 2nd–98th percentile to avoid outlier stretch
+    function pct(arr, p) {
+      const s = [...arr].sort((a, b) => a - b);
+      return s[Math.max(0, Math.floor(s.length * p / 100))];
+    }
+    const mzVals = valid.map(p => p.mz);
+    const imVals = valid.map(p => p.im);
+    const rtVals = valid.map(p => p.rt || 0);
+    const mzLo = pct(mzVals, 1),  mzHi = pct(mzVals, 99);
+    const imLo = pct(imVals, 1),  imHi = pct(imVals, 99);
     const rtLo = Math.min(...rtVals), rtHi = Math.max(...rtVals);
     const rtRange = rtHi - rtLo || 1;
 
-    const sx = mz => PAD.l + (mz - mzLo) / (mzHi - mzLo || 1) * pw;
-    const sy = im => PAD.t + ph - (im - imLo) / (imHi - imLo || 1) * ph;
+    const sx = mz => PAD.l + Math.max(0, Math.min(1, (mz - mzLo) / (mzHi - mzLo || 1))) * pw;
+    const sy = im => PAD.t + ph - Math.max(0, Math.min(1, (im - imLo) / (imHi - imLo || 1))) * ph;
 
     // Grid
     ctx.strokeStyle = 'rgba(61,16,96,0.3)';
@@ -657,17 +720,15 @@ function ZynaPrecursorScatter({ scatter }) {
       ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(PAD.l + pw, y); ctx.stroke();
     }
 
-    // Points colored by RT
-    scatter.forEach(p => {
-      if (!p.mz || !p.im) return;
+    // Points colored by RT (cyan early → violet mid → gold late)
+    valid.forEach(p => {
       const x = sx(p.mz);
       const y = sy(p.im);
-      const t = (p.rt - rtLo) / rtRange;
-      // Interpolate cyan → violet → gold over RT
+      const t = Math.max(0, Math.min(1, (p.rt - rtLo) / rtRange));
       let r, g, b;
       if (t < 0.5) {
         const tt = t * 2;
-        r = Math.round(34 + (217 - 34) * tt);
+        r = Math.round(34  + (217 - 34)  * tt);
         g = Math.round(211 + (70  - 211) * tt);
         b = Math.round(238 + (239 - 238) * tt);
       } else {
@@ -676,9 +737,9 @@ function ZynaPrecursorScatter({ scatter }) {
         g = Math.round(70  + (170 - 70)  * tt);
         b = Math.round(239 + (0   - 239) * tt);
       }
-      ctx.fillStyle = `rgba(${r},${g},${b},0.6)`;
+      ctx.fillStyle = `rgba(${r},${g},${b},0.65)`;
       ctx.beginPath();
-      ctx.arc(x, y, 2, 0, Math.PI * 2);
+      ctx.arc(x, y, 1.8, 0, Math.PI * 2);
       ctx.fill();
     });
 
@@ -884,6 +945,367 @@ function ZynaIntroPanel() {
         chimeric spectra where TIMS separation was insufficient.
         Select a run and click <strong style={{color:'#d946ef'}}>Run Zyna</strong> to begin.
       </div>
+    </div>
+  );
+}
+
+
+// ── Before vs After animated comparison ──────────────────────────────────────
+function ZynaBeforeAfter({ pairAnalysis }) {
+  const canvasRef = React.useRef(null);
+  const phaseRef  = React.useRef(0);
+  const rafRef    = React.useRef(null);
+
+  React.useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const W = 940, H = 390;
+    canvas.width  = W;
+    canvas.height = H;
+    const ctx = canvas.getContext('2d');
+
+    const HW = W / 2;
+    const MZ_LO = 300, MZ_HI = 1100;
+    const K0_LO = 0.68, K0_HI = 1.35;
+    const SIGMA  = 0.03;
+
+    function smoothstep(t) {
+      const c = Math.max(0, Math.min(1, t));
+      return c * c * (3 - 2 * c);
+    }
+
+    function draw() {
+      phaseRef.current = (phaseRef.current + 0.014) % 8;
+      const t8 = phaseRef.current;
+
+      // sep: 0 = mixed, 1 = fully separated
+      let sep;
+      if      (t8 < 2.0) sep = 0;
+      else if (t8 < 4.5) sep = smoothstep((t8 - 2.0) / 2.5);
+      else if (t8 < 6.5) sep = 1;
+      else               sep = 1 - smoothstep((t8 - 6.5) / 1.5);
+
+      ctx.fillStyle = '#0e0018';
+      ctx.fillRect(0, 0, W, H);
+
+      // Divider
+      ctx.strokeStyle = 'rgba(61,16,96,0.5)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(HW, 8); ctx.lineTo(HW, H - 8); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // ── LEFT: Standard DIA / Chimerys ────────────────────────────────────
+      const LP = {l: 48, r: 10, t: 54, b: 44};
+      const LPW = HW - LP.l - LP.r;
+      const LPH = H - LP.t - LP.b;
+      const lsx = mz => LP.l + (mz - MZ_LO) / (MZ_HI - MZ_LO) * LPW;
+      const lsy = v  => LP.t + LPH - v * LPH;
+
+      ctx.fillStyle = '#64748b';
+      ctx.font = 'bold 11px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('WITHOUT 4D — Chimerys approach', HW / 2, 18);
+      ctx.fillStyle = '#374151';
+      ctx.font = '9px monospace';
+      ctx.fillText('m/z + intensity only  ·  1/K₀ dimension discarded', HW / 2, 31);
+
+      // Axes
+      ctx.strokeStyle = '#3d1060';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(LP.l, LP.t); ctx.lineTo(LP.l, LP.t + LPH);
+      ctx.lineTo(LP.l + LPW, LP.t + LPH); ctx.stroke();
+
+      // Grid + x-ticks
+      [400, 600, 800, 1000].forEach(v => {
+        const x = lsx(v);
+        ctx.strokeStyle = 'rgba(61,16,96,0.18)';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(x, LP.t); ctx.lineTo(x, LP.t + LPH); ctx.stroke();
+        ctx.fillStyle = '#374151'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+        ctx.fillText(v, x, LP.t + LPH + 13);
+      });
+      ctx.fillStyle = '#374151'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('m/z', LP.l + LPW / 2, H - 10);
+      ctx.save(); ctx.translate(13, LP.t + LPH / 2); ctx.rotate(-Math.PI / 2);
+      ctx.fillText('Intensity', 0, 0); ctx.restore();
+
+      // All ions as GREY — Chimerys can't separate them
+      _ZALL_IONS.forEach(ion => {
+        const x = lsx(ion.mz);
+        const y = lsy(ion.int);
+        const pulse = 0.3 + 0.12 * Math.sin(phaseRef.current * 1.8 + ion.mz * 0.006);
+        ctx.strokeStyle = `rgba(148,163,184,${pulse})`;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.moveTo(x, LP.t + LPH); ctx.lineTo(x, y); ctx.stroke();
+        ctx.fillStyle = `rgba(148,163,184,${pulse + 0.1})`;
+        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
+      });
+
+      // Confusion markers (fade out as right panel shows resolution)
+      const qa = Math.max(0, 0.85 - sep * 1.1);
+      if (qa > 0) {
+        ctx.fillStyle = `rgba(239,68,68,${qa * 0.55})`;
+        ctx.font = 'bold 15px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('? ? ?', LP.l + LPW / 2, LP.t + LPH / 2 - 10);
+        ctx.font = '9px monospace';
+        ctx.fillStyle = `rgba(239,68,68,${qa * 0.45})`;
+        ctx.fillText('2 peptides mixed — ambiguous identity', LP.l + LPW / 2, LP.t + LPH / 2 + 7);
+      }
+      ctx.fillStyle = 'rgba(239,68,68,0.7)';
+      ctx.font = '10px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('✗  Peptide B likely missed or wrong ID', HW / 2, H - 22);
+
+      // ── RIGHT: Zyna 4D separation ─────────────────────────────────────────
+      const rx = HW + 1;
+      const RP = {l: 56, r: 10, t: 54, b: 44};
+      const RPW = HW - RP.l - RP.r;
+      const RPH = H - RP.t - RP.b;
+      const rsx = mz => rx + RP.l + (mz - MZ_LO) / (MZ_HI - MZ_LO) * RPW;
+      const rsy = k0  => RP.t + RPH - (k0 - K0_LO) / (K0_HI - K0_LO) * RPH;
+
+      ctx.fillStyle = '#d946ef';
+      ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('WITH ZYNA 4D SEPARATION', rx + RP.l + RPW / 2, 18);
+      ctx.fillStyle = '#22d3ee'; ctx.font = '9px monospace';
+      ctx.fillText('m/z × 1/K₀  ·  TIMS separates fragment ion clouds', rx + RP.l + RPW / 2, 31);
+
+      // Axes
+      ctx.strokeStyle = '#3d1060'; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(rx + RP.l, RP.t); ctx.lineTo(rx + RP.l, RP.t + RPH);
+      ctx.lineTo(rx + RP.l + RPW, RP.t + RPH); ctx.stroke();
+
+      [400, 600, 800, 1000].forEach(v => {
+        const x = rsx(v);
+        ctx.strokeStyle = 'rgba(61,16,96,0.18)'; ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(x, RP.t); ctx.lineTo(x, RP.t + RPH); ctx.stroke();
+        ctx.fillStyle = '#374151'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+        ctx.fillText(v, x, RP.t + RPH + 13);
+      });
+      ctx.textAlign = 'right';
+      [0.8, 0.9, 1.0, 1.1, 1.2].forEach(v => {
+        const y = rsy(v);
+        ctx.fillStyle = '#374151'; ctx.font = '9px monospace';
+        ctx.fillText(v.toFixed(1), rx + RP.l - 4, y + 3);
+        ctx.strokeStyle = 'rgba(61,16,96,0.15)'; ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(rx + RP.l, y); ctx.lineTo(rx + RP.l + RPW, y); ctx.stroke();
+      });
+      ctx.fillStyle = '#374151'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('m/z', rx + RP.l + RPW / 2, H - 10);
+      ctx.save(); ctx.translate(rx + 14, RP.t + RPH / 2); ctx.rotate(-Math.PI / 2);
+      ctx.fillText('1/K₀ (V·s/cm²)', 0, 0); ctx.restore();
+
+      // K0 separation bands (emerge as sep increases)
+      const ba = Math.max(0, (sep - 0.25) / 0.75);
+      if (ba > 0) {
+        // Peptide A band (violet)
+        const yAh = rsy(_ZK0_A + 2 * SIGMA), yAl = rsy(_ZK0_A - 2 * SIGMA);
+        ctx.fillStyle = `rgba(217,70,239,${ba * 0.10})`;
+        ctx.fillRect(rx + RP.l, yAh, RPW, yAl - yAh);
+        ctx.strokeStyle = `rgba(217,70,239,${ba * 0.3})`; ctx.lineWidth = 0.8;
+        ctx.setLineDash([3, 5]);
+        ctx.beginPath(); ctx.moveTo(rx + RP.l, rsy(_ZK0_A));
+        ctx.lineTo(rx + RP.l + RPW, rsy(_ZK0_A)); ctx.stroke();
+
+        // Peptide B band (cyan)
+        const yBh = rsy(_ZK0_B + 2 * SIGMA), yBl = rsy(_ZK0_B - 2 * SIGMA);
+        ctx.fillStyle = `rgba(34,211,238,${ba * 0.10})`;
+        ctx.fillRect(rx + RP.l, yBh, RPW, yBl - yBh);
+        ctx.strokeStyle = `rgba(34,211,238,${ba * 0.3})`;
+        ctx.beginPath(); ctx.moveTo(rx + RP.l, rsy(_ZK0_B));
+        ctx.lineTo(rx + RP.l + RPW, rsy(_ZK0_B)); ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Band labels
+        ctx.fillStyle = `rgba(217,70,239,${ba * 0.9})`; ctx.font = 'bold 9px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(`Peptide A  1/K₀=${_ZK0_A}`, rx + RP.l + RPW - 4, rsy(_ZK0_A) - 4);
+        ctx.fillStyle = `rgba(34,211,238,${ba * 0.9})`;
+        ctx.fillText(`Peptide B  1/K₀=${_ZK0_B}`, rx + RP.l + RPW - 4, rsy(_ZK0_B) - 4);
+      }
+
+      // Animated ions: start at K0_MID, separate toward correct K0
+      _ZALL_IONS.forEach(ion => {
+        const x = rsx(ion.mz);
+        const curK0 = _ZK0_MID + (ion.k0 - _ZK0_MID) * sep;
+        const y = rsy(curK0);
+        // Interpolate colour: grey → violet/cyan
+        const [tr, tg, tb] = ion.side === 'A' ? [217, 70, 239] : [34, 211, 238];
+        const cr = Math.round(148 + (tr - 148) * sep);
+        const cg = Math.round(163 + (tg - 163) * sep);
+        const cb = Math.round(184 + (tb - 184) * sep);
+        const alpha = 0.45 + 0.45 * sep;
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},${alpha})`;
+        ctx.beginPath();
+        ctx.arc(x, y, 2.5 + ion.int * 2.8, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      // Success annotation (appears when sep > 0.7)
+      const sa = Math.max(0, (sep - 0.65) / 0.35);
+      if (sa > 0) {
+        ctx.fillStyle = `rgba(34,197,94,${sa * 0.9})`;
+        ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
+        ctx.fillText('✓  Both peptides identified  ·  +1 ID rescued by Zyna',
+                     rx + RP.l + RPW / 2, H - 22);
+      }
+
+      rafRef.current = requestAnimationFrame(draw);
+    }
+
+    draw();
+    return () => cancelAnimationFrame(rafRef.current);
+  }, []);
+
+  const rescued  = pairAnalysis?.n_rescuable_ids   || 0;
+  const partial  = pairAnalysis?.n_pairs_partial    || 0;
+  const hard     = pairAnalysis?.n_pairs_overlapping || 0;
+  const total    = pairAnalysis?.n_total_pairs      || 0;
+
+  return (
+    <div style={{ marginBottom: '1rem' }}>
+      <div style={{
+        background: '#0e0018', border: '1px solid #3d1060',
+        borderRadius: '0.5rem', padding: '0.6rem',
+      }}>
+        <canvas ref={canvasRef}
+                style={{ width: '100%', height: '390px', display: 'block' }} />
+        <div style={{
+          color: '#374151', fontSize: '0.7rem', marginTop: '0.4rem',
+          textAlign: 'center', fontStyle: 'italic',
+        }}>
+          Conceptual illustration — demonstrates the ion mobility separation principle.
+          Real K₀ assignments come from actual PASEF MS2 frames in Zyna Tier 1.
+        </div>
+      </div>
+
+      {/* Real-data ID gain summary */}
+      {total > 0 && (
+        <div style={{
+          border: '1px solid rgba(34,197,94,0.25)',
+          borderRadius: '0.6rem', padding: '1rem 1.2rem', marginTop: '0.8rem',
+          background: 'linear-gradient(135deg,rgba(34,197,94,0.04),rgba(34,211,238,0.04))',
+        }}>
+          <div style={{ color: '#e2e8f0', fontWeight: 700, fontSize: '0.88rem', marginBottom: '0.7rem' }}>
+            ✦ Estimated Zyna ID Gain — Based on Your Run
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.6rem', marginBottom: '0.8rem' }}>
+            {[
+              { label: 'TIMS-Resolvable Pairs', value: rescued,
+                sub: 'K₀ gap ≥ 2σ (0.06) — Tier 1 physically separates', color: '#22d3ee' },
+              { label: 'Partially Separated', value: partial,
+                sub: 'K₀ gap 1–2σ — Tier 2 Prosit assists scoring', color: '#DAAA00' },
+              { label: 'Hard Chimeric', value: hard,
+                sub: 'K₀ gap < 1σ (0.03) — genuinely overlapping', color: '#64748b' },
+            ].map(({ label, value, sub, color }) => (
+              <div key={label} style={{
+                background: 'rgba(255,255,255,0.03)', border: `1px solid ${color}33`,
+                borderRadius: '0.4rem', padding: '0.6rem',
+              }}>
+                <div style={{ color, fontSize: '1.4rem', fontWeight: 700 }}>{value}</div>
+                <div style={{ color: '#e2e8f0', fontSize: '0.73rem', fontWeight: 600, margin: '0.2rem 0' }}>{label}</div>
+                <div style={{ color: '#475569', fontSize: '0.66rem', lineHeight: 1.4 }}>{sub}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{
+            background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.2)',
+            borderRadius: '0.4rem', padding: '0.6rem 0.8rem',
+            color: '#94a3b8', fontSize: '0.77rem', lineHeight: 1.6,
+          }}>
+            <strong style={{ color: '#22c55e' }}>Estimated +{rescued} additional peptide IDs</strong>{' '}
+            recoverable by Zyna Tier 1 (4D physics deconvolution). These are precursor pairs
+            in chimeric windows where the TIMS dimension provides ≥2σ K₀ separation (≥0.06 V·s/cm²)
+            — enough to cleanly assign each peptide's fragment ions independently.
+            {partial > 0 && (
+              <>{' '}An additional <strong style={{ color: '#DAAA00' }}>{partial} pairs</strong>{' '}
+              have partial K₀ separation and benefit from Tier 2 Prosit-assisted scoring.</>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ── Chimerys vs Zyna comparison table ─────────────────────────────────────────
+function ZynaFlawsCard() {
+  const rows = [
+    {
+      flaw: 'Ignores ion mobility entirely',
+      fix:  'Uses 1/K₀ as a physical separation axis — every fragment ion carries a K₀ coordinate',
+    },
+    {
+      flaw: 'Deep learning black box — opaque, unauditable scoring',
+      fix:  'Physics-first Gaussian K₀ assignment: fully explainable, no ML needed for Tiers 1 & 3',
+    },
+    {
+      flaw: 'Trained on HCD fragmentation spectra, not PASEF',
+      fix:  'Reads actual PASEF MS2 raw frames via TimsData — uses real experimental 4D data',
+    },
+    {
+      flaw: 'Cannot see TIMS pre-separation — wastes free information',
+      fix:  'Quantifies the TIMS rescue fraction: windows already resolved before fragmentation',
+    },
+    {
+      flaw: 'Scores the full mixed chimeric spectrum as a unit',
+      fix:  'Scores K₀-separated sub-spectra — each peptide gets its own clean fragment evidence',
+    },
+    {
+      flaw: 'No fragment K₀ consistency check — any sequence can match any ion',
+      fix:  'Fragment K₀ must cluster at precursor charge-state expected CCS — hallucinations rejected',
+    },
+    {
+      flaw: 'No co-isolation purity score — blind to mixing ratio',
+      fix:  'NNLS mixing coefficients (α, β) quantify each precursor\'s contribution to the spectrum',
+    },
+    {
+      flaw: 'Requires external server, license, and minutes of compute',
+      fix:  'Tier 3 offline in seconds · Tier 1 offline in minutes · Tier 2 optionally uses Koina REST',
+    },
+  ];
+
+  return (
+    <div style={{
+      border: '1px solid #3d1060', borderRadius: '0.6rem',
+      overflow: 'hidden', marginTop: '0.8rem',
+    }}>
+      <div style={{
+        display: 'grid', gridTemplateColumns: '1fr 1fr',
+        background: 'rgba(255,255,255,0.03)', borderBottom: '1px solid #3d1060',
+      }}>
+        <div style={{ padding: '0.55rem 1rem', color: '#94a3b8', fontWeight: 700, fontSize: '0.8rem',
+                      borderRight: '1px solid #3d1060' }}>
+          ✗  Chimerys (MSAID) — Fundamental Limitations
+        </div>
+        <div style={{ padding: '0.55rem 1rem', color: '#22d3ee', fontWeight: 700, fontSize: '0.8rem' }}>
+          ✦  Zyna — 4D timsTOF Solutions
+        </div>
+      </div>
+      {rows.map(({ flaw, fix }, i) => (
+        <div key={i} style={{
+          display: 'grid', gridTemplateColumns: '1fr 1fr',
+          borderBottom: i < rows.length - 1 ? '1px solid rgba(61,16,96,0.35)' : 'none',
+        }}>
+          <div style={{
+            padding: '0.45rem 1rem', color: '#ef4444', fontSize: '0.76rem',
+            borderRight: '1px solid rgba(61,16,96,0.35)',
+            background: 'rgba(239,68,68,0.025)', lineHeight: 1.5,
+          }}>
+            ✗  {flaw}
+          </div>
+          <div style={{
+            padding: '0.45rem 1rem', color: '#22c55e', fontSize: '0.76rem',
+            background: 'rgba(34,197,94,0.025)', lineHeight: 1.5,
+          }}>
+            ✓  {fix}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

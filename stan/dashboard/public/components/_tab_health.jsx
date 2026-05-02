@@ -1,3 +1,145 @@
+    // ── Ground Control Mission Banner ─────────────────────────────────────────
+    function HealthMissionBanner({ summary }) {
+      const canvasRef = useRef(null);
+      const phaseRef  = useRef(0);
+      const rafRef    = useRef(null);
+      const frameRef  = useRef(0);
+
+      useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const W = canvas.offsetWidth || 1040;
+        const H = 108;
+        canvas.width  = W;
+        canvas.height = H;
+        const ctx = canvas.getContext('2d');
+
+        const stars = Array.from({length: 90}, () => ({
+          x: Math.random() * W, y: Math.random() * H,
+          r: Math.random() * 0.9 + 0.2, tw: Math.random() * Math.PI * 2,
+        }));
+
+        const blips = Array.from({length: 14}, (_, i) => ({
+          x: 22 + i * Math.floor((W - 44) / 14),
+          y: H * 0.72 + (Math.random() - 0.5) * 14,
+          on: Math.random() > 0.4,
+          timer: Math.floor(Math.random() * 80),
+        }));
+
+        // Small oscilloscope data for right side
+        const wavePoints = Array.from({length: 60}, (_, i) => ({
+          phase: i * 0.22, amp: 0.4 + Math.random() * 0.3,
+        }));
+
+        function draw() {
+          phaseRef.current += 0.018;
+          frameRef.current++;
+          const ph  = phaseRef.current;
+          const frm = frameRef.current;
+
+          ctx.fillStyle = '#020b04';
+          ctx.fillRect(0, 0, W, H);
+
+          // Grid
+          ctx.strokeStyle = 'rgba(0,255,65,0.055)';
+          ctx.lineWidth = 0.5;
+          for (let x = 0; x < W; x += 55) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+          for (let y = 0; y < H; y += 22) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+          // Stars
+          stars.forEach(s => {
+            s.tw += 0.022;
+            const a = 0.15 + 0.12 * Math.sin(s.tw);
+            ctx.fillStyle = `rgba(160,255,180,${a})`;
+            ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+          });
+
+          // Oscilloscope trace (right side)
+          const oscX = W - 220, oscW = 200, oscY = H * 0.3, oscH = H * 0.42;
+          ctx.strokeStyle = 'rgba(0,255,65,0.18)'; ctx.lineWidth = 1;
+          ctx.strokeRect(oscX - 1, oscY - oscH/2 - 1, oscW + 2, oscH + 2);
+          ctx.strokeStyle = 'rgba(0,255,65,0.55)'; ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          wavePoints.forEach((wp, i) => {
+            const x = oscX + (i / (wavePoints.length - 1)) * oscW;
+            const y = oscY + Math.sin(wp.phase + ph * 2.5) * wp.amp * oscH * 0.45;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+          ctx.fillStyle = 'rgba(0,255,65,0.3)'; ctx.font = '7px monospace'; ctx.textAlign = 'left';
+          ctx.fillText('TIMS SIGNAL', oscX + 2, oscY - oscH/2 - 4);
+
+          // Title area
+          ctx.fillStyle = '#00ff41';
+          ctx.font = 'bold 22px monospace';
+          ctx.textAlign = 'left';
+          ctx.fillText('GROUND CONTROL', 22, H * 0.41);
+
+          ctx.fillStyle = '#f59e0b';
+          ctx.font = '10px monospace';
+          ctx.fillText('TO MAJOR TOM  ·  INSTRUMENT HEALTH MISSION SYSTEMS MONITOR', 22, H * 0.63);
+
+          // Blinking status indicator
+          const pct = summary?.pctPass;
+          let stText = 'AWAITING TELEMETRY…', stColor = '#475569';
+          if (pct != null) {
+            if (pct >= 80)  { stText = 'ALL SYSTEMS NOMINAL';      stColor = '#00ff41'; }
+            else if (pct >= 60) { stText = 'CAUTION — CHECK SYSTEMS'; stColor = '#f59e0b'; }
+            else                { stText = 'CRITICAL — ANOMALY DETECTED'; stColor = '#ef4444'; }
+          }
+          const blink = Math.sin(ph * 4.5) > 0;
+          ctx.fillStyle = blink ? stColor : stColor + '55';
+          ctx.font = 'bold 10px monospace'; ctx.textAlign = 'right';
+          ctx.fillText((blink ? '◈ ' : '◇ ') + stText, W - 230, H * 0.43);
+
+          if (summary?.total) {
+            ctx.fillStyle = 'rgba(0,255,65,0.5)'; ctx.font = '9px monospace';
+            ctx.fillText(`MISSIONS LOGGED: ${summary.total}`, W - 230, H * 0.62);
+          }
+
+          // Scrolling telemetry ticker
+          ctx.strokeStyle = 'rgba(0,255,65,0.1)'; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(0, H - 18); ctx.lineTo(W, H - 18); ctx.stroke();
+          const scrollX = W - ((frm * 0.55) % (W + 620));
+          ctx.fillStyle = 'rgba(0,255,65,0.3)'; ctx.font = '8px monospace'; ctx.textAlign = 'left';
+          ctx.fillText(
+            '▶  LEVEY-JENNINGS TELEMETRY  ·  TIMS ION MOBILITY  ·  LC SYSTEM HEALTH  ·  RADAR SIGNAL PROFILE  ·  QC GATE STATUS  ·  ANOMALY DETECTION  ·  CCS DRIFT MONITOR  ·  ',
+            scrollX, H - 5
+          );
+
+          // Blips
+          blips.forEach(blip => {
+            blip.timer++;
+            if (blip.timer > 55 + Math.random() * 70) { blip.on = !blip.on; blip.timer = 0; }
+            if (blip.x < W - 230) {
+              ctx.fillStyle = `rgba(0,255,65,${blip.on ? 0.75 : 0.12})`;
+              ctx.font = '8px monospace'; ctx.textAlign = 'center';
+              ctx.fillText(blip.on ? '◈' : '◇', blip.x, blip.y);
+            }
+          });
+
+          rafRef.current = requestAnimationFrame(draw);
+        }
+
+        draw();
+        return () => cancelAnimationFrame(rafRef.current);
+      }, [summary?.pctPass, summary?.total]);
+
+      return (
+        <div style={{ marginBottom: '1rem' }}>
+          <canvas
+            ref={canvasRef}
+            style={{
+              width: '100%', height: '108px', display: 'block',
+              borderRadius: '0.5rem',
+              border: '1px solid rgba(0,255,65,0.18)',
+              boxShadow: '0 0 24px rgba(0,255,65,0.04) inset, 0 0 8px rgba(0,255,65,0.06)',
+            }}
+          />
+        </div>
+      );
+    }
+
     function HealthTab({ pinnedRunIds, setPinnedRunIds }) {
       const { data: allRuns, loading } = useFetch('/api/runs?limit=1000');
       const [instrFilter, setInstrFilter] = useState('All');
@@ -232,6 +374,9 @@
 
       return (
         <div>
+          {/* Ground Control Mission Banner */}
+          <HealthMissionBanner summary={summary} />
+
           {/* Pin banner */}
           {hasPins && (
             <div style={{display:'flex', gap:'0.5rem', alignItems:'center', padding:'0.4rem 0.75rem', marginBottom:'0.75rem', background:'rgba(218,170,0,0.08)', border:'1px solid rgba(218,170,0,0.3)', borderRadius:'0.45rem', fontSize:'0.83rem', flexWrap:'wrap'}}>
@@ -241,8 +386,8 @@
           )}
 
           {/* Filter bar */}
-          <div className="card" style={{marginBottom:'1rem',display:'flex',gap:'1rem',alignItems:'center',flexWrap:'wrap'}}>
-            <strong style={{color:'var(--accent)'}}>Instrument Health</strong>
+          <div className="card" style={{marginBottom:'1rem',display:'flex',gap:'1rem',alignItems:'center',flexWrap:'wrap',borderColor:'rgba(0,255,65,0.18)'}}>
+            <strong style={{color:'#00ff41',fontFamily:'monospace',letterSpacing:'0.08em',fontSize:'0.88rem'}}>◈ MISSION SYSTEMS</strong>
             <label style={{color:'var(--muted)',fontSize:'0.85rem',display:'flex',alignItems:'center',gap:'0.4rem'}}>
               Instrument:
               <select value={instrFilter} onChange={e => setInstrFilter(e.target.value)}
@@ -262,28 +407,31 @@
             <span style={{marginLeft:'auto',color:'var(--muted)',fontSize:'0.8rem'}}>{filteredRuns.length} runs</span>
           </div>
 
-          {/* Your Lab Summary Cards */}
+          {/* Mission Status Board */}
           {summary && (
             <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:'0.75rem',marginBottom:'1rem'}}>
               {[
-                { label: 'Total Runs',  value: summary.total,                    color: '#60a5fa' },
+                { label: 'MISSIONS LOGGED', value: summary.total,                    color: '#00ff41' },
                 {
-                  label: summary.rated > 0 ? `Pass Rate (${summary.rated} rated)` : 'Pass Rate',
+                  label: summary.rated > 0 ? `NOMINAL RATE (${summary.rated})` : 'NOMINAL RATE',
                   value: summary.pctPass != null ? `${summary.pctPass}%` : '—',
-                  color: summary.pctPass == null ? '#4a5568' : summary.pctPass >= 80 ? '#22c55e' : summary.pctPass >= 60 ? '#eab308' : '#ef4444',
+                  color: summary.pctPass == null ? '#4a5568' : summary.pctPass >= 80 ? '#00ff41' : summary.pctPass >= 60 ? '#f59e0b' : '#ef4444',
                   title: summary.unrated > 0 ? `${summary.unrated} run${summary.unrated !== 1 ? 's' : ''} have no gate result (processed before thresholds were configured)` : null,
                 },
-                { label: '✓ Pass',      value: summary.pass,                     color: '#22c55e' },
-                { label: '⚠ Warn',      value: summary.warn,                     color: '#eab308' },
-                { label: '✗ Fail',      value: summary.fail,                     color: '#ef4444' },
-                ...(summary.unrated > 0 ? [{ label: '○ Unrated', value: summary.unrated, color: '#4a5568', title: 'Runs processed before thresholds.yml was configured. Set up thresholds and re-run to rate these.' }] : []),
-                { label: 'Best Run',    value: summary.bestPrec ? summary.bestPrec.toLocaleString() : 'N/A', color: '#DAAA00' },
-                { label: 'Mean Prec.',  value: summary.meanPrec ? summary.meanPrec.toLocaleString() : 'N/A', color: '#a78bfa' },
-                { label: 'Last Run',    value: summary.lastRun ? summary.lastRun.run_date.substring(0,10) : 'N/A', color: '#a0b4cc' },
+                { label: '◈ NOMINAL',    value: summary.pass, color: '#00ff41' },
+                { label: '⚠ CAUTION',    value: summary.warn, color: '#f59e0b' },
+                { label: '✗ CRITICAL',   value: summary.fail, color: '#ef4444' },
+                ...(summary.unrated > 0 ? [{ label: '○ UNRATED', value: summary.unrated, color: '#4a5568', title: 'Runs processed before thresholds.yml was configured. Set up thresholds and re-run to rate these.' }] : []),
+                { label: 'PEAK SIGNAL',  value: summary.bestPrec ? summary.bestPrec.toLocaleString() : 'N/A', color: '#DAAA00' },
+                { label: 'AVG SIGNAL',   value: summary.meanPrec ? summary.meanPrec.toLocaleString() : 'N/A', color: '#a78bfa' },
+                { label: 'LAST CONTACT', value: summary.lastRun ? summary.lastRun.run_date.substring(0,10) : 'N/A', color: '#a0b4cc' },
               ].map(({ label, value, color, title }) => (
-                <div key={label} className="card" style={{textAlign:'center',padding:'0.75rem',margin:0}} title={title || ''}>
-                  <div style={{fontSize:'1.4rem',fontWeight:700,color,fontVariantNumeric:'tabular-nums'}}>{value}</div>
-                  <div style={{fontSize:'0.75rem',color:'var(--muted)',marginTop:'0.25rem'}}>{label}</div>
+                <div key={label} className="card" style={{textAlign:'center',padding:'0.75rem',margin:0,
+                  borderColor: color === '#00ff41' ? 'rgba(0,255,65,0.2)' : undefined,
+                  background: color === '#00ff41' ? 'rgba(0,255,65,0.025)' : undefined,
+                }} title={title || ''}>
+                  <div style={{fontSize:'1.4rem',fontWeight:700,color,fontVariantNumeric:'tabular-nums',fontFamily:'monospace'}}>{value}</div>
+                  <div style={{fontSize:'0.68rem',color:'var(--muted)',marginTop:'0.25rem',fontFamily:'monospace',letterSpacing:'0.06em'}}>{label}</div>
                 </div>
               ))}
             </div>
@@ -294,7 +442,7 @@
             {/* Instrument Health Fingerprint */}
             <div className="card" style={{margin:0}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'0.4rem'}}>
-                <h3 style={{margin:0}}>Instrument Health Fingerprint</h3>
+                <h3 style={{margin:0,color:'#00ff41',fontFamily:'monospace',letterSpacing:'0.05em',fontSize:'0.9rem'}}>◈ SIGNAL PROFILE RADAR</h3>
                 {filteredRuns.length >= 2 && <ExportBtn plotRef={radarRef} filename={`${instrFilter}-health-fingerprint`} />}
               </div>
               <p style={{color:'var(--muted)',fontSize:'0.78rem',marginBottom:'0.5rem'}}>
@@ -309,7 +457,7 @@
 
             {/* LC / System breakdown */}
             <div className="card" style={{margin:0}}>
-              <h3 style={{marginBottom:'0.5rem'}}>LC System Breakdown</h3>
+              <h3 style={{marginBottom:'0.5rem',color:'#f59e0b',fontFamily:'monospace',letterSpacing:'0.05em',fontSize:'0.9rem'}}>⊛ FLIGHT SYSTEMS ANALYSIS</h3>
               {(() => {
                 const groups = {};
                 (allRuns || []).forEach(r => {
@@ -355,11 +503,11 @@
           </div>
 
           {/* Levey-Jennings Control Charts */}
-          <div className="card" style={{marginBottom:'1rem'}}>
-            <h3 style={{marginBottom:'0.25rem'}}>QC Control Charts (Levey-Jennings)</h3>
+          <div className="card" style={{marginBottom:'1rem', borderColor:'rgba(0,255,65,0.12)'}}>
+            <h3 style={{marginBottom:'0.25rem',color:'#00ff41',fontFamily:'monospace',letterSpacing:'0.05em',fontSize:'0.9rem'}}>◈ MISSION TELEMETRY — LEVEY-JENNINGS CONTROL FEEDS</h3>
             <p style={{color:'var(--muted)',fontSize:'0.78rem',marginBottom:'0.75rem'}}>
-              Green band = ±1σ, yellow = ±2σ, red = ±3σ from your long-run mean.
-              Points outside ±2σ (yellow/red) warrant investigation.
+              Green band = ±1σ · yellow = ±2σ · red = ±3σ from long-run mean.
+              Points outside ±2σ trigger CAUTION · outside ±3σ trigger CRITICAL alert.
             </p>
             <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'0.75rem'}}>
               {HEALTH_METRICS.map((m, i) => {
@@ -387,7 +535,7 @@
           {(mobStats || filteredRuns.some(r => r.raw_path && r.raw_path.endsWith('.d'))) && (
             <div className="card" style={{marginBottom:'1rem'}}>
               <div style={{display:'flex',alignItems:'center',gap:'0.75rem',marginBottom:'0.5rem',flexWrap:'wrap'}}>
-                <h3 style={{margin:0}}>Ion Mobility Fingerprint</h3>
+                <h3 style={{margin:0,color:'#22d3ee',fontFamily:'monospace',letterSpacing:'0.05em',fontSize:'0.9rem'}}>∿ 4D TIMS SENSOR ARRAY</h3>
                 {mobRun && <span style={{fontSize:'0.78rem',color:'var(--muted)',fontStyle:'italic'}}>{mobRun.run_name}</span>}
                 <span style={{marginLeft:'auto',fontSize:'0.75rem',padding:'0.15rem 0.5rem',background:'rgba(34,211,238,0.12)',color:'#22d3ee',borderRadius:'0.3rem',border:'1px solid rgba(34,211,238,0.25)'}}>timsTOF · TIMS</span>
               </div>
@@ -466,7 +614,7 @@
 
           {/* Understanding the Metrics — expandable accordion */}
           <div className="card">
-            <h3 style={{marginBottom:'0.75rem'}}>Understanding the Metrics</h3>
+            <h3 style={{marginBottom:'0.75rem',color:'#f59e0b',fontFamily:'monospace',letterSpacing:'0.05em',fontSize:'0.9rem'}}>⊛ MISSION BRIEFING — METRIC DECODER</h3>
             <div style={{display:'flex',flexDirection:'column',gap:'0.4rem'}}>
               {METRIC_EXPLAINERS.map(({ key, title, color, body }) => {
                 const isOpen = openMetric === key;
