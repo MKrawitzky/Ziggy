@@ -305,6 +305,374 @@
       );
     }
 
+    // ── Zyna vs Chimerys animated explainer ──────────────────────────────���───────
+    function ZynaVsChimerys() {
+      const cvRef  = React.useRef(null);
+      const rafRef = React.useRef(null);
+
+      React.useEffect(() => {
+        const cv = cvRef.current;
+        if (!cv) return;
+        const W = cv.width = 900, H = cv.height = 430;
+        const ctx = cv.getContext('2d');
+
+        // Fragment ions — 20 from peptide A (violet), 20 from peptide B (cyan)
+        const K0_A = 0.88, K0_B = 1.04;    // precursor 1/K₀
+        const K0_SIG = 0.04;               // TIMS trap width
+
+        const fragments = Array.from({length: 40}, (_, i) => {
+          const isA = i < 20;
+          const baseK0 = isA ? K0_A : K0_B;
+          return {
+            mz:    200 + Math.random() * 600,
+            k0:    baseK0 + (Math.random() - 0.5) * K0_SIG * 2,
+            int:   0.3 + Math.random() * 0.7,
+            isA,
+            phase: Math.random() * Math.PI * 2,
+          };
+        });
+
+        let t = 0;
+
+        function draw() {
+          t += 0.018;
+          ctx.fillStyle = '#06000f';
+          ctx.fillRect(0, 0, W, H);
+
+          const CYAN = '#22d3ee', VIO = '#d946ef', GOLD = '#DAAA00';
+          const RED = '#ef4444', GRN = '#22c55e';
+          const MID = W / 2;
+
+          // ── Section divider ────────────────────��────────────────────────
+          ctx.strokeStyle = 'rgba(168,85,247,0.2)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 8]);
+          ctx.beginPath(); ctx.moveTo(MID, 0); ctx.lineTo(MID, H); ctx.stroke();
+          ctx.setLineDash([]);
+
+          // VS label
+          const vsAlpha = 0.5 + 0.4 * Math.sin(t * 1.3);
+          ctx.globalAlpha = vsAlpha;
+          ctx.fillStyle = '#a855f7';
+          ctx.font = 'bold 18px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('VS', MID, H / 2 + 6);
+          ctx.globalAlpha = 1;
+
+          // ───────────────────────────��─────────────────────────────���─────
+          //  LEFT: Chimerys approach — 2D (m/z × intensity)
+          // ───────────────────────────────────────────────────────────────
+          const LW = MID - 24, LH = H - 120;
+          const LX = 12, LY = 65;
+
+          ctx.strokeStyle = RED + '44';
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.roundRect(LX - 2, LY - 40, LW + 4, LH + 58, 6);
+          ctx.fillStyle = 'rgba(239,68,68,0.025)';
+          ctx.fill(); ctx.stroke();
+
+          ctx.fillStyle = RED;
+          ctx.font = 'bold 11px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('CHIMERYS / Standard DIA-NN', LX + LW / 2, LY - 22);
+          ctx.fillStyle = '#475569';
+          ctx.font = '9px monospace';
+          ctx.fillText('sees: m/z × intensity only  (2D)', LX + LW / 2, LY - 8);
+
+          // Spectrum bars — all mixed together
+          const barW = (LW - 20) / 40;
+          fragments.forEach((f, i) => {
+            const x   = LX + 10 + i * barW;
+            const barH = f.int * (LH - 30) * (0.95 + 0.05 * Math.sin(t + f.phase));
+            // Without K0, all bars look the same — mixed colors
+            const mix = 0.5 + 0.5 * Math.sin(t * 0.7 + f.phase);
+            const r = Math.round(217 * (1 - mix) + 34  * mix);
+            const g = Math.round(70  * (1 - mix) + 211 * mix);
+            const b = Math.round(239 * (1 - mix) + 238 * mix);
+            ctx.fillStyle = `rgba(${r},${g},${b},0.65)`;
+            ctx.fillRect(x, LY + LH - 28 - barH, barW - 1, barH);
+          });
+
+          // Axis
+          ctx.strokeStyle = '#3d1060';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(LX + 8, LY + 10); ctx.lineTo(LX + 8, LY + LH - 28);
+          ctx.lineTo(LX + LW - 4, LY + LH - 28); ctx.stroke();
+
+          ctx.fillStyle = '#4a5568';
+          ctx.font = '9px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('m/z →', LX + LW / 2, LY + LH - 12);
+          ctx.save(); ctx.translate(LX + 18, LY + LH / 2);
+          ctx.rotate(-Math.PI / 2);
+          ctx.fillText('intensity', 0, 0);
+          ctx.restore();
+
+          // Problem label
+          ctx.fillStyle = 'rgba(239,68,68,0.15)';
+          ctx.beginPath();
+          ctx.roundRect(LX + 4, LY + LH - 6, LW - 8, 20, 3);
+          ctx.fill();
+          ctx.fillStyle = RED;
+          ctx.font = 'bold 9px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('✗ Peptide A + B mixed · must infer by sequence deep learning', LX + LW / 2, LY + LH + 9);
+
+          // Chimerys badge
+          ctx.fillStyle = 'rgba(239,68,68,0.1)';
+          ctx.beginPath();
+          ctx.roundRect(LX + LW / 2 - 60, LY - 38, 120, 14, 3);
+          ctx.fill();
+          ctx.fillStyle = '#7f1d1d';
+          ctx.font = '8px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('CLOUD ONLY · LOGIN REQUIRED', LX + LW / 2, LY - 28);
+
+          // ───────────────────────────────────────────────────────────────
+          //  RIGHT: Zyna approach — 4D (m/z × intensity × 1/K₀)
+          // ───────────────────────────────────────────────────────────────
+          const RX = MID + 12, RY = 65, RW = MID - 24, RH = H - 120;
+
+          ctx.strokeStyle = VIO + '44';
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.roundRect(RX - 2, RY - 40, RW + 4, RH + 58, 6);
+          ctx.fillStyle = 'rgba(217,70,239,0.025)';
+          ctx.fill(); ctx.stroke();
+
+          ctx.fillStyle = VIO;
+          ctx.font = 'bold 11px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('ZYNA — 4D Deconvolution', RX + RW / 2, RY - 22);
+          ctx.fillStyle = '#475569';
+          ctx.font = '9px monospace';
+          ctx.fillText('sees: m/z × intensity × 1/K₀  (4D)', RX + RW / 2, RY - 8);
+
+          // 4D scatter plot: m/z on X, 1/K₀ on Y (small)
+          const scatterH = RH * 0.44;
+          const k0Lo = 0.75, k0Hi = 1.18;
+          const mzLo = 200,  mzHi = 800;
+          const toSX = mz => RX + 20 + (mz - mzLo) / (mzHi - mzLo) * (RW - 30);
+          const toSY = k0 => RY + scatterH - (k0 - k0Lo) / (k0Hi - k0Lo) * scatterH;
+
+          // Scatter background
+          ctx.fillStyle = 'rgba(0,0,0,0.3)';
+          ctx.fillRect(RX + 18, RY, RW - 26, scatterH + 2);
+
+          // Precursor 1/K₀ lines
+          const lineYA = toSY(K0_A + Math.sin(t * 0.4) * 0.002);
+          const lineYB = toSY(K0_B + Math.sin(t * 0.4 + 1) * 0.002);
+          ctx.strokeStyle = VIO + '55'; ctx.lineWidth = 1; ctx.setLineDash([3, 6]);
+          ctx.beginPath(); ctx.moveTo(RX + 18, lineYA); ctx.lineTo(RX + RW - 8, lineYA); ctx.stroke();
+          ctx.strokeStyle = CYAN + '55';
+          ctx.beginPath(); ctx.moveTo(RX + 18, lineYB); ctx.lineTo(RX + RW - 8, lineYB); ctx.stroke();
+          ctx.setLineDash([]);
+
+          ctx.fillStyle = VIO; ctx.font = '8px monospace'; ctx.textAlign = 'left';
+          ctx.fillText(`Peptide A  1/K₀=${K0_A}`, RX + RW - 118, lineYA - 3);
+          ctx.fillStyle = CYAN;
+          ctx.fillText(`Peptide B  1/K₀=${K0_B}`, RX + RW - 118, lineYB + 9);
+
+          // Fragment scatter points
+          fragments.forEach(f => {
+            const prob_a = Math.exp(-0.5 * ((f.k0 - K0_A) / K0_SIG) ** 2);
+            const prob_b = Math.exp(-0.5 * ((f.k0 - K0_B) / K0_SIG) ** 2);
+            const pA = prob_a / (prob_a + prob_b + 1e-9);
+            const jitter = Math.sin(t * 0.5 + f.phase) * 0.5;
+            const sx = toSX(f.mz) + jitter;
+            const sy = toSY(f.k0);
+            if (sy < RY || sy > RY + scatterH) return;
+            // Color by assignment probability
+            const r = Math.round(217 * pA + 34 * (1 - pA));
+            const g = Math.round(70  * pA + 211 * (1 - pA));
+            const b = Math.round(239 * pA + 238 * (1 - pA));
+            ctx.fillStyle = `rgba(${r},${g},${b},0.85)`;
+            ctx.beginPath(); ctx.arc(sx, sy, 2.5, 0, Math.PI * 2); ctx.fill();
+          });
+
+          // Scatter axes
+          ctx.strokeStyle = '#3d1060'; ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(RX + 18, RY); ctx.lineTo(RX + 18, RY + scatterH);
+          ctx.lineTo(RX + RW - 8, RY + scatterH); ctx.stroke();
+          ctx.fillStyle = '#4a5568'; ctx.font = '8px monospace'; ctx.textAlign = 'center';
+          ctx.fillText('m/z →', RX + RW / 2, RY + scatterH + 12);
+          ctx.save(); ctx.translate(RX + 10, RY + scatterH / 2); ctx.rotate(-Math.PI / 2);
+          ctx.fillText('1/K₀ →', 0, 0); ctx.restore();
+
+          // Deconvolved spectra (bottom half) — A and B separated
+          const specY = RY + scatterH + 22;
+          const specH = RH - scatterH - 40;
+          const barW2 = (RW - 20) / 40;
+
+          // Peptide A bars (violet, upper half of spec area)
+          const halfSpec = specH / 2 - 4;
+          fragments.filter(f => f.isA).forEach((f, i) => {
+            const x    = RX + 10 + i * barW2 * 2;
+            const prob = Math.exp(-0.5 * ((f.k0 - K0_A) / K0_SIG) ** 2);
+            const prob_b = Math.exp(-0.5 * ((f.k0 - K0_B) / K0_SIG) ** 2);
+            const pA   = prob / (prob + prob_b + 1e-9);
+            const bH   = f.int * pA * halfSpec * (0.95 + 0.05 * Math.sin(t + f.phase));
+            ctx.fillStyle = `rgba(217,70,239,${0.4 + 0.3 * pA})`;
+            ctx.fillRect(x, specY + halfSpec - bH, barW2 * 1.6, bH);
+          });
+
+          // Peptide B bars (cyan)
+          fragments.filter(f => !f.isA).forEach((f, i) => {
+            const x    = RX + 10 + i * barW2 * 2;
+            const prob = Math.exp(-0.5 * ((f.k0 - K0_B) / K0_SIG) ** 2);
+            const prob_a = Math.exp(-0.5 * ((f.k0 - K0_A) / K0_SIG) ** 2);
+            const pB   = prob / (prob + prob_a + 1e-9);
+            const bH   = f.int * pB * halfSpec * (0.95 + 0.05 * Math.sin(t + f.phase));
+            ctx.fillStyle = `rgba(34,211,238,${0.4 + 0.3 * pB})`;
+            ctx.fillRect(x, specY + specH - bH, barW2 * 1.6, bH);
+          });
+
+          // Spec labels
+          ctx.fillStyle = VIO; ctx.font = 'bold 8px monospace'; ctx.textAlign = 'left';
+          ctx.fillText('Peptide A fragments', RX + 10, specY + 10);
+          ctx.fillStyle = CYAN;
+          ctx.fillText('Peptide B fragments', RX + 10, specY + halfSpec + 14);
+
+          // Success label
+          ctx.fillStyle = 'rgba(34,197,94,0.12)';
+          ctx.beginPath(); ctx.roundRect(RX + 4, RY + RH - 6, RW - 8, 20, 3); ctx.fill();
+          ctx.fillStyle = GRN; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center';
+          ctx.fillText('✓ A and B deconvolved by 1/K₀ physics · no ML needed · fully offline', RX + RW / 2, RY + RH + 9);
+
+          // Zyna badge
+          ctx.fillStyle = 'rgba(217,70,239,0.1)';
+          ctx.beginPath(); ctx.roundRect(RX + RW / 2 - 60, RY - 38, 120, 14, 3); ctx.fill();
+          ctx.fillStyle = '#7b21a8'; ctx.font = '8px monospace'; ctx.textAlign = 'center';
+          ctx.fillText('LOCAL · OFFLINE · timsTOF-NATIVE', RX + RW / 2, RY - 28);
+
+          rafRef.current = requestAnimationFrame(draw);
+        }
+
+        draw();
+        return () => cancelAnimationFrame(rafRef.current);
+      }, []);
+
+      return (
+        <div className="card" style={{
+          marginBottom: '1rem',
+          background: 'linear-gradient(160deg,rgba(6,0,15,0.97),rgba(26,0,48,0.9))',
+          border: '1px solid rgba(217,70,239,0.2)',
+        }}>
+          <h3 style={{
+            marginBottom: '0.3rem',
+            background: 'linear-gradient(90deg,#d946ef,#22d3ee)',
+            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+          }}>
+            Zyna: 4D Chimeric Deconvolution — Why It Beats Chimerys
+          </h3>
+          <p style={{color:'#94a3b8',fontSize:'0.82rem',lineHeight:1.65,marginBottom:'0.85rem'}}>
+            Both tools tackle chimeric MS2 spectra — cases where two peptides are co-isolated and
+            co-fragmented. Chimerys uses cloud-based deep learning on <em>(m/z, intensity)</em>.
+            Zyna uses <strong style={{color:'#22d3ee'}}>physics</strong>: in timsTOF data,
+            every fragment ion has a 1/K₀ coordinate. Co-fragmented peptide A and B arrive at different
+            1/K₀ values — a Gaussian assignment model deconvolves them before any sequence matching,
+            fully offline with no login.
+          </p>
+          <canvas ref={cvRef}
+                  style={{width:'100%', height:'430px', borderRadius:'0.5rem',
+                          display:'block', marginBottom:'1rem'}} />
+
+          {/* Comparison table */}
+          <div style={{overflowX:'auto', marginBottom:'1rem'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:'0.8rem'}}>
+              <thead>
+                <tr>
+                  <th style={{padding:'0.35rem 0.6rem',textAlign:'left',color:'#64748b',
+                               fontWeight:600,borderBottom:'1px solid #3d1060',fontSize:'0.75rem'}}>
+                    Capability
+                  </th>
+                  <th style={{padding:'0.35rem 0.6rem',textAlign:'left',color:'#ef4444',
+                               fontWeight:700,borderBottom:'1px solid #3d1060'}}>
+                    Chimerys (MSAID)
+                  </th>
+                  <th style={{padding:'0.35rem 0.6rem',textAlign:'left',color:'#d946ef',
+                               fontWeight:700,borderBottom:'1px solid #3d1060'}}>
+                    Zyna (ZIGGY)
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  ['Deconvolution method',    'Deep neural network on m/z + intensity',             '4D physics: 1/K₀ assignment + cosine scoring'],
+                  ['Ion mobility used',       '✗ None — not available for Orbitrap data',           '✓ Core algorithm — Gaussian 1/K₀ proximity model'],
+                  ['Runs offline',            '✗ Cloud-only (AWS Cognito + REST API)',               '✓ Fully local — TimsData DLL, no internet needed'],
+                  ['Requires login',          '✗ MSAID Platform account required',                  '✓ None — open, embedded in ZIGGY'],
+                  ['Instrument specificity',  'Orbitrap-optimised (also supports timsTOF via cloud)','Native timsTOF only — exploits the 4D structure'],
+                  ['TIMS rescue quantification','✗ Not reported',                                   '✓ Tier 3: TIMS rescue rate — m/z overlaps resolved by TIMS, no deconvolution needed'],
+                  ['Fragment intensity model','Deep learning (ms2 rescore model, GPU-optimised)',    'Tier 1: uniform prior · Tier 2: Prosit REST (Koina)'],
+                  ['Data format',             'Requires MSAID Platform parquet download',            'Direct from analysis.tdf + report.parquet'],
+                  ['Cost',                    'Paid SaaS tier above free limit',                    'Free, open source (ZIGGY Academic License)'],
+                  ['Speed',                   '~mins cloud processing + upload',                    'Tier 3: seconds · Tier 1: ~1 min per run'],
+                ].map(([feat, c, z], i) => (
+                  <tr key={feat} style={{background: i % 2 === 0 ? 'rgba(255,255,255,0.01)' : 'transparent'}}>
+                    <td style={{padding:'0.28rem 0.6rem',color:'#94a3b8',fontWeight:600,
+                                 borderBottom:'1px solid rgba(255,255,255,0.04)',fontSize:'0.77rem'}}>
+                      {feat}
+                    </td>
+                    <td style={{padding:'0.28rem 0.6rem',color: c.startsWith('✗') ? '#7f1d1d' : '#64748b',
+                                 borderBottom:'1px solid rgba(255,255,255,0.04)',fontSize:'0.77rem'}}>
+                      {c}
+                    </td>
+                    <td style={{padding:'0.28rem 0.6rem',color: z.startsWith('✓') ? '#22d3ee' : '#94a3b8',
+                                 borderBottom:'1px solid rgba(255,255,255,0.04)',fontSize:'0.77rem'}}>
+                      {z}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* The 20-30% headline */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '0.6rem',
+            marginBottom: '0.75rem',
+          }}>
+            {[
+              { val: '~30–50%', label: 'of diaPASEF spectra are chimeric in 25 Th windows',
+                color: '#ef4444', note: 'without TIMS separation many co-eluting precursors overlap' },
+              { val: '40–70%', label: 'of m/z overlaps resolved by TIMS before fragmentation',
+                color: '#22d3ee', note: 'Zyna Tier 3 quantifies the "TIMS rescue rate" per run' },
+              { val: '+20–30%', label: 'additional peptide IDs from chimeric rescue',
+                color: '#d946ef', note: 'estimated from chimeric fraction × Tier 1 deconvolution success rate' },
+            ].map(s => (
+              <div key={s.val} style={{
+                background:'rgba(0,0,0,0.35)', border:`1px solid ${s.color}33`,
+                borderRadius:'0.5rem', padding:'0.7rem 0.85rem',
+              }}>
+                <div style={{fontSize:'1.55rem',fontWeight:900,color:s.color,lineHeight:1}}>{s.val}</div>
+                <div style={{fontSize:'0.75rem',color:'#94a3b8',marginTop:'0.3rem',lineHeight:1.5}}>{s.label}</div>
+                <div style={{fontSize:'0.67rem',color:'#4a5568',marginTop:'0.2rem',fontStyle:'italic'}}>{s.note}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{
+            background:'rgba(217,70,239,0.06)', border:'1px solid rgba(217,70,239,0.2)',
+            borderRadius:'0.4rem', padding:'0.7rem 0.9rem',
+            color:'#94a3b8', fontSize:'0.78rem', lineHeight:1.7,
+          }}>
+            <strong style={{color:'#d946ef'}}>The key insight Chimerys can't replicate:</strong>{' '}
+            On timsTOF, fragment ions in a PASEF MS2 frame carry their 1/K₀ coordinate.
+            Fragments from peptide A cluster around A's precursor 1/K₀ (e.g. 0.88 V·s/cm²) and
+            fragments from peptide B cluster around B's (e.g. 1.04 V·s/cm²). Zyna reads these
+            coordinates from the raw TimsData binary, computes per-fragment assignment probabilities,
+            and scores both peptides against their own sub-spectra. This is pure physics — it works
+            even when the two peptides have no sequence similarity, which is where deep learning
+            on intensity patterns struggles most.
+          </div>
+        </div>
+      );
+    }
+
     function AboutTab() {
       const { data: ver } = useFetch('/api/version');
       const [factIdx, setFactIdx] = React.useState(0);
@@ -521,6 +889,18 @@
                          'm/z target finder across run pairs'],
                 },
                 {
+                  icon:'✦', title:'Zyna — 4D Chimeric Deconvolution',
+                  items:[
+                    'Tier 3: PASEF isolation window geometry — chimeric rate map + TIMS rescue fraction',
+                    'Tier 1: 4D physics deconvolution — reads raw TimsData frames, assigns fragments by 1/K₀',
+                    'Tier 2: Prosit-assisted (Koina REST) — learned fragment intensities for close K₀ pairs',
+                    'Chimeric collision map: m/z × 1/K₀ window grid colored by co-isolated precursor count',
+                    '4D precursor scatter: all identified precursors in m/z × 1/K₀ space, color = RT',
+                    'TIMS rescue card: quantifies how much TIMS resolves for free before any ML is applied',
+                    'Fully local · no login · no cloud · timsTOF-native',
+                  ],
+                },
+                {
                   icon:'🌀', title:'Chimerys TIMS Analysis',
                   items:['Novel chimeric collision landscape: m/z × 1/K₀ scatter of co-fragmented precursors',
                          'TIMS separation efficiency: chimeric rate by 1/K₀ bin reveals where IMS fails',
@@ -551,9 +931,10 @@
 
           {/* What's New */}
           <div className="card" style={{marginBottom:'1rem'}}>
-            <h3>What's New · ZIGGY · April 2026</h3>
+            <h3>What's New · ZIGGY · May 2026</h3>
             <div style={{display:'flex', flexDirection:'column', gap:'0.5rem', marginTop:'0.4rem'}}>
               {[
+                {tag:'NEW', color:'var(--pass)', text:'✦ Zyna: 4D Chimeric MS2 Deconvolution — ZIGGY\'s local alternative to MSAID Chimerys. Three tiers: Tier 3 reads diaPASEF isolation windows from analysis.tdf and cross-references DIA-NN precursors to produce a chimeric collision map and TIMS rescue rate (what fraction of m/z-overlapping precursor pairs are already separated by ion mobility before fragmentation — free, no ML). Tier 1 reads raw PASEF MS2 frames via TimsData DLL and assigns each fragment ion to precursor A or B using a Gaussian 1/K₀ proximity model — pure physics, fully offline. Tier 2 uses Prosit REST (Koina) for fragment intensity priors when precursors have similar 1/K₀. The core advantage: Chimerys sees (m/z, intensity) only. Zyna sees (m/z, intensity, 1/K₀) — the 4th dimension is the separation axis.'},
                 {tag:'NEW', color:'var(--pass)', text:'🌀 Chimerys tab: novel 4D chimeric collision analysis powered by MSAID Platform parquets. Groups PSMs by scan proxy (RT_bin=2s × MZ_bin=0.012Da) to map exactly where in m/z × 1/K₀ space TIMS separation breaks down. Panels: Chimeric Collision Landscape (scatter of co-isolated precursors), TIMS Separation Efficiency (chimeric rate by 1/K₀ bin), Peptide Length Distribution, and Stats Summary. Auto-ingests on Config tab download — no manual steps.'},
                 {tag:'NEW', color:'var(--pass)', text:'🔩 Andromeda engine in comparison table: MaxQuant 2.x standalone Andromeda auto-discovered at common install paths. Writes .apar XML parameter file, runs search, parses msms.txt / peptides.txt / proteinGroups.txt. Sky-blue column in Engine Comparison view.'},
                 {tag:'NEW', color:'var(--pass)', text:'🔩 PrOLuCID engine in comparison table: Yates-lab Java search engine. JAR auto-detected at common locations; .d files converted to .ms2 via msconvert (mzXML fallback). SQT output parsed with charge-specific Xcorr cutoffs (z=1: ≥1.5, z=2: ≥2.0, z≥3: ≥2.5). Rose-red column in Engine Comparison view.'},
@@ -841,6 +1222,8 @@
               </div>
             </div>
           </div>
+
+          <ZynaVsChimerys />
 
           <AboutIMSAdvantage />
 

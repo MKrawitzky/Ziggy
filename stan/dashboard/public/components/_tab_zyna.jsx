@@ -470,23 +470,13 @@ function ZynaProfiles({ mzProfile, k0Profile }) {
   const mzRef = React.useRef(null);
   const k0Ref = React.useRef(null);
 
-  React.useEffect(() => {
-    if (!mzProfile?.length) return;
-    drawProfile(mzRef.current, mzProfile, 'Precursor m/z', '#d946ef');
-  }, [mzProfile]);
-
-  React.useEffect(() => {
-    if (!k0Profile?.length) return;
-    drawProfile(k0Ref.current, k0Profile, '1/K₀ (V·s/cm²)', '#22d3ee');
-  }, [k0Profile]);
-
-  function drawProfile(canvas, data, xlabel, color) {
+  function drawProfile(canvas, data, xlabel, rgbaBar) {
     if (!canvas || !data?.length) return;
-    const W = 420, H = 240;
+    const W = 420, H = 260;
     canvas.width  = W;
     canvas.height = H;
     const ctx = canvas.getContext('2d');
-    const PAD = { l: 50, r: 15, t: 25, b: 45 };
+    const PAD = { l: 52, r: 15, t: 30, b: 50 };
     const pw = W - PAD.l - PAD.r;
     const ph = H - PAD.t - PAD.b;
 
@@ -495,35 +485,37 @@ function ZynaProfiles({ mzProfile, k0Profile }) {
 
     const xs    = data.map(d => d.bin_center);
     const rates = data.map(d => d.rate);
+    const tots  = data.map(d => d.n_total);
     const xLo   = Math.min(...xs), xHi = Math.max(...xs);
     const yHi   = Math.max(...rates, 0.05);
+    const maxTot = Math.max(...tots, 1);
 
-    const sx = v => PAD.l + (v - xLo) / (xHi - xLo || 1) * pw;
-    const sy = v => PAD.t + ph - v / yHi * ph;
+    const toX = v => PAD.l + (v - xLo) / (xHi - xLo || 1) * pw;
+    const toY = v => PAD.t + ph - v / yHi * ph;
 
-    // Bars
-    const bw = pw / data.length * 0.8;
+    const bw = pw / data.length * 0.82;
+
+    // Draw bars
     data.forEach(d => {
-      const x    = sx(d.bin_center) - bw / 2;
-      const barH = d.rate / yHi * ph;
+      const x    = toX(d.bin_center) - bw / 2;
+      const barH = Math.max(1, d.rate / yHi * ph);
       const r    = d.rate;
-      const c    = r > 0.4 ? 'rgba(239,68,68,0.7)' : r > 0.2 ? 'rgba(245,158,11,0.7)'
-                   : color.replace(')', ',0.5)').replace('rgb', 'rgba');
-      ctx.fillStyle = c;
+      const fill = r > 0.4 ? 'rgba(239,68,68,0.75)'
+                 : r > 0.2 ? 'rgba(245,158,11,0.75)'
+                 :            rgbaBar;
+      ctx.fillStyle = fill;
       ctx.fillRect(x, PAD.t + ph - barH, bw, barH);
     });
 
-    // Total line
-    const totals = data.map(d => d.n_total);
-    const maxTot = Math.max(...totals);
+    // Window count line (secondary y, dashed)
     if (maxTot > 0) {
-      ctx.strokeStyle = 'rgba(148,163,184,0.4)';
+      ctx.strokeStyle = 'rgba(148,163,184,0.35)';
       ctx.lineWidth = 1;
-      ctx.setLineDash([3, 5]);
+      ctx.setLineDash([3, 6]);
       ctx.beginPath();
       data.forEach((d, i) => {
-        const x = sx(d.bin_center);
-        const y = PAD.t + ph - d.n_total / maxTot * ph * 0.4;
+        const x = toX(d.bin_center);
+        const y = PAD.t + ph - (d.n_total / maxTot) * ph * 0.38;
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.stroke();
@@ -533,50 +525,89 @@ function ZynaProfiles({ mzProfile, k0Profile }) {
     // Axes
     ctx.strokeStyle = '#3d1060';
     ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(PAD.l, PAD.t); ctx.lineTo(PAD.l, PAD.t + ph);
+    ctx.beginPath();
+    ctx.moveTo(PAD.l, PAD.t); ctx.lineTo(PAD.l, PAD.t + ph);
     ctx.lineTo(PAD.l + pw, PAD.t + ph); ctx.stroke();
 
-    // Labels
+    // X tick labels
     ctx.fillStyle = '#64748b';
     ctx.font = '9px monospace';
     ctx.textAlign = 'center';
-    [0, 0.25, 0.5, 0.75, 1].forEach(f => {
-      const v = xLo + f * (xHi - xLo);
-      ctx.fillText(v.toFixed(typeof v === 'number' && v > 100 ? 0 : 2),
-                   PAD.l + f * pw, PAD.t + ph + 12);
-    });
+    const nTicks = Math.min(6, data.length);
+    for (let i = 0; i <= nTicks; i++) {
+      const v  = xLo + i * (xHi - xLo) / nTicks;
+      const px = PAD.l + i * pw / nTicks;
+      ctx.fillText(v.toFixed(v > 100 ? 0 : 2), px, PAD.t + ph + 13);
+    }
+
+    // Y tick labels
     ctx.textAlign = 'right';
     [0, 0.25, 0.5, 0.75, 1].forEach(f => {
-      ctx.fillText(`${(f * yHi * 100).toFixed(0)}%`, PAD.l - 3, sy(f * yHi) + 3);
+      const y = toY(f * yHi);
+      ctx.fillText(`${(f * yHi * 100).toFixed(0)}%`, PAD.l - 4, y + 3);
+      ctx.strokeStyle = 'rgba(61,16,96,0.3)';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(PAD.l + pw, y); ctx.stroke();
     });
 
+    // Axis labels
     ctx.fillStyle = '#64748b';
     ctx.font = '10px monospace';
     ctx.textAlign = 'center';
     ctx.fillText(xlabel, PAD.l + pw / 2, H - 6);
     ctx.save();
-    ctx.translate(12, PAD.t + ph / 2);
+    ctx.translate(13, PAD.t + ph / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.fillText('Chimeric Rate', 0, 0);
     ctx.restore();
 
-    ctx.fillStyle = color;
-    ctx.font = 'bold 10px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(`Chimeric Rate by ${xlabel}`, PAD.l, PAD.t - 8);
+    // Legend: dashed = window count
+    ctx.strokeStyle = 'rgba(148,163,184,0.5)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 6]);
+    ctx.beginPath(); ctx.moveTo(PAD.l + pw - 130, PAD.t + 8); ctx.lineTo(PAD.l + pw - 110, PAD.t + 8); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#475569'; ctx.font = '8px monospace'; ctx.textAlign = 'left';
+    ctx.fillText('window count (scaled)', PAD.l + pw - 107, PAD.t + 12);
   }
 
+  React.useEffect(() => { drawProfile(mzRef.current, mzProfile, 'Precursor m/z (isolation window center)', 'rgba(217,70,239,0.55)'); }, [mzProfile]);
+  React.useEffect(() => { drawProfile(k0Ref.current, k0Profile, '1/K₀ (V·s/cm²)',                          'rgba(34,211,238,0.55)'); }, [k0Profile]);
+
+  const hasK0 = k0Profile && k0Profile.length > 0;
+
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem',
+    <div style={{ display: 'grid', gridTemplateColumns: hasK0 ? '1fr 1fr' : '1fr', gap: '0.8rem',
                   marginBottom: '1rem' }}>
       <div style={{ background: '#0e0018', border: '1px solid #3d1060',
                     borderRadius: '0.5rem', padding: '0.5rem' }}>
-        <canvas ref={mzRef} style={{ width: '100%', height: '240px', display: 'block' }} />
+        <canvas ref={mzRef} style={{ width: '100%', height: '260px', display: 'block' }} />
+        <div style={{ color: '#475569', fontSize: '0.68rem', padding: '0.3rem 0.2rem' }}>
+          Source: diaPASEF isolation windows × DIA-NN identified precursors — real experimental data
+        </div>
       </div>
-      <div style={{ background: '#0e0018', border: '1px solid #3d1060',
-                    borderRadius: '0.5rem', padding: '0.5rem' }}>
-        <canvas ref={k0Ref} style={{ width: '100%', height: '240px', display: 'block' }} />
-      </div>
+      {hasK0 ? (
+        <div style={{ background: '#0e0018', border: '1px solid #3d1060',
+                      borderRadius: '0.5rem', padding: '0.5rem' }}>
+          <canvas ref={k0Ref} style={{ width: '100%', height: '260px', display: 'block' }} />
+          <div style={{ color: '#475569', fontSize: '0.68rem', padding: '0.3rem 0.2rem' }}>
+            Source: TIMS calibration (TimsCalibration table) × isolation window scan range — real experimental data
+          </div>
+        </div>
+      ) : (
+        <div style={{
+          background: '#0e0018', border: '1px solid #3d1060',
+          borderRadius: '0.5rem', padding: '1.5rem',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          gap: '0.5rem', color: '#475569', fontSize: '0.8rem', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '1.5rem' }}>∿</div>
+          <div style={{ color: '#64748b' }}>1/K₀ profile unavailable</div>
+          <div style={{ fontSize: '0.72rem', color: '#374151', maxWidth: '200px', lineHeight: 1.6 }}>
+            TIMS calibration not found in analysis.tdf — 1/K₀ could not be computed for this run's isolation windows.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
