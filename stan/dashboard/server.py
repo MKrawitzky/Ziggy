@@ -3246,6 +3246,141 @@ async def api_chimerys_collision(run_id: str) -> dict:
         return {"available": False, "error": str(exc)}
 
 
+@app.get("/api/runs/{run_id}/zyna/tier3")
+async def api_zyna_tier3(run_id: str) -> dict:
+    """Zyna Tier 3 — PASEF geometry chimeric analysis.
+
+    Reads diaPASEF isolation windows from analysis.tdf and cross-references
+    with DIA-NN identified precursors to produce a chimeric collision map.
+    Also computes the TIMS rescue rate: what fraction of m/z-overlapping
+    precursor pairs are actually separated by ion mobility.
+    """
+    from stan.search.zyna import tier3_chimeric_map
+
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    raw_path = run.get("raw_path", "")
+    if not raw_path or not raw_path.endswith(".d"):
+        return {"available": False, "error": "Not a .d file run"}
+
+    d_path      = Path(raw_path)
+    report_path = _resolve_report_path(run)
+
+    try:
+        return tier3_chimeric_map(d_path, report_path)
+    except Exception as exc:
+        logger.exception("zyna tier3 failed for %s", run_id)
+        return {"available": False, "error": str(exc)}
+
+
+class ZynaTier1Request(BaseModel):
+    seq_a:      str
+    charge_a:   int = 2
+    k0_a:       float
+    seq_b:      str
+    charge_b:   int = 2
+    k0_b:       float
+    frame_id:   int | None = None
+    scan_begin: int = 0
+    scan_end:   int = 1000
+    tolerance_ppm: float = 20.0
+    k0_sigma:   float = 0.03
+
+
+@app.post("/api/runs/{run_id}/zyna/tier1")
+async def api_zyna_tier1(run_id: str, body: ZynaTier1Request) -> dict:
+    """Zyna Tier 1 — 4D chimeric deconvolution via ion mobility physics.
+
+    Reads a raw PASEF MS2 frame and uses the 1/K₀ coordinate of each
+    fragment ion to assign it probabilistically to precursor A or B.
+    No ML, no internet — pure timsTOF 4D physics.
+    """
+    from stan.search.zyna import tier1_4d_deconvolve
+
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    raw_path = run.get("raw_path", "")
+    if not raw_path or not raw_path.endswith(".d"):
+        return {"available": False, "error": "Not a .d file run"}
+
+    try:
+        return tier1_4d_deconvolve(
+            d_path=Path(raw_path),
+            seq_a=body.seq_a,
+            charge_a=body.charge_a,
+            k0_a=body.k0_a,
+            seq_b=body.seq_b,
+            charge_b=body.charge_b,
+            k0_b=body.k0_b,
+            frame_id=body.frame_id,
+            scan_begin=body.scan_begin,
+            scan_end=body.scan_end,
+            tolerance_ppm=body.tolerance_ppm,
+            k0_sigma=body.k0_sigma,
+        )
+    except Exception as exc:
+        logger.exception("zyna tier1 failed for %s", run_id)
+        return {"available": False, "error": str(exc)}
+
+
+class ZynaTier2Request(BaseModel):
+    seq_a:      str
+    charge_a:   int = 2
+    k0_a:       float
+    seq_b:      str
+    charge_b:   int = 2
+    k0_b:       float
+    frame_id:   int | None = None
+    scan_begin: int = 0
+    scan_end:   int = 1000
+    tolerance_ppm: float = 20.0
+    k0_sigma:   float = 0.03
+    ce:         float = 25.0
+
+
+@app.post("/api/runs/{run_id}/zyna/tier2")
+async def api_zyna_tier2(run_id: str, body: ZynaTier2Request) -> dict:
+    """Zyna Tier 2 — Prosit-assisted 4D deconvolution.
+
+    Same 4D physics as Tier 1 but uses Prosit REST (Koina) fragment
+    intensity predictions for improved scoring. Falls back to Tier 1
+    if Prosit is unreachable.
+    """
+    from stan.search.zyna import tier2_4d_deconvolve
+
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    raw_path = run.get("raw_path", "")
+    if not raw_path or not raw_path.endswith(".d"):
+        return {"available": False, "error": "Not a .d file run"}
+
+    try:
+        return await tier2_4d_deconvolve(
+            d_path=Path(raw_path),
+            seq_a=body.seq_a,
+            charge_a=body.charge_a,
+            k0_a=body.k0_a,
+            seq_b=body.seq_b,
+            charge_b=body.charge_b,
+            k0_b=body.k0_b,
+            frame_id=body.frame_id,
+            scan_begin=body.scan_begin,
+            scan_end=body.scan_end,
+            tolerance_ppm=body.tolerance_ppm,
+            k0_sigma=body.k0_sigma,
+            ce=body.ce,
+        )
+    except Exception as exc:
+        logger.exception("zyna tier2 failed for %s", run_id)
+        return {"available": False, "error": str(exc)}
+
+
 @app.get("/api/community/cohort")
 async def api_community_cohort() -> dict:
     """Fetch community cohort data.
